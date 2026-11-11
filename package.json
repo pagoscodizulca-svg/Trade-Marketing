@@ -16,7 +16,8 @@
     "verify:modal-carga": "tsx scripts/verifyCalibracionModalCarga.ts",
     "verify:excel-dates": "tsx scripts/verifyExcelDateNormalizer.ts",
     "verify:excel-parser": "tsx scripts/verifyExcelDateParser.ts",
-    "verify:carga-multiformato": "tsx scripts/verifyRefactorCargaMultiformato.ts"
+    "verify:carga-multiformato": "tsx scripts/verifyRefactorCargaMultiformato.ts",
+    "verify:fdv-restore": "tsx scripts/verifyFdvDegustacionesRestoration.ts"
   },
   "dependencies": {
     "@google/genai": "3.1.0",

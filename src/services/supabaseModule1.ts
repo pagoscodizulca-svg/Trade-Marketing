@@ -14,7 +14,30 @@ import {
   SUPABASE_ANON_KEY as CLIENT_SUPABASE_ANON_KEY,
   SUPABASE_REST_URL as CLIENT_SUPABASE_REST_URL,
   assertSupabaseConfigured,
+  getSupabaseRealtimeClient,
 } from './supabaseClient';
+import {
+  DEFAULT_FDV_RENDER_API_URL,
+  fetchDegustacionSurveysViaSdk,
+  fetchFdvPlanificadorRenderDegustaciones,
+  fetchNonDegustacionSurveysViaSdk,
+  getCronogramaTableSupport,
+  getSurveysLeidoTradeSupport,
+  isMissingColumnPostgrestError,
+  isMissingTablePostgrestError,
+  isVirtualFdvRenderSurveyId,
+  mergeSupabaseAndRenderDegustacionRows,
+  normalizeCanonicalFdvId,
+  normalizeFdvCalendarDateYmd,
+  resolveFdvRequestLifecycle,
+  safeJsonParseObject,
+  sanitizeExternalHttpsUrl,
+  sanitizeFdvText,
+  setCronogramaTableSupport,
+  setSurveysLeidoTradeSupport,
+  syncDecisionToFdvPlanificadorRender,
+  validateFdvRenderEndpoint,
+} from './fdvDegustacionesAdapter';
 
 export const SUPABASE_REST_URL = CLIENT_SUPABASE_REST_URL;
 export const SUPABASE_ANON_KEY = CLIENT_SUPABASE_ANON_KEY;
@@ -26,10 +49,10 @@ function supabaseFetch(input: string, init?: RequestInit): Promise<Response> {
 }
 
 export const FDV_PLANIFICADOR_RENDER_API_URL =
-  ((import.meta as unknown as { env?: Record<string, string | undefined> })?.env
-    ?.VITE_FDV_PLANIFICADOR_API_URL || 'https://dashboard-fdv-planificador.onrender.com/api/degustaciones')
-    .trim()
-    .replace(/\/+$/, '');
+  validateFdvRenderEndpoint(
+    (import.meta as unknown as { env?: Record<string, string | undefined> })?.env
+      ?.VITE_FDV_PLANIFICADOR_API_URL
+  ) || DEFAULT_FDV_RENDER_API_URL;
 
 const supabaseHeaders = (extra?: Record<string, string>): Record<string, string> => ({
   apikey: SUPABASE_ANON_KEY,
@@ -380,17 +403,8 @@ export interface Module1SupabaseBundle {
 // HELPERS DE PARSEO Y FORMATO
 // ============================================================================
 
-function safeParseJson<T = Record<string, any>>(input: unknown): T {
-  if (!input) return {} as T;
-  if (typeof input === 'object') return input as T;
-  if (typeof input === 'string') {
-    try {
-      return JSON.parse(input) as T;
-    } catch {
-      return { originalComments: input } as unknown as T;
-    }
-  }
-  return {} as T;
+function safeParseJson<T extends Record<string, any> = Record<string, any>>(input: unknown): T {
+  return safeJsonParseObject<T>(input);
 }
 
 function toNum(val: unknown, fallback = 0): number {
@@ -410,24 +424,7 @@ export function getTodayVeYmd(): string {
 }
 
 function formatDateYmd(dateStr: string | undefined | null): string {
-  if (!dateStr) return '';
-  const trimmed = String(dateStr).trim();
-  if (!trimmed) return '';
-
-  // Si es un timestamp real con hora distinta de 00:00:00 UTC (ej. check-in en vivo), ajustar a America/Caracas (UTC-4)
-  if (
-    /^\d{4}-\d{2}-\d{2}[T\s](?!00:00(?::00(?:\.0+)?)?(?:Z|[+-]00:?00)?$)\d{2}:\d{2}/i.test(trimmed) &&
-    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
-  ) {
-    const d = new Date(trimmed);
-    if (!Number.isNaN(d.getTime())) {
-      const ve = new Date(d.getTime() - 4 * 60 * 60 * 1000);
-      return ve.toISOString().slice(0, 10);
-    }
-  }
-
-  // Para cualquier fecha de calendario, medianoche UTC, serial de Excel o texto en español/inglés: sin desfase horario
-  return normalizeExcelDate(trimmed).fechaIso ?? '';
+  return normalizeFdvCalendarDateYmd(dateStr);
 }
 
 function formatTimeVe(dateStr: string | undefined | null): string {
@@ -769,10 +766,7 @@ function readPersistedReadLedger(): Record<string, string> {
 }
 
 export function normalizeCanonicalDegustacionId(rawId?: unknown, fallbackSurveyId?: string): string {
-  const candidate = String(rawId || fallbackSurveyId || '')
-    .trim()
-    .replace(/^DEG-/i, '');
-  return candidate || String(fallbackSurveyId || '').trim();
+  return normalizeCanonicalFdvId(rawId, fallbackSurveyId);
 }
 
 export function recordLocalDegustacionReadLedger(
@@ -896,38 +890,31 @@ function isTerminalDegustacionEstado(estadoUpper: string): boolean {
   );
 }
 
-async function fetchSurveysMetadataList(): Promise<RawSupabaseSurvey[]> {
-  const withReadCols =
-    'surveys?select=id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at&order=date.desc&limit=1000';
-  const res = await fetchWithProgressiveRetry(`${SUPABASE_REST_URL}/${withReadCols}`, {
-    method: 'GET',
-    headers: supabaseHeaders(),
-  });
-  if (res.ok) {
-    return (await res.json()) as RawSupabaseSurvey[];
-  }
-  const errText = await res.text().catch(() => '');
-  if (/leido_trade|visto_en_trade_at|PGRST204|42703/i.test(errText)) {
-    return supabaseGet<RawSupabaseSurvey[]>(
-      'surveys?select=id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at&order=date.desc&limit=1000'
-    );
-  }
-  throw new Error(`Supabase GET surveys metadata failed (${res.status}): ${errText}`);
-}
-
 async function fetchCronogramaDegustacionesSafe(): Promise<CronogramaDegustacionRecord[]> {
+  if (getCronogramaTableSupport() === false) {
+    return [];
+  }
   try {
-    const query =
-      'cronograma_degustaciones?select=*&estado=not.in.(RECHAZADA,CANCELADA)&order=fecha.asc,hora_inicio.asc&limit=1000';
-    const res = await fetchWithProgressiveRetry(`${SUPABASE_REST_URL}/${query}`, {
-      method: 'GET',
-      headers: supabaseHeaders({ 'x-codizulca-scope': 'trade_coordinator' }),
-    });
-    if (!res.ok) {
+    const client = getSupabaseRealtimeClient();
+    if (!client) return [];
+
+    const { data, error, status } = await client
+      .from('cronograma_degustaciones')
+      .select('*')
+      .not('estado', 'in', '(RECHAZADA,CANCELADA)')
+      .order('fecha', { ascending: true })
+      .order('hora_inicio', { ascending: true })
+      .limit(1000);
+
+    if (error) {
+      if (isMissingTablePostgrestError(status || error.code || '', error.message)) {
+        setCronogramaTableSupport(false);
+      }
       return [];
     }
-    const rows = (await res.json()) as CronogramaDegustacionRecord[];
-    return Array.isArray(rows) ? rows : [];
+
+    setCronogramaTableSupport(true);
+    return Array.isArray(data) ? (data as CronogramaDegustacionRecord[]) : [];
   } catch {
     return [];
   }
@@ -937,13 +924,21 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
   // Sin tasa de respaldo: si no se puede obtener en vivo, es null y los importes en Bs no se calculan.
   const liveBcvRate: number | null =
     explicitExchangeRateBs && explicitExchangeRateBs > 50 ? explicitExchangeRateBs : await fetchLiveBcvRate();
+
+  const renderReconciliationPromise = fetchFdvPlanificadorRenderDegustaciones({
+    endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
+    timeoutMs: 14000,
+  });
+
   const [
     rawStaff,
     rawCheckinsPage1,
     rawCheckinsPage2,
     rawPrices,
     rawInventory,
-    rawSurveysUnfiltered,
+    rawDegustacionRowsFromDb,
+    rawOtherSurveyRowsFromDb,
+    rawRenderDegustacionRowsFast,
     rawCronogramaRows,
   ] = await Promise.all([
     supabaseGet<RawSupabaseStaff[]>(
@@ -957,7 +952,12 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     ),
     supabaseGet<RawSupabasePrice[]>('prices?select=*&order=date.desc&limit=1000'),
     supabaseGet<RawSupabaseInventory[]>('inventory?select=*&order=date.desc&limit=1000'),
-    fetchSurveysMetadataList(),
+    fetchDegustacionSurveysViaSdk(),
+    fetchNonDegustacionSurveysViaSdk(),
+    Promise.race([
+      renderReconciliationPromise,
+      waitMs(3200).then(() => null),
+    ]),
     fetchCronogramaDegustacionesSafe(),
   ]);
 
@@ -1079,38 +1079,39 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     return resolveActiveMember(r.promoter, r.creatorId) !== null;
   });
 
-  const rawSurveys: RawSupabaseSurvey[] = rawSurveysUnfiltered.filter(
+  const cleanDegustacionSurveys: RawSupabaseSurvey[] = rawDegustacionRowsFromDb.filter(
     (r) => !isSyntheticSurveyOrCheckinRow(r)
   );
+  const cleanOtherSurveys: RawSupabaseSurvey[] = rawOtherSurveyRowsFromDb.filter(
+    (r) => !isSyntheticSurveyOrCheckinRow(r)
+  );
+  const rawSurveys: RawSupabaseSurvey[] = [...cleanDegustacionSurveys, ...cleanOtherSurveys];
+
+  // Si Render respondió después del umbral rápido (ej. cold-start), reconciliar en segundo plano y avisar localmente si hay registros nuevos
+  if (rawRenderDegustacionRowsFast === null) {
+    void renderReconciliationPromise
+      .then((lateRenderRows) => {
+        if (!Array.isArray(lateRenderRows) || lateRenderRows.length === 0) return;
+        const { renderOnlyRows } = mergeSupabaseAndRenderDegustacionRows(
+          cleanDegustacionSurveys,
+          lateRenderRows
+        );
+        for (const newRow of renderOnlyRows) {
+          emitLocalDegustacionSurveyEvent('INSERT', newRow);
+        }
+      })
+      .catch(() => {
+        // Silenciar latencia de cold-start en Render
+      });
+  }
 
   // --------------------------------------------------------------------------
-  // 1. DEGUSTACIONES (surveys where type = 'Degustacion') + VISITS PARA MÓDULO 2
+  // 1. DEGUSTACIONES (surveys where type = 'Degustacion' + reconciliación Render FDV) + VISITS PARA MÓDULO 2
   // --------------------------------------------------------------------------
-  const rawDegustacionSurveys = rawSurveys.filter((s) => s.type === 'Degustacion');
-  // Deduplicación canónica por `degustacionId` (evita duplicados si Render envió POST simultáneo desde server.ts y frontend)
-  const dedupedDegustacionMap = new Map<string, RawSupabaseSurvey>();
-  rawDegustacionSurveys.forEach((row) => {
-    const c = safeParseJson<Record<string, any>>(row.comments);
-    const canonicalKey = normalizeCanonicalDegustacionId(c.degustacionId || c.id, row.id);
-    const prev = dedupedDegustacionMap.get(canonicalKey);
-    if (!prev) {
-      dedupedDegustacionMap.set(canonicalKey, row);
-      return;
-    }
-    const prevC = safeParseJson<Record<string, any>>(prev.comments);
-    const prevScore =
-      (prev.leido_trade === true || prevC.leido_trade === true ? 4 : 0) +
-      (isTerminalDegustacionEstado(String(prevC.estado || '').toUpperCase()) ? 2 : 0) +
-      (prevC.source === 'vendedor_app' ? 1 : 0);
-    const nextScore =
-      (row.leido_trade === true || c.leido_trade === true ? 4 : 0) +
-      (isTerminalDegustacionEstado(String(c.estado || '').toUpperCase()) ? 2 : 0) +
-      (c.source === 'vendedor_app' ? 1 : 0);
-    if (nextScore > prevScore) {
-      dedupedDegustacionMap.set(canonicalKey, row);
-    }
-  });
-  const degustacionSurveys = Array.from(dedupedDegustacionMap.values());
+  const { mergedRows: degustacionSurveys } = mergeSupabaseAndRenderDegustacionRows(
+    cleanDegustacionSurveys,
+    rawRenderDegustacionRowsFast ?? []
+  );
   const tastingItems: TastingScheduleItem[] = [];
   const visitsForSchedule: ScheduledVisit[] = [];
   const todayYmd = getTodayVeYmd();
@@ -1120,10 +1121,10 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const isFromSellerApp = isSellerOriginComments(c);
     const canonicalDegId = normalizeCanonicalDegustacionId(c.degustacionId || c.id, row.id);
     const rawCandidatePromoter =
-      (c.promotoraAsignada && String(c.promotoraAsignada).trim()) ||
+      (c.promotoraAsignada && sanitizeFdvText(c.promotoraAsignada, 140)) ||
       (isFromSellerApp
-        ? String(c.promoter || 'POR ASIGNAR (Trade Marketing)').trim()
-        : (row.promoter || '').trim());
+        ? sanitizeFdvText(c.promoter || 'POR ASIGNAR (Trade Marketing)', 140)
+        : sanitizeFdvText(row.promoter, 140));
 
     const isUnassignedPlaceholder =
       !rawCandidatePromoter ||
@@ -1132,14 +1133,17 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
     let assignedPromoter = 'POR ASIGNAR (Trade Marketing)';
     if (!isUnassignedPlaceholder) {
-      const matchedActive = resolveActiveMember(rawCandidatePromoter, isFromSellerApp ? undefined : row.creatorId);
+      const matchedActive = resolveActiveMember(
+        rawCandidatePromoter,
+        isFromSellerApp ? undefined : row.creatorId
+      );
       if (matchedActive && matchedActive.category !== 'merchandising') {
         assignedPromoter = matchedActive.name;
       } else if (isFromSellerApp) {
         // Si la solicitud de vendedor tenía una promotora dada de baja, queda disponible por asignar
         assignedPromoter = 'POR ASIGNAR (Trade Marketing)';
       } else {
-        // Excluir registros antiguos de promotoras retiradas / inactivas (ej. Ana Rojas, Ana Silva, Maria Gonzalez, Grecia Castillo, SAIRU)
+        // Excluir registros antiguos de promotoras retiradas / inactivas
         return;
       }
     } else if (!isFromSellerApp) {
@@ -1148,12 +1152,19 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
     const ymd = formatDateYmd(c.date || row.date);
     const createdYmd = formatDateYmd(row.created_at || c.created_at || row.date || c.date);
-    const estadoUpper = String(c.estado || c.status || '').toUpperCase();
-    const isRejectedOrCancelled = estadoUpper === 'RECHAZADA' || estadoUpper === 'CANCELADA';
-    const isBeforeToday = Boolean(ymd && ymd < todayYmd) || isRejectedOrCancelled;
+    const aprobadoYmd = formatDateYmd(c.aprobadoEnTradeAt);
+    const lifecycle = resolveFdvRequestLifecycle({
+      rawEstado: c.estado || c.status,
+      isFromSellerApp,
+      ymd,
+      todayYmd,
+      aprobadoYmd,
+    });
+    const isRejectedOrCancelled = lifecycle.isRejectedOrCancelled;
+    const itemStatus = lifecycle.uiStatus;
     const dayLabel = formatDayLabelEs(ymd);
 
-    const rawTurnoToken = String(c.turno || '').trim().toUpperCase();
+    const rawTurnoToken = sanitizeFdvText(c.turno, 30).toUpperCase();
     const normalizedTurnoRaw =
       rawTurnoToken === 'MANANA'
         ? 'MAÑANA'
@@ -1163,32 +1174,36 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const rawTurno = String(normalizedTurnoRaw || c.shift || c.time || '');
     const shift: ShiftType =
       normalizedTurnoRaw === 'COMPLETO' ? 'MAÑANA' : inferShiftFromTime(rawTurno, row.date);
-    const timeRange =
+    const timeRange = sanitizeFdvText(
       c.time ||
-      c.shift ||
-      (normalizedTurnoRaw === 'COMPLETO'
-        ? 'Día Completo (09:00 AM - 07:00 PM)'
-        : shift === 'MAÑANA'
-          ? '09:00 AM - 01:00 PM'
-          : '02:00 PM - 07:00 PM');
+        c.shift ||
+        (normalizedTurnoRaw === 'COMPLETO'
+          ? 'Día Completo (09:00 AM - 07:00 PM)'
+          : shift === 'MAÑANA'
+            ? '09:00 AM - 01:00 PM'
+            : '02:00 PM - 07:00 PM'),
+      80
+    );
 
-    const address = String(c.address || '').trim();
+    const address = sanitizeFdvText(c.address, 260);
     const { rutaFromAddress, contactoFromAddress, telefonoFromAddress } =
       extractAddressEmbeddedMetadata(address);
 
-    const storeName = String(c.client || c.cliente || c.store || row.store || 'PDV Sin Nombre').trim();
-    const zone = String(c.ruta || c.zone || rutaFromAddress || address || 'Maracaibo / Zulia').trim();
+    const storeName =
+      sanitizeFdvText(c.client || c.cliente || c.store || row.store, 180) || 'PDV Sin Nombre';
+    const zone =
+      sanitizeFdvText(c.ruta || c.zone || rutaFromAddress || address, 180) || 'Maracaibo / Zulia';
     const productsList: string[] = Array.isArray(c.products)
-      ? c.products.map((p: unknown) => String(p || '').trim()).filter(Boolean)
-      : String(c.products || c.product || row.product || '')
+      ? c.products.map((p: unknown) => sanitizeFdvText(p, 120)).filter(Boolean)
+      : sanitizeFdvText(c.products || c.product || row.product, 300)
           .split(',')
           .map((p) => p.trim())
           .filter(Boolean);
-    const productName = (
-      productsList.join(', ') ||
-      String(c.product || row.product || 'Portafolio Codizulca')
-    ).trim();
-    const prodUpper = productName.toUpperCase();
+    const productName =
+      sanitizeFdvText(
+        productsList.join(', ') || c.product || row.product || 'Portafolio Codizulca',
+        220
+      ) || 'Portafolio Codizulca';
 
     const resultadoObj = parseResultadoReport(c.resultado);
     const rawKilos = toNum(c.kilos ?? c.kg ?? c.quantity ?? resultadoObj?.kilosDegustados, 1);
@@ -1210,48 +1225,26 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const azucarGrams = supplies.azucarGrams;
     const lecheGrams = supplies.lecheGrams;
 
-    let itemStatus: TastingScheduleItem['status'] = 'COMPLETADO';
-    if (isBeforeToday) {
-      itemStatus = 'COMPLETADO';
-    } else if (isFromSellerApp) {
-      if (
-        estadoUpper === 'APROBADA' ||
-        estadoUpper === 'ACEPTADA' ||
-        estadoUpper === 'PROGRAMADA' ||
-        estadoUpper === 'CONFIRMADA'
-      ) {
-        itemStatus = 'PROGRAMADO';
-      } else if (estadoUpper === 'EN_CURSO') {
-        itemStatus = 'EN_CURSO';
-      } else if (
-        estadoUpper === 'COMPLETADA' ||
-        estadoUpper === 'EJECUTADA' ||
-        estadoUpper === 'REALIZADA'
-      ) {
-        itemStatus = 'COMPLETADO';
-      } else {
-        itemStatus = 'PENDIENTE';
-      }
-    } else {
-      itemStatus = 'COMPLETADO';
-    }
-
     const sellerName = isFromSellerApp
-      ? String(c.vendedor || c.salesRep || row.promoter || 'Fuerza de Ventas').trim()
-      : String(c.vendedor || 'Trade Marketing').trim();
+      ? sanitizeFdvText(c.vendedor || c.salesRep || row.promoter || 'Fuerza de Ventas', 140) ||
+        'Fuerza de Ventas'
+      : sanitizeFdvText(c.vendedor || 'Trade Marketing', 140) || 'Trade Marketing';
 
-    const clienteCodigo = String(c.clienteCodigo || '').trim();
-    const contactoPunto = String(c.contactoPunto || contactoFromAddress || '').trim();
-    const telefonoContacto = String(c.telefonoContacto || telefonoFromAddress || '').trim();
-    const promoterType = String(
-      c.promoterType || (c.requierePromotora === false ? 'Vendedor / Impulso' : 'Fija')
-    ).trim();
-    const materialPop = String(
-      typeof c.materialPop === 'boolean' ? (c.materialPop ? 'SI' : 'NO') : c.materialPop || 'SI'
-    ).trim();
+    const clienteCodigo = sanitizeFdvText(c.clienteCodigo, 60);
+    const contactoPunto = sanitizeFdvText(c.contactoPunto || contactoFromAddress, 140);
+    const telefonoContacto = sanitizeFdvText(c.telefonoContacto || telefonoFromAddress, 60);
+    const promoterType = sanitizeFdvText(
+      c.promoterType || (c.requierePromotora === false ? 'Vendedor / Impulso' : 'Fija'),
+      60
+    );
+    const materialPop = sanitizeFdvText(
+      typeof c.materialPop === 'boolean' ? (c.materialPop ? 'SI' : 'NO') : c.materialPop || 'SI',
+      30
+    );
     const requierePromotora = c.requierePromotora !== undefined ? Boolean(c.requierePromotora) : true;
-    const notasTradeMarketing = String(c.notasTradeMarketing || '').trim();
-    const createdAtIso = String(row.created_at || c.created_at || '').trim();
+    const notasTradeMarketing = sanitizeFdvText(c.notasTradeMarketing, 500);
+    const createdAtIso = sanitizeFdvText(row.created_at || c.created_at, 60);
+    const estadoUpper = lifecycle.canonicalEstado;
     const isTerminalEstado = isTerminalDegustacionEstado(estadoUpper);
     const localLedgerStamp = getLocalDegustacionReadStamp(row.id, canonicalDegId);
     const resolvedLeidoTrade =
@@ -1282,8 +1275,12 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
           .filter(Boolean)
           .join(' / ')
       : '';
-    const notesParts = [
+    const cleanVendorObs = sanitizeFdvText(
       c.observaciones || c.notes || c.originalComments,
+      500
+    );
+    const notesParts = [
+      cleanVendorObs,
       contactInfo,
       notasTradeMarketing,
       resultadoSummary ? `Resultado: ${resultadoSummary}` : '',
@@ -1297,12 +1294,13 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const salesAssistedCount = Math.round(
       toNum(c.salesAssisted ?? c.ventas ?? c.resultadoVentas, parsedResultadoSales)
     );
+    const safeMapsUrl = sanitizeExternalHttpsUrl(c.mapsUrl);
 
     if (!isRejectedOrCancelled) {
       tastingItems.push({
         id: row.id,
         degustacionId: canonicalDegId,
-        source: isFromSellerApp ? 'vendedor_app' : String(c.source || 'trade_marketing'),
+        source: isFromSellerApp ? 'vendedor_app' : sanitizeFdvText(c.source || 'trade_marketing', 60),
         createdAt: createdAtIso,
         date: ymd,
         dayLabel,
@@ -1326,6 +1324,7 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         resultado: resultadoObj,
         leidoTrade: resolvedLeidoTrade,
         vistoEnTradeAt: resolvedVistoAt,
+        mapsUrl: safeMapsUrl,
         status: itemStatus,
         currentSamples: deliveredSamples,
         targetSamples,
@@ -1335,13 +1334,14 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         arrozQty,
         azucarGrams,
         lecheGrams,
+        operationalSupplies: supplies.operationalSupplies,
         fillProductSelection: normProd,
         fillQuantityInput: String(qty),
         acceptancePercent: acceptance,
         sellerApplicant: isFromSellerApp ? `${sellerName} (Vendedor FDV)` : sellerName,
         salesAssistedCount,
         lotNumber: canonicalDegId || `SUP-${row.id.slice(0, 8).toUpperCase()}`,
-        isArchived: isBeforeToday,
+        isArchived: lifecycle.isArchived,
         notes: notesParts || `Registro en Supabase (${row.type}) • ${promoterType || 'Promotora'}`,
         rawComments: c,
       });
@@ -1349,11 +1349,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
     // Regla de Negocio Estricta (Módulo 1 -> Módulo 2):
     // Al Cronograma de Producción (Matriz de Llenado e Insumos) SOLO ingresan las solicitudes
-    // que ya están aprobadas/programadas/ejecutadas y NO están rechazadas ni canceladas.
-    const isEligibleForProductionSchedule =
-      !isRejectedOrCancelled && itemStatus !== 'PENDIENTE';
-
-    if (isEligibleForProductionSchedule) {
+    // que ya están aprobadas/programadas/ejecutadas y NO están en SOLICITADA/PENDIENTE ni rechazadas/canceladas.
+    if (lifecycle.isEligibleForModule2) {
       visitsForSchedule.push({
         id: row.id,
         solicitudId: row.id,
@@ -1522,6 +1519,16 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         operationalSupplies: supplies.operationalSupplies,
       });
     }
+  });
+
+  // Orden determinista: solicitudes PENDIENTE (SOLICITADA FDV) primero, luego fecha programada descendente y fecha de envío descendente
+  tastingItems.sort((a, b) => {
+    const aPending = a.status === 'PENDIENTE' ? 0 : 1;
+    const bPending = b.status === 'PENDIENTE' ? 0 : 1;
+    if (aPending !== bPending) return aPending - bPending;
+    const dateCmp = (b.date || '').localeCompare(a.date || '');
+    if (dateCmp !== 0) return dateCmp;
+    return (b.createdAt || '').localeCompare(a.createdAt || '');
   });
 
   // --------------------------------------------------------------------------
@@ -2443,11 +2450,6 @@ function emitLocalDegustacionSurveyEvent(
   }
 }
 
-function isMissingLeidoTradeColumnError(status: number, bodyText: string): boolean {
-  if (status !== 400 && status !== 404) return false;
-  return /leido_trade|visto_en_trade_at|PGRST204|42703/i.test(bodyText);
-}
-
 /**
  * Parser determinístico que transforma cualquier fila de `public.surveys` (`type = 'Degustacion'`)
  * —ya provenga del fetch inicial REST o de un payload Realtime `INSERT` / `UPDATE`—
@@ -2601,35 +2603,65 @@ export function parseDegustacionNotificationRow(
  * Deduplica estrictamente por `id` y `degustacionId` canónico.
  */
 export async function fetchUnreadDegustacionNotifications(): Promise<DegustacionNotificationItem[]> {
+  assertSupabaseConfigured();
   const todayYmd = getTodayVeYmd();
+  const client = getSupabaseRealtimeClient();
+  if (!client) {
+    throw new Error('Cliente oficial de Supabase no disponible.');
+  }
+
   let rows: RawSupabaseSurvey[] = [];
+  const useReadCols = getSurveysLeidoTradeSupport() !== false;
 
-  const nativeRes = await fetchWithProgressiveRetry(
-    `${SUPABASE_REST_URL}/surveys?type=eq.Degustacion&leido_trade=eq.false&order=created_at.desc.nullslast&limit=120`,
-    {
-      method: 'GET',
-      headers: supabaseHeaders(),
-    }
-  );
+  if (useReadCols) {
+    const { data, error } = await client
+      .from('surveys')
+      .select(
+        'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at'
+      )
+      .eq('type', 'Degustacion')
+      .eq('leido_trade', false)
+      .order('created_at', { ascending: false })
+      .limit(150);
 
-  if (nativeRes.ok) {
-    rows = (await nativeRes.json()) as RawSupabaseSurvey[];
-  } else {
-    const errText = await nativeRes.text().catch(() => '');
-    if (isMissingLeidoTradeColumnError(nativeRes.status, errText)) {
-      rows = await supabaseGet<RawSupabaseSurvey[]>(
-        'surveys?type=eq.Degustacion&order=created_at.desc.nullslast&limit=150'
-      );
+    if (!error) {
+      setSurveysLeidoTradeSupport(true);
+      rows = (data || []) as unknown as RawSupabaseSurvey[];
+    } else if (isMissingColumnPostgrestError(error)) {
+      setSurveysLeidoTradeSupport(false);
     } else {
-      throw new Error(`No se pudieron consultar notificaciones de degustación (${nativeRes.status}): ${errText}`);
+      throw new Error(`No se pudieron consultar notificaciones de degustación: ${error.message}`);
     }
   }
+
+  if (getSurveysLeidoTradeSupport() === false) {
+    const { data, error } = await client
+      .from('surveys')
+      .select('id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at')
+      .eq('type', 'Degustacion')
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    if (error) {
+      throw new Error(`No se pudieron consultar notificaciones de degustación: ${error.message}`);
+    }
+    rows = (data || []) as unknown as RawSupabaseSurvey[];
+  }
+
+  const renderRows = await Promise.race([
+    fetchFdvPlanificadorRenderDegustaciones({
+      endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
+      timeoutMs: 3000,
+    }),
+    waitMs(3000).then(() => [] as RawSupabaseSurvey[]),
+  ]);
+  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(rows, renderRows);
 
   // Si alguna fila gemela por el mismo `degustacionId` ya fue marcada como leída, excluir duplicados
   const readCanonicalIdsInBatch = new Set<string>();
   const parsedBatch: DegustacionNotificationItem[] = [];
 
-  for (const row of rows) {
+  for (const row of mergedRows) {
     const parsed = parseDegustacionNotificationRow(row, todayYmd);
     if (!parsed) continue;
     if (parsed.leidoTrade) {
@@ -2653,6 +2685,111 @@ export async function fetchUnreadDegustacionNotifications(): Promise<Degustacion
   );
 }
 
+async function resolveOrMaterializeDegustacionSurveyRow(
+  surveyId: string,
+  canonicalDegId: string,
+  fallbackComments: Record<string, any>
+): Promise<{ targetId: string | null; existingRow?: RawSupabaseSurvey }> {
+  const client = getSupabaseRealtimeClient();
+  if (!client) return { targetId: null };
+
+  if (!isVirtualFdvRenderSurveyId(surveyId)) {
+    return { targetId: surveyId };
+  }
+
+  if (canonicalDegId && /^[a-zA-Z0-9._-]+$/.test(canonicalDegId)) {
+    const { data } = await client
+      .from('surveys')
+      .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+      .eq('type', 'Degustacion')
+      .ilike('comments', `%${canonicalDegId}%`)
+      .limit(1);
+    const matched = (data as unknown as RawSupabaseSurvey[] | null)?.[0];
+    if (matched?.id) {
+      return { targetId: matched.id, existingRow: matched };
+    }
+  }
+
+  // Materializar en `public.surveys` si el registro existía solo en Render
+  const dateYmd = formatDateYmd(fallbackComments.date) || getTodayVeYmd();
+  const storeName = sanitizeFdvText(fallbackComments.client || fallbackComments.store, 180) || 'Cliente PDV';
+  const promoterName =
+    sanitizeFdvText(
+      fallbackComments.promotoraAsignada || fallbackComments.vendedor || fallbackComments.promoter,
+      140
+    ) || 'Fuerza de Ventas';
+  const productSummary =
+    sanitizeFdvText(fallbackComments.product, 220) || 'Portafolio Codizulca';
+  const createdAt = sanitizeFdvText(fallbackComments.created_at, 60) || new Date().toISOString();
+
+  const insertBody: Record<string, unknown> = {
+    type: 'Degustacion',
+    date: dateYmd,
+    store: storeName,
+    promoter: promoterName,
+    product: productSummary,
+    comments: JSON.stringify(fallbackComments),
+    creatorId: sanitizeFdvText(fallbackComments.vendedorId || fallbackComments.vendedor, 140) || promoterName,
+    created_at: createdAt,
+  };
+
+  const { data: inserted } = await client
+    .from('surveys')
+    .insert(insertBody)
+    .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+    .limit(1);
+
+  const createdRow = (inserted as unknown as RawSupabaseSurvey[] | null)?.[0];
+  return { targetId: createdRow?.id || null, existingRow: createdRow };
+}
+
+async function patchDegustacionSurveyRowViaSdk(
+  targetSurveyId: string,
+  baseFields: Record<string, unknown>,
+  readTimestampIso: string
+): Promise<RawSupabaseSurvey | null> {
+  const client = getSupabaseRealtimeClient();
+  if (!client) {
+    throw new Error('Cliente oficial de Supabase no disponible.');
+  }
+
+  const useReadCols = getSurveysLeidoTradeSupport() !== false;
+  if (useReadCols) {
+    const { data, error } = await client
+      .from('surveys')
+      .update({
+        ...baseFields,
+        leido_trade: true,
+        visto_en_trade_at: readTimestampIso,
+      })
+      .eq('id', targetSurveyId)
+      .select('id,type,date,store,promoter,product,comments,creatorId,created_at,leido_trade,visto_en_trade_at');
+
+    if (!error) {
+      setSurveysLeidoTradeSupport(true);
+      return ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+    }
+
+    if (isMissingColumnPostgrestError(error)) {
+      setSurveysLeidoTradeSupport(false);
+    } else {
+      throw new Error(`No se pudo actualizar la degustación en Supabase: ${error.message}`);
+    }
+  }
+
+  const { data, error } = await client
+    .from('surveys')
+    .update(baseFields)
+    .eq('id', targetSurveyId)
+    .select('id,type,date,store,promoter,product,comments,creatorId,created_at');
+
+  if (error) {
+    throw new Error(`No se pudo actualizar la degustación en Supabase: ${error.message}`);
+  }
+
+  return ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+}
+
 /**
  * Marca una degustación específica como vista (`leido_trade: true`, `visto_en_trade_at: ISO`)
  * en Supabase, sincronizando tanto columnas nativas como `comments` JSON y el ledger local.
@@ -2662,15 +2799,20 @@ export async function markSupabaseDegustacionAsRead(
   existingRawComments?: Record<string, any>
 ): Promise<void> {
   if (!surveyId) return;
+  assertSupabaseConfigured();
   const isoNow = new Date().toISOString();
+  const client = getSupabaseRealtimeClient();
 
-  let baseComments = existingRawComments;
+  let baseComments = existingRawComments ? safeParseJson<Record<string, any>>(existingRawComments) : undefined;
   let existingRow: RawSupabaseSurvey | undefined;
-  if (!baseComments) {
-    const fetched = await supabaseGet<RawSupabaseSurvey[]>(
-      `surveys?id=eq.${encodeURIComponent(surveyId)}&limit=1`
-    ).catch(() => []);
-    existingRow = fetched[0];
+
+  if (!baseComments && client && !isVirtualFdvRenderSurveyId(surveyId)) {
+    const { data } = await client
+      .from('surveys')
+      .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+      .eq('id', surveyId)
+      .limit(1);
+    existingRow = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0];
     baseComments = safeParseJson<Record<string, any>>(existingRow?.comments ?? {});
   }
 
@@ -2686,52 +2828,34 @@ export async function markSupabaseDegustacionAsRead(
     visto_en_trade_at: isoNow,
   };
 
-  let res = await fetchWithProgressiveRetry(
-    `${SUPABASE_REST_URL}/surveys?id=eq.${encodeURIComponent(surveyId)}`,
-    {
-      method: 'PATCH',
-      headers: supabaseHeaders({ Prefer: 'return=representation' }),
-      body: JSON.stringify({
-        leido_trade: true,
-        visto_en_trade_at: isoNow,
-        comments: JSON.stringify(updatedComments),
-      }),
-    }
+  if (isVirtualFdvRenderSurveyId(surveyId)) {
+    emitLocalDegustacionSurveyEvent('UPDATE', {
+      id: surveyId,
+      type: 'Degustacion',
+      leido_trade: true,
+      visto_en_trade_at: isoNow,
+      comments: JSON.stringify(updatedComments),
+    });
+    return;
+  }
+
+  const updatedRow = await patchDegustacionSurveyRowViaSdk(
+    surveyId,
+    { comments: JSON.stringify(updatedComments) },
+    isoNow
   );
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    if (isMissingLeidoTradeColumnError(res.status, errText)) {
-      res = await fetchWithProgressiveRetry(
-        `${SUPABASE_REST_URL}/surveys?id=eq.${encodeURIComponent(surveyId)}`,
-        {
-          method: 'PATCH',
-          headers: supabaseHeaders({ Prefer: 'return=representation' }),
-          body: JSON.stringify({
-            comments: JSON.stringify(updatedComments),
-          }),
-        }
-      );
-    } else {
-      throw new Error(`No se pudo marcar la degustación como leída (${res.status}): ${errText}`);
+  emitLocalDegustacionSurveyEvent(
+    'UPDATE',
+    updatedRow || {
+      ...(existingRow || {}),
+      id: surveyId,
+      type: 'Degustacion',
+      leido_trade: true,
+      visto_en_trade_at: isoNow,
+      comments: JSON.stringify(updatedComments),
     }
-  }
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`No se pudo actualizar lectura en Supabase (${res.status}): ${errText}`);
-  }
-
-  const updatedRows = (await res.json().catch(() => [])) as RawSupabaseSurvey[];
-  const updatedRow = updatedRows[0] || {
-    ...(existingRow || {}),
-    id: surveyId,
-    type: 'Degustacion',
-    leido_trade: true,
-    visto_en_trade_at: isoNow,
-    comments: JSON.stringify(updatedComments),
-  };
-  emitLocalDegustacionSurveyEvent('UPDATE', updatedRow);
+  );
 }
 
 /**
@@ -2745,9 +2869,8 @@ export async function markAllSupabaseDegustacionesAsRead(
 }
 
 /**
- * Sincroniza bidireccionalmente el cambio de estado de Trade Marketing hacia el backend
- * desplegado de FDV Planificador en Render (`PUT /api/degustaciones/:id`) cuando el registro
- * proviene de un vendedor (`deg-*`), sin bloquear la transacción principal de Supabase.
+ * Sincroniza bidireccionalmente el cambio de estado o asignación de promotora hacia el backend
+ * desplegado de FDV Planificador en Render (`PUT /api/degustaciones/:id`) con validación HTTPS y timeout.
  */
 async function syncStatusBackToFdvPlanificadorRender(
   canonicalDegId: string,
@@ -2757,28 +2880,10 @@ async function syncStatusBackToFdvPlanificadorRender(
     notasTradeMarketing?: string;
   }
 ): Promise<void> {
-  if (!canonicalDegId || !/^deg-/i.test(canonicalDegId)) return;
-  if (!FDV_PLANIFICADOR_RENDER_API_URL) return;
-
-  try {
-    await fetch(`${FDV_PLANIFICADOR_RENDER_API_URL}/${encodeURIComponent(canonicalDegId)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        estado: payload.estado,
-        ...(payload.promotoraAsignada !== undefined
-          ? { promotoraAsignada: payload.promotoraAsignada }
-          : {}),
-        ...(payload.notasTradeMarketing !== undefined
-          ? { notasTradeMarketing: payload.notasTradeMarketing }
-          : {}),
-        updatedAt: new Date().toISOString(),
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
-  } catch {
-    // No bloquear Trade Marketing si el contenedor Render está en cold-start
-  }
+  await syncDecisionToFdvPlanificadorRender(canonicalDegId, payload, {
+    endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
+    timeoutMs: 8000,
+  });
 }
 
 export async function updateSupabaseDegustacionStatus(
@@ -2799,80 +2904,71 @@ export async function updateSupabaseDegustacionStatus(
     rawComments?: Record<string, any>;
   }
 ): Promise<void> {
+  assertSupabaseConfigured();
   const isoNow = new Date().toISOString();
+  const safeBaseComments = safeParseJson<Record<string, any>>(updates.rawComments ?? {});
   const canonicalDegId = normalizeCanonicalDegustacionId(
-    updates.rawComments?.degustacionId || updates.rawComments?.id,
+    safeBaseComments.degustacionId || safeBaseComments.id,
     surveyId
   );
   recordLocalDegustacionReadLedger(surveyId, canonicalDegId, isoNow);
 
+  const cleanPromotora =
+    updates.promotoraAsignada !== undefined
+      ? sanitizeFdvText(updates.promotoraAsignada, 140)
+      : undefined;
+
   const updatedComments = {
-    ...(updates.rawComments || {}),
+    ...safeBaseComments,
     estado: updates.estado,
     status: updates.estado.toLowerCase(),
     leido_trade: true,
-    visto_en_trade_at: updates.rawComments?.visto_en_trade_at || isoNow,
+    visto_en_trade_at: safeBaseComments.visto_en_trade_at || isoNow,
     ...(updates.estado === 'APROBADA' ? { aprobadoEnTradeAt: isoNow } : {}),
     ...(updates.estado === 'RECHAZADA' || updates.estado === 'CANCELADA'
       ? { revertidoEnTradeAt: isoNow }
       : {}),
-    ...(updates.promotoraAsignada !== undefined ? { promotoraAsignada: updates.promotoraAsignada } : {}),
+    ...(cleanPromotora !== undefined
+      ? {
+          promotoraAsignada: cleanPromotora,
+          promoter: cleanPromotora || 'POR ASIGNAR (Trade Marketing)',
+        }
+      : {}),
     ...(updates.delivered !== undefined ? { delivered: updates.delivered } : {}),
     ...(updates.salesAssisted !== undefined ? { salesAssisted: updates.salesAssisted } : {}),
     ...(updates.acceptanceRate !== undefined ? { acceptanceRate: updates.acceptanceRate } : {}),
     ...(updates.insumosCalculados !== undefined ? { insumosCalculados: updates.insumosCalculados } : {}),
   };
 
-  let res = await fetchWithProgressiveRetry(
-    `${SUPABASE_REST_URL}/surveys?id=eq.${encodeURIComponent(surveyId)}`,
-    {
-      method: 'PATCH',
-      headers: supabaseHeaders({ Prefer: 'return=representation' }),
-      body: JSON.stringify({
-        ...(updates.promotoraAsignada ? { promoter: updates.promotoraAsignada } : {}),
-        leido_trade: true,
-        visto_en_trade_at: updatedComments.visto_en_trade_at,
-        comments: JSON.stringify(updatedComments),
-      }),
-    }
+  const resolved = await resolveOrMaterializeDegustacionSurveyRow(
+    surveyId,
+    canonicalDegId,
+    updatedComments
   );
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    if (isMissingLeidoTradeColumnError(res.status, text)) {
-      res = await fetchWithProgressiveRetry(
-        `${SUPABASE_REST_URL}/surveys?id=eq.${encodeURIComponent(surveyId)}`,
-        {
-          method: 'PATCH',
-          headers: supabaseHeaders({ Prefer: 'return=representation' }),
-          body: JSON.stringify({
-            ...(updates.promotoraAsignada ? { promoter: updates.promotoraAsignada } : {}),
-            comments: JSON.stringify(updatedComments),
-          }),
-        }
-      );
-    } else {
-      throw new Error(`No se pudo actualizar la degustación en Supabase (${res.status}): ${text}`);
-    }
+  let updatedRow: RawSupabaseSurvey | null = null;
+  if (resolved.targetId) {
+    updatedRow = await patchDegustacionSurveyRowViaSdk(
+      resolved.targetId,
+      {
+        ...(cleanPromotora ? { promoter: cleanPromotora } : {}),
+        comments: JSON.stringify(updatedComments),
+      },
+      String(updatedComments.visto_en_trade_at)
+    );
   }
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`No se pudo actualizar la degustación en Supabase (${res.status}): ${text}`);
-  }
-
-  const updatedRows = (await res.json().catch(() => [])) as RawSupabaseSurvey[];
-  if (updatedRows[0]) {
-    emitLocalDegustacionSurveyEvent('UPDATE', updatedRows[0]);
-  } else {
-    emitLocalDegustacionSurveyEvent('UPDATE', {
-      id: surveyId,
+  emitLocalDegustacionSurveyEvent(
+    'UPDATE',
+    updatedRow || {
+      ...(resolved.existingRow || {}),
+      id: resolved.targetId || surveyId,
       type: 'Degustacion',
       leido_trade: true,
-      visto_en_trade_at: updatedComments.visto_en_trade_at,
+      visto_en_trade_at: String(updatedComments.visto_en_trade_at),
       comments: JSON.stringify(updatedComments),
-    });
-  }
+    }
+  );
 
   // Sincronización bidireccional no bloqueante hacia FDV Planificador (Render)
   const fdvEstado =
@@ -2885,11 +2981,92 @@ export async function updateSupabaseDegustacionStatus(
           : updates.estado;
   void syncStatusBackToFdvPlanificadorRender(canonicalDegId, {
     estado: fdvEstado,
-    promotoraAsignada: updates.promotoraAsignada,
+    promotoraAsignada: cleanPromotora,
     notasTradeMarketing:
-      updates.estado === 'APROBADA' && updates.promotoraAsignada
-        ? `Aprobada en Trade Marketing. Promotora asignada: ${updates.promotoraAsignada}.`
+      updates.estado === 'APROBADA' && cleanPromotora
+        ? `Aprobada en Trade Marketing. Promotora asignada: ${cleanPromotora}.`
         : undefined,
+  });
+}
+
+/**
+ * Asigna o reasigna de forma segura una promotora activa (o `'POR ASIGNAR (Trade Marketing)'`)
+ * a una degustación en `public.surveys` y sincroniza con el backend FDV en Render sin alterar el estado actual.
+ */
+export async function assignSupabaseDegustacionPromotora(
+  surveyId: string,
+  promotoraAsignada: string,
+  rawComments?: Record<string, any>
+): Promise<void> {
+  if (!surveyId) return;
+  assertSupabaseConfigured();
+  const isoNow = new Date().toISOString();
+  const safeBaseComments = safeParseJson<Record<string, any>>(rawComments ?? {});
+  const canonicalDegId = normalizeCanonicalDegustacionId(
+    safeBaseComments.degustacionId || safeBaseComments.id,
+    surveyId
+  );
+  recordLocalDegustacionReadLedger(surveyId, canonicalDegId, isoNow);
+
+  const cleanPromotora =
+    sanitizeFdvText(promotoraAsignada, 140) || 'POR ASIGNAR (Trade Marketing)';
+  const isUnassigned = /^POR ASIGNAR/i.test(cleanPromotora) || /^SIN ASIGNAR/i.test(cleanPromotora);
+  const currentEstadoUpper =
+    sanitizeFdvText(safeBaseComments.estado || safeBaseComments.status, 40).toUpperCase() ||
+    'SOLICITADA';
+
+  const updatedComments = {
+    ...safeBaseComments,
+    promotoraAsignada: isUnassigned ? '' : cleanPromotora,
+    promoter: cleanPromotora,
+    leido_trade: true,
+    visto_en_trade_at: safeBaseComments.visto_en_trade_at || isoNow,
+  };
+
+  const resolved = await resolveOrMaterializeDegustacionSurveyRow(
+    surveyId,
+    canonicalDegId,
+    updatedComments
+  );
+
+  let updatedRow: RawSupabaseSurvey | null = null;
+  if (resolved.targetId) {
+    updatedRow = await patchDegustacionSurveyRowViaSdk(
+      resolved.targetId,
+      {
+        ...(!isUnassigned ? { promoter: cleanPromotora } : {}),
+        comments: JSON.stringify(updatedComments),
+      },
+      String(updatedComments.visto_en_trade_at)
+    );
+  }
+
+  emitLocalDegustacionSurveyEvent(
+    'UPDATE',
+    updatedRow || {
+      ...(resolved.existingRow || {}),
+      id: resolved.targetId || surveyId,
+      type: 'Degustacion',
+      leido_trade: true,
+      visto_en_trade_at: String(updatedComments.visto_en_trade_at),
+      comments: JSON.stringify(updatedComments),
+    }
+  );
+
+  const fdvEstado: 'APROBADA' | 'RECHAZADA' | 'REALIZADA' | 'SOLICITADA' =
+    currentEstadoUpper === 'COMPLETADA' || currentEstadoUpper === 'REALIZADA'
+      ? 'REALIZADA'
+      : currentEstadoUpper === 'APROBADA' ||
+          currentEstadoUpper === 'PROGRAMADA' ||
+          currentEstadoUpper === 'EN_CURSO'
+        ? 'APROBADA'
+        : currentEstadoUpper === 'RECHAZADA' || currentEstadoUpper === 'CANCELADA'
+          ? 'RECHAZADA'
+          : 'SOLICITADA';
+
+  void syncStatusBackToFdvPlanificadorRender(canonicalDegId, {
+    estado: fdvEstado,
+    promotoraAsignada: isUnassigned ? '' : cleanPromotora,
   });
 }
 
@@ -2922,12 +3099,13 @@ export interface CreateSellerDegustacionParams {
 export async function createSupabaseSellerDegustacionRequest(
   params: CreateSellerDegustacionParams
 ): Promise<RawSupabaseSurvey> {
-  const sellerName = String(params.sellerName || '').trim();
-  const storeName = String(params.storeName || '').trim();
-  const zone = String(params.zone || '').trim();
-  const productName = String(params.productName || '').trim();
-  const date = String(params.date || '').trim();
-  const timeRange = String(params.timeRange || '').trim();
+  assertSupabaseConfigured();
+  const sellerName = sanitizeFdvText(params.sellerName, 140);
+  const storeName = sanitizeFdvText(params.storeName, 180);
+  const zone = sanitizeFdvText(params.zone, 180);
+  const productName = sanitizeFdvText(params.productName, 220);
+  const date = normalizeFdvCalendarDateYmd(params.date);
+  const timeRange = sanitizeFdvText(params.timeRange, 80);
   const kilos = Math.round(Number(params.kilos) * 100) / 100;
   const personas = Math.round(Number(params.personas));
 
@@ -2956,41 +3134,54 @@ export async function createSupabaseSellerDegustacionRequest(
     throw new Error('Esta solicitud de degustación ya se está enviando. Por favor espere la confirmación.');
   }
 
+  const client = getSupabaseRealtimeClient();
+  if (!client) {
+    throw new Error('Cliente oficial de Supabase no disponible.');
+  }
+
   inFlightDegustacionTokens.add(degustacionId);
   try {
-    // Verificación de idempotencia en base de datos para evitar duplicados ante reintentos de red
-    const existingDup = await supabaseGet<RawSupabaseSurvey[]>(
-      `surveys?type=eq.Degustacion&comments=ilike.*${encodeURIComponent(degustacionId)}*&limit=1`
-    ).catch(() => []);
-    if (existingDup.length > 0 && existingDup[0]?.id) {
-      return existingDup[0];
+    // Verificación de idempotencia vía SDK oficial parametrizado para evitar duplicados ante reintentos de red
+    if (/^[a-zA-Z0-9._-]+$/.test(degustacionId)) {
+      const { data: existingDup } = await client
+        .from('surveys')
+        .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+        .eq('type', 'Degustacion')
+        .ilike('comments', `%${degustacionId}%`)
+        .limit(1);
+      const dupRow = ((existingDup as unknown as RawSupabaseSurvey[] | null) || [])[0];
+      if (dupRow?.id) {
+        return dupRow;
+      }
     }
 
     const isoNow = new Date().toISOString();
     const turno: ShiftType =
       params.turno ||
       (timeRange.toUpperCase().includes('TARDE') ||
-      (timeRange.toUpperCase().includes('PM') && !timeRange.trim().startsWith('09') && !timeRange.trim().startsWith('08'))
+      (timeRange.toUpperCase().includes('PM') &&
+        !timeRange.trim().startsWith('09') &&
+        !timeRange.trim().startsWith('08'))
         ? 'TARDE'
         : 'MAÑANA');
 
     const productsArray =
       Array.isArray(params.productsList) && params.productsList.length > 0
-        ? params.productsList.map((p) => p.trim()).filter(Boolean)
+        ? params.productsList.map((p) => sanitizeFdvText(p, 120)).filter(Boolean)
         : [productName];
 
-    const clienteCodigo = String(params.clienteCodigo || '').trim();
-    const contactoPunto = String(params.contactoPunto || '').trim();
-    const telefonoContacto = String(params.telefonoContacto || '').trim();
+    const clienteCodigo = sanitizeFdvText(params.clienteCodigo, 60);
+    const contactoPunto = sanitizeFdvText(params.contactoPunto, 140);
+    const telefonoContacto = sanitizeFdvText(params.telefonoContacto, 60);
     const address =
-      String(params.address || '').trim() ||
+      sanitizeFdvText(params.address, 260) ||
       `Ruta: ${zone}${contactoPunto ? ` | Contacto: ${contactoPunto}${telefonoContacto ? ` (${telefonoContacto})` : ''}` : ''}`;
     const requierePromotora = params.requierePromotora !== undefined ? Boolean(params.requierePromotora) : true;
     const promoterType = params.promoterType || 'Fija';
     const materialPop = params.materialPop || 'SI';
-    const cleanNotes = String(params.notes || '').trim();
+    const cleanNotes = sanitizeFdvText(params.notes, 600);
     const notasTradeMarketing =
-      String(params.notasTradeMarketing || '').trim() ||
+      sanitizeFdvText(params.notasTradeMarketing, 500) ||
       'Solicitud agendada desde FDV. Pendiente de revisión y asignación en Trade Marketing.';
 
     // Payload íntegro 100% compatible con los 35+ campos de FDV Planificador + trazabilidad de lectura
@@ -3038,7 +3229,7 @@ export async function createSupabaseSellerDegustacionRequest(
       acceptanceRate: 95,
     };
 
-    const baseBody = {
+    const baseBody: Record<string, unknown> = {
       type: 'Degustacion',
       date,
       store: storeName,
@@ -3049,44 +3240,52 @@ export async function createSupabaseSellerDegustacionRequest(
       created_at: isoNow,
     };
 
-    // Envío resiliente con hasta 2 reintentos automáticos progresivos (600ms -> 1400ms)
-    let res = await fetchWithProgressiveRetry(`${SUPABASE_REST_URL}/surveys`, {
-      method: 'POST',
-      headers: supabaseHeaders({ Prefer: 'return=representation' }),
-      body: JSON.stringify({
-        ...baseBody,
-        leido_trade: false,
-        visto_en_trade_at: null,
-      }),
-    });
+    let createdRow: RawSupabaseSurvey | undefined;
+    const useReadCols = getSurveysLeidoTradeSupport() !== false;
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      if (isMissingLeidoTradeColumnError(res.status, errText)) {
-        res = await fetchWithProgressiveRetry(`${SUPABASE_REST_URL}/surveys`, {
-          method: 'POST',
-          headers: supabaseHeaders({ Prefer: 'return=representation' }),
-          body: JSON.stringify(baseBody),
-        });
+    if (useReadCols) {
+      const { data, error } = await client
+        .from('surveys')
+        .insert({
+          ...baseBody,
+          leido_trade: false,
+          visto_en_trade_at: null,
+        })
+        .select('id,type,date,store,promoter,product,comments,creatorId,created_at,leido_trade,visto_en_trade_at')
+        .limit(1);
+
+      if (!error) {
+        setSurveysLeidoTradeSupport(true);
+        createdRow = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0];
+      } else if (isMissingColumnPostgrestError(error)) {
+        setSurveysLeidoTradeSupport(false);
       } else {
-        throw new Error(`No se pudo crear la solicitud en Supabase (${res.status}): ${errText}`);
+        throw new Error(`No se pudo crear la solicitud en Supabase: ${error.message}`);
       }
     }
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`No se pudo crear la solicitud en Supabase (${res.status}): ${text}`);
-    }
+    if (!createdRow && getSurveysLeidoTradeSupport() === false) {
+      const { data, error } = await client
+        .from('surveys')
+        .insert(baseBody)
+        .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+        .limit(1);
 
-    const data = (await res.json().catch(() => [])) as RawSupabaseSurvey[];
-    let createdRow = data[0];
+      if (error) {
+        throw new Error(`No se pudo crear la solicitud en Supabase: ${error.message}`);
+      }
+      createdRow = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0];
+    }
 
     // Confirmación Real (ACK): si PostgREST no adjuntó la representación, verificar persistencia por degustacionId
     if (!createdRow || !createdRow.id) {
-      const verifyRows = await supabaseGet<RawSupabaseSurvey[]>(
-        `surveys?type=eq.Degustacion&comments=ilike.*${encodeURIComponent(degustacionId)}*&limit=1`
-      ).catch(() => []);
-      createdRow = verifyRows[0];
+      const { data: verifyRows } = await client
+        .from('surveys')
+        .select('id,type,date,store,promoter,product,comments,creatorId,created_at')
+        .eq('type', 'Degustacion')
+        .ilike('comments', `%${degustacionId}%`)
+        .limit(1);
+      createdRow = ((verifyRows as unknown as RawSupabaseSurvey[] | null) || [])[0];
     }
 
     if (!createdRow || !createdRow.id) {

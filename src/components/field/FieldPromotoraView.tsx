@@ -71,6 +71,7 @@ import {
   fetchCheckinPhotoById,
   fetchCheckinPhotosBatch,
   updateSupabaseDegustacionStatus,
+  assignSupabaseDegustacionPromotora,
   createSupabaseSellerDegustacionRequest,
   updateSupabaseInventoryObservation,
   createSupabaseInventoryRecord,
@@ -90,6 +91,10 @@ import {
   StaffMemberRecord,
   StaffCategory,
 } from '../../services/supabaseModule1';
+import {
+  resolveFdvRequestLifecycle,
+  sanitizeExternalHttpsUrl,
+} from '../../services/fdvDegustacionesAdapter';
 import { calculateProductionSupplies } from '../../utils/productionSuppliesCalculator';
 import { TradeContraloriaSolicitudesTab } from './TradeContraloriaSolicitudesTab';
 import { MultiFormatTastingUploadModal } from './MultiFormatTastingUploadModal';
@@ -228,6 +233,8 @@ export const FieldPromotoraView: React.FC = () => {
   // Filtros de búsqueda en la tabla de degustaciones
   const [tastingSearchQuery, setTastingSearchQuery] = useState('');
   const [tastingPromotoraFilter, setTastingPromotoraFilter] = useState('TODAS');
+  const [tastingSellerFilter, setTastingSellerFilter] = useState('TODOS');
+  const [tastingStatusFilter, setTastingStatusFilter] = useState('TODOS');
   const [tastingDayFilter, setTastingDayFilter] = useState('TODOS');
   const [tastingDateFrom, setTastingDateFrom] = useState('');
   const [tastingDateTo, setTastingDateTo] = useState('');
@@ -235,6 +242,9 @@ export const FieldPromotoraView: React.FC = () => {
   const [tastingProductFilter, setTastingProductFilter] = useState('TODOS');
   const [isTastingCalendarOpen, setIsTastingCalendarOpen] = useState(false);
   const [calendarMonthDate, setCalendarMonthDate] = useState<Date>(() => new Date());
+  const [selectedPromotoraByTastingId, setSelectedPromotoraByTastingId] = useState<
+    Record<string, string>
+  >({});
 
   // =========================================================================
   // SINCRONIZACIÓN EXACTA ENTRE SUPABASE (MÓDULO 1) Y TRADE MARKETING (MÓDULO 2)
@@ -298,22 +308,31 @@ export const FieldPromotoraView: React.FC = () => {
 
       const effectiveDate = v?.date || supItem?.date || todayYmd;
       const effectiveDayLabel = v?.dayLabel || supItem?.dayLabel || effectiveDate;
-      const isBeforeToday =
-        Boolean(supItem?.isArchived) || Boolean(effectiveDate && effectiveDate < todayYmd);
-      const isArchived =
-        archivedVisitIds.includes(id) || archivedVisitIds.includes(solId) || isBeforeToday;
+      const manuallyArchived =
+        archivedVisitIds.includes(id) || archivedVisitIds.includes(solId);
+      const hasSessionApproval = Boolean(approvedIdsInSession[id] || approvedIdsInSession[solId]);
+      const isPendingSellerRequest =
+        supItem?.status === 'PENDIENTE' && !v && !hasSessionApproval;
+
+      const isArchived = isPendingSellerRequest
+        ? manuallyArchived
+        : manuallyArchived ||
+          Boolean(supItem?.isArchived) ||
+          (Boolean(effectiveDate && effectiveDate < todayYmd) && !hasSessionApproval && !supItem);
 
       let itemStatus: TastingScheduleItem['status'] = 'PROGRAMADO';
-      if (isArchived) {
-        itemStatus = 'COMPLETADO';
-      } else if (approvedIdsInSession[id] || approvedIdsInSession[solId]) {
+      if (isPendingSellerRequest) {
+        itemStatus = 'PENDIENTE';
+      } else if (hasSessionApproval) {
         itemStatus = 'PROGRAMADO';
       } else if (v?.status === 'COMPLETADA' || supItem?.status === 'COMPLETADO') {
         itemStatus = 'COMPLETADO';
       } else if (v?.status === 'EN_CURSO' || supItem?.status === 'EN_CURSO') {
         itemStatus = 'EN_CURSO';
-      } else if (supItem?.status === 'PENDIENTE' && !v) {
-        itemStatus = 'PENDIENTE';
+      } else if (supItem?.status === 'PROGRAMADO') {
+        itemStatus = 'PROGRAMADO';
+      } else if (isArchived) {
+        itemStatus = 'COMPLETADO';
       } else {
         itemStatus = 'PROGRAMADO';
       }
@@ -322,6 +341,8 @@ export const FieldPromotoraView: React.FC = () => {
       const acceptancePercent = supItem?.acceptancePercent;
       const salesAssisted = v?.assistedSalesUnits || supItem?.salesAssistedCount || 0;
       const assignedPromotora =
+        selectedPromotoraByTastingId[solId] ||
+        selectedPromotoraByTastingId[id] ||
         approvedIdsInSession[id] ||
         approvedIdsInSession[solId] ||
         v?.promotoraName ||
@@ -359,7 +380,7 @@ export const FieldPromotoraView: React.FC = () => {
         resultado: supItem?.resultado,
         leidoTrade: isUnreadInSession ? false : (supItem?.leidoTrade ?? true),
         vistoEnTradeAt: supItem?.vistoEnTradeAt,
-        mapsUrl: v?.mapsUrl || supItem?.mapsUrl,
+        mapsUrl: sanitizeExternalHttpsUrl(v?.mapsUrl || supItem?.mapsUrl),
         status: itemStatus,
         currentSamples,
         targetSamples,
@@ -420,15 +441,16 @@ export const FieldPromotoraView: React.FC = () => {
     archivedVisitIds,
     approvedIdsInSession,
     rejectedIdsInSession,
+    selectedPromotoraByTastingId,
     liveClock.todayYmd,
     degustacionNotifications.unreadItems,
   ]);
 
-  // Lista unificada de degustaciones (archivando automáticamente cualquier solicitud previa al día activo a medida que avanzan las semanas)
+  // Lista unificada de degustaciones (las solicitudes SOLICITADA FDV permanecen activas hasta decisión explícita de Trade Marketing)
   const tastingSchedule = useMemo<TastingScheduleItem[]>(() => {
     const todayYmd = liveClock.todayYmd;
     const normalizedLocal = localSellerRequests.map((item) =>
-      item.date && item.date < todayYmd
+      item.status !== 'PENDIENTE' && item.date && item.date < todayYmd
         ? { ...item, isArchived: true, status: 'COMPLETADO' as const }
         : item
     );
@@ -443,6 +465,36 @@ export const FieldPromotoraView: React.FC = () => {
     () => tastingSchedule.filter((item) => item.isArchived).length,
     [tastingSchedule]
   );
+  const pendingSolicitadasCount = useMemo(
+    () =>
+      tastingSchedule.filter((item) => !item.isArchived && item.status === 'PENDIENTE').length,
+    [tastingSchedule]
+  );
+
+  const extractCleanSellerLabel = useCallback((rawApplicant?: string): string => {
+    return String(rawApplicant || '')
+      .replace(/\s*\(Vendedor FDV\)/gi, '')
+      .trim();
+  }, []);
+
+  const availableSellers = useMemo<string[]>(() => {
+    const byKey = new Map<string, string>();
+    tastingSchedule.forEach((item) => {
+      const cleanLabel = extractCleanSellerLabel(item.sellerApplicant);
+      if (
+        !cleanLabel ||
+        cleanLabel.toUpperCase() === 'TRADE MARKETING' ||
+        cleanLabel.toUpperCase() === 'VENTAS'
+      ) {
+        return;
+      }
+      const key = canonicalStaffKey(cleanLabel);
+      if (key && !byKey.has(key)) {
+        byKey.set(key, cleanLabel);
+      }
+    });
+    return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [tastingSchedule, extractCleanSellerLabel]);
 
   // Opciones únicas de filtros derivadas directamente de tastingSchedule y visits
   const availableDays = useMemo(() => {
@@ -485,13 +537,29 @@ export const FieldPromotoraView: React.FC = () => {
     }
   }, [tastingViewMode, tastingDatesCountMap, tastingDayFilter]);
 
-  // Evaluador unificado de filtros activos (Fecha / Mes / Rango + Jornada + Producto + Promotora + Búsqueda)
+  // Evaluador unificado de filtros activos (Fecha / Mes / Rango + Vendedor + Estado + Jornada + Producto + Promotora + Búsqueda)
   const matchesActiveTastingFilters = useCallback(
     (item: TastingScheduleItem): boolean => {
       if (tastingPromotoraFilter !== 'TODAS') {
-        const filterKey = canonicalStaffKey(tastingPromotoraFilter);
-        const itemKey = canonicalStaffKey(item.responsibleName);
-        if (!itemKey || itemKey !== filterKey) return false;
+        if (tastingPromotoraFilter === 'POR_ASIGNAR') {
+          if (!/^POR ASIGNAR|^SIN ASIGNAR/i.test(item.responsibleName || '')) {
+            return false;
+          }
+        } else {
+          const filterKey = canonicalStaffKey(tastingPromotoraFilter);
+          const itemKey = canonicalStaffKey(item.responsibleName);
+          if (!itemKey || itemKey !== filterKey) return false;
+        }
+      }
+
+      if (tastingSellerFilter !== 'TODOS') {
+        const sellerKey = canonicalStaffKey(extractCleanSellerLabel(item.sellerApplicant));
+        const filterSellerKey = canonicalStaffKey(tastingSellerFilter);
+        if (!sellerKey || sellerKey !== filterSellerKey) return false;
+      }
+
+      if (tastingStatusFilter !== 'TODOS') {
+        if (item.status !== tastingStatusFilter) return false;
       }
 
       const rawRecordDate = item.date || item.rawComments?.date;
@@ -568,7 +636,16 @@ export const FieldPromotoraView: React.FC = () => {
         const matchesSeller = item.sellerApplicant.toLowerCase().includes(q);
         const matchesZone = item.zone.toLowerCase().includes(q);
         const matchesDay = (item.dayLabel || '').toLowerCase().includes(q);
-        if (!matchesStore && !matchesProduct && !matchesPromotora && !matchesSeller && !matchesZone && !matchesDay) {
+        const matchesClientCode = (item.clienteCodigo || '').toLowerCase().includes(q);
+        if (
+          !matchesStore &&
+          !matchesProduct &&
+          !matchesPromotora &&
+          !matchesSeller &&
+          !matchesZone &&
+          !matchesDay &&
+          !matchesClientCode
+        ) {
           return false;
         }
       }
@@ -577,12 +654,15 @@ export const FieldPromotoraView: React.FC = () => {
     },
     [
       tastingPromotoraFilter,
+      tastingSellerFilter,
+      tastingStatusFilter,
       tastingDayFilter,
       tastingDateFrom,
       tastingDateTo,
       tastingShiftFilter,
       tastingProductFilter,
       tastingSearchQuery,
+      extractCleanSellerLabel,
       liveClock.currentWeek.mondayYmd,
       liveClock.currentWeek.sundayYmd,
     ]
@@ -626,12 +706,22 @@ export const FieldPromotoraView: React.FC = () => {
       fileSuffix = tastingDayFilter;
     }
 
+    if (tastingSellerFilter !== 'TODOS') parts.push(`Vendedor FDV: ${tastingSellerFilter}`);
+    if (tastingStatusFilter !== 'TODOS') parts.push(`Estado: ${tastingStatusFilter}`);
     if (tastingShiftFilter !== 'TODOS') parts.push(`Jornada: ${tastingShiftFilter}`);
     if (tastingProductFilter !== 'TODOS') parts.push(`Producto: ${tastingProductFilter}`);
-    if (tastingPromotoraFilter !== 'TODAS') parts.push(`Promotora: ${tastingPromotoraFilter}`);
+    if (tastingPromotoraFilter !== 'TODAS') {
+      parts.push(
+        `Promotora: ${
+          tastingPromotoraFilter === 'POR_ASIGNAR' ? 'Por Asignar' : tastingPromotoraFilter
+        }`
+      );
+    }
     if (tastingSearchQuery.trim()) parts.push(`Busqueda: "${tastingSearchQuery.trim()}"`);
 
     const hasSecondaryFilters =
+      tastingSellerFilter !== 'TODOS' ||
+      tastingStatusFilter !== 'TODOS' ||
       tastingShiftFilter !== 'TODOS' ||
       tastingProductFilter !== 'TODOS' ||
       tastingPromotoraFilter !== 'TODAS' ||
@@ -663,6 +753,8 @@ export const FieldPromotoraView: React.FC = () => {
     tastingDayFilter,
     tastingDateFrom,
     tastingDateTo,
+    tastingSellerFilter,
+    tastingStatusFilter,
     tastingShiftFilter,
     tastingProductFilter,
     tastingPromotoraFilter,
@@ -753,17 +845,12 @@ export const FieldPromotoraView: React.FC = () => {
 
   const buildScheduleItemFromNotification = useCallback(
     (notif: DegustacionNotificationItem): TastingScheduleItem => {
-      const isBeforeToday = Boolean(notif.date && notif.date < liveClock.todayYmd);
-      const estadoUpper = String(notif.estado || '').toUpperCase();
-      const status: TastingScheduleItem['status'] = isBeforeToday
-        ? 'COMPLETADO'
-        : estadoUpper === 'APROBADA'
-          ? 'PROGRAMADO'
-          : estadoUpper === 'EN_CURSO'
-            ? 'EN_CURSO'
-            : estadoUpper === 'COMPLETADA'
-              ? 'COMPLETADO'
-              : 'PENDIENTE';
+      const lifecycle = resolveFdvRequestLifecycle({
+        rawEstado: notif.estado,
+        isFromSellerApp: notif.source === 'vendedor_app' || Boolean(notif.degustacionId),
+        ymd: notif.date,
+        todayYmd: liveClock.todayYmd,
+      });
       return {
         id: notif.id,
         degustacionId: notif.degustacionId,
@@ -791,13 +878,13 @@ export const FieldPromotoraView: React.FC = () => {
         resultado: notif.resultado,
         leidoTrade: true,
         vistoEnTradeAt: notif.vistoEnTradeAt || new Date().toISOString(),
-        status,
+        status: lifecycle.uiStatus,
         currentSamples: notif.resultado?.personasAlcanzadas || 0,
         targetSamples: notif.targetSamples,
         requestedQty: notif.requestedQty,
         sellerApplicant: `${notif.sellerName} (Vendedor FDV)`,
         lotNumber: notif.degustacionId,
-        isArchived: isBeforeToday,
+        isArchived: lifecycle.isArchived,
         notes: notif.notes,
         rawComments: notif.rawComments,
       };
@@ -824,6 +911,8 @@ export const FieldPromotoraView: React.FC = () => {
     setActiveSubTab('degustaciones');
     setTastingSearchQuery('');
     setTastingPromotoraFilter('TODAS');
+    setTastingSellerFilter('TODOS');
+    setTastingStatusFilter('TODOS');
     setTastingShiftFilter('TODOS');
     setTastingProductFilter('TODOS');
     setTastingDayFilter('TODOS');
@@ -896,6 +985,89 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   // =========================================================================
+  // ASIGNACIÓN / REASIGNACIÓN DE PROMOTORA ACTIVA (VALIDADA CONTRA NÓMINA)
+  // =========================================================================
+  const resolvePromotoraSelectValue = useCallback(
+    (rawResponsible?: string): { value: string; extraOption: string | null } => {
+      const trimmed = String(rawResponsible || '').trim();
+      if (!trimmed || /^POR ASIGNAR|^SIN ASIGNAR/i.test(trimmed)) {
+        return { value: 'POR ASIGNAR (Trade Marketing)', extraOption: null };
+      }
+      const matched = availablePromotoras.find(
+        (name) => canonicalStaffKey(name) === canonicalStaffKey(trimmed)
+      );
+      if (matched) {
+        return { value: matched, extraOption: null };
+      }
+      return { value: trimmed, extraOption: trimmed };
+    },
+    [availablePromotoras]
+  );
+
+  const handleSelectPromotoraForTasting = async (
+    item: TastingScheduleItem,
+    rawSelectedPromotora: string
+  ) => {
+    if (!item?.id) return;
+    const trimmed = String(rawSelectedPromotora || '').trim();
+    const isUnassignedChoice =
+      !trimmed || /^POR ASIGNAR/i.test(trimmed) || /^SIN ASIGNAR/i.test(trimmed);
+
+    let validatedPromotora = 'POR ASIGNAR (Trade Marketing)';
+    if (!isUnassignedChoice) {
+      const matchedActive = activeTastingStaffNames.find(
+        (name) => canonicalStaffKey(name) === canonicalStaffKey(trimmed)
+      );
+      if (!matchedActive) {
+        showToast('Seleccione únicamente una promotora activa de la nómina sincronizada.');
+        return;
+      }
+      validatedPromotora = matchedActive;
+    }
+
+    setSelectedPromotoraByTastingId((prev) => ({
+      ...prev,
+      [item.id]: validatedPromotora,
+    }));
+
+    if (selectedTastingDetail?.id === item.id) {
+      setSelectedTastingDetail((prev) =>
+        prev ? { ...prev, responsibleName: validatedPromotora } : null
+      );
+    }
+
+    if (item.status !== 'PENDIENTE') {
+      setApprovedIdsInSession((prev) => ({
+        ...prev,
+        [item.id]: validatedPromotora,
+      }));
+      const matchedVisit = visits.find(
+        (v) =>
+          v.id === item.id ||
+          v.solicitudId === item.id ||
+          (Boolean(item.degustacionId) && v.degustacionId === item.degustacionId)
+      );
+      if (matchedVisit) {
+        updateVisit(matchedVisit.id, {
+          promotoraName: validatedPromotora,
+          ...(isUnassignedChoice ? { promotoraId: '' } : {}),
+        });
+      }
+    }
+
+    try {
+      await assignSupabaseDegustacionPromotora(item.id, validatedPromotora, item.rawComments);
+      showToast(
+        isUnassignedChoice
+          ? `Promotora marcada como Por Asignar en ${item.storeName}.`
+          : `Promotora ${validatedPromotora} asignada a ${item.storeName}.`
+      );
+    } catch {
+      // Si hay latencia transitoria de red se conserva la selección en sesión
+    }
+  };
+
+  // =========================================================================
   // ACCIÓN PRINCIPAL: APROBAR SOLICITUD DE DEGUSTACIÓN (SINCRONIZA SUPABASE + MÓDULO 2)
   // =========================================================================
   const handleApproveTastingRequest = async (item: TastingScheduleItem) => {
@@ -907,7 +1079,13 @@ export const FieldPromotoraView: React.FC = () => {
 
     try {
       const promotoraPool = activeTastingStaffNames;
-      const cleanCurrent = (item.responsibleName || '')
+      const explicitSessionChoice = selectedPromotoraByTastingId[item.id];
+      const explicitlyLeftUnassigned =
+        typeof explicitSessionChoice === 'string' &&
+        /^POR ASIGNAR|^SIN ASIGNAR/i.test(explicitSessionChoice.trim());
+
+      const rawPreferred = explicitSessionChoice ?? item.responsibleName ?? '';
+      const cleanCurrent = rawPreferred
         .replace(/\(Sugerida\)/gi, '')
         .replace(/POR ASIGNAR.*/gi, '')
         .replace(/SIN ASIGNAR.*/gi, '')
@@ -915,13 +1093,14 @@ export const FieldPromotoraView: React.FC = () => {
       const canonicalCurrentProfile = cleanCurrent
         ? canonicalizeActivePromoterOrNull(cleanCurrent, undefined, module1Bundle?.staffMembers)
         : null;
-      const candidatePromotora =
-        canonicalCurrentProfile?.name &&
-        promotoraPool.some(
-          (p) => canonicalStaffKey(p) === canonicalStaffKey(canonicalCurrentProfile.name)
-        )
+      const candidatePromotora = explicitlyLeftUnassigned
+        ? 'POR ASIGNAR (Trade Marketing)'
+        : canonicalCurrentProfile?.name &&
+            promotoraPool.some(
+              (p) => canonicalStaffKey(p) === canonicalStaffKey(canonicalCurrentProfile.name)
+            )
           ? canonicalCurrentProfile.name
-          : promotoraPool[0] || '';
+          : promotoraPool[0] || 'POR ASIGNAR (Trade Marketing)';
 
       const syncResult = upsertVisitFromApprovedTasting({
         solicitudId: item.id,
@@ -942,6 +1121,17 @@ export const FieldPromotoraView: React.FC = () => {
         notes: item.notes,
       });
 
+      const finalAssignedPromotora = explicitlyLeftUnassigned
+        ? 'POR ASIGNAR (Trade Marketing)'
+        : syncResult.assignedPromotora;
+
+      if (explicitlyLeftUnassigned && syncResult.visit?.id) {
+        updateVisit(syncResult.visit.id, {
+          promotoraName: 'POR ASIGNAR (Trade Marketing)',
+          promotoraId: '',
+        });
+      }
+
       setLocalSellerRequests((prev) => prev.filter((r) => r.id !== item.id));
       setRejectedIdsInSession((prev) => {
         if (!prev.has(item.id) && (!item.degustacionId || !prev.has(item.degustacionId))) {
@@ -954,13 +1144,17 @@ export const FieldPromotoraView: React.FC = () => {
       });
       setApprovedIdsInSession((prev) => ({
         ...prev,
-        [item.id]: syncResult.assignedPromotora,
+        [item.id]: finalAssignedPromotora,
+      }));
+      setSelectedPromotoraByTastingId((prev) => ({
+        ...prev,
+        [item.id]: finalAssignedPromotora,
       }));
 
       try {
         await updateSupabaseDegustacionStatus(item.id, {
           estado: 'APROBADA',
-          promotoraAsignada: syncResult.assignedPromotora,
+          promotoraAsignada: explicitlyLeftUnassigned ? '' : finalAssignedPromotora,
           insumosCalculados: {
             ...syncResult.supplies.operationalSupplies,
             mortadelaQty: syncResult.supplies.mortadelaQty,
@@ -981,7 +1175,7 @@ export const FieldPromotoraView: React.FC = () => {
       }
 
       showToast(
-        `Solicitud aprobada y agregada automáticamente al Cronograma de Producción (${item.storeName} • ${syncResult.supplies.productFocus}: ${syncResult.supplies.plannedUnits} kg/un • Promotora: ${syncResult.assignedPromotora}).`
+        `Solicitud aprobada y agregada automáticamente al Cronograma de Producción (${item.storeName} • ${syncResult.supplies.productFocus}: ${syncResult.supplies.plannedUnits} kg/un • Promotora: ${finalAssignedPromotora}).`
       );
     } finally {
       approvingIdsRef.current.delete(item.id);
@@ -2408,7 +2602,7 @@ export const FieldPromotoraView: React.FC = () => {
             </div>
 
             {/* Barra de Filtros Sincronizados */}
-            <div className="p-3.5 bg-slate-950/60 border-b border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+            <div className="p-3.5 bg-slate-950/60 border-b border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -2710,6 +2904,35 @@ export const FieldPromotoraView: React.FC = () => {
 
               <div>
                 <select
+                  value={tastingSellerFilter}
+                  onChange={(e) => setTastingSellerFilter(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
+                >
+                  <option value="TODOS">Vendedor FDV: Todos ({availableSellers.length})</option>
+                  {availableSellers.map((seller) => (
+                    <option key={seller} value={seller}>
+                      {seller}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <select
+                  value={tastingStatusFilter}
+                  onChange={(e) => setTastingStatusFilter(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
+                >
+                  <option value="TODOS">Estado: Todos</option>
+                  <option value="PENDIENTE">⏳ Solicitadas FDV ({pendingSolicitadasCount})</option>
+                  <option value="PROGRAMADO">📅 Aprobadas / Prog.</option>
+                  <option value="EN_CURSO">▶️ En Curso</option>
+                  <option value="COMPLETADO">✓ Ejecutadas</option>
+                </select>
+              </div>
+
+              <div>
+                <select
                   value={tastingShiftFilter}
                   onChange={(e) => setTastingShiftFilter(e.target.value)}
                   className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
@@ -2742,6 +2965,7 @@ export const FieldPromotoraView: React.FC = () => {
                   className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
                 >
                   <option value="TODAS">Promotora: Todas ({totalPromotoras})</option>
+                  <option value="POR_ASIGNAR">⏳ Por Asignar (Sin promotora)</option>
                   {availablePromotoras.map((prom) => (
                     <option key={prom} value={prom}>
                       {prom}
@@ -2915,6 +3139,13 @@ export const FieldPromotoraView: React.FC = () => {
                                 <span className="text-[9px] text-zinc-400 font-normal">({item.timeRange})</span>
                               </span>
                             </div>
+                            {isPending && item.date && item.date < liveClock.todayYmd && (
+                              <div className="mt-1">
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-700/50 text-[9px] font-bold">
+                                  Fecha solicitada vencida · Pendiente decisión
+                                </span>
+                              </div>
+                            )}
                           </td>
 
                           {/* CLIENTE PDV & ZONA */}
@@ -2945,7 +3176,7 @@ export const FieldPromotoraView: React.FC = () => {
                               <a
                                 href={item.mapsUrl}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noopener noreferrer"
                                 className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1 mt-0.5"
                               >
                                 <ExternalLink className="w-2.5 h-2.5" />
@@ -3015,15 +3246,48 @@ export const FieldPromotoraView: React.FC = () => {
                           </td>
 
                           {/* RESPONSABLE & VENDEDOR */}
-                          <td className="p-3.5 whitespace-nowrap">
-                            <div className="flex items-center gap-1.5">
-                              <div className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[9px] flex items-center justify-center">
-                                {(item.responsibleName || 'P')[0]}
+                          <td className="p-3.5 whitespace-nowrap min-w-[205px]">
+                            {item.status !== 'COMPLETADO' ? (
+                              (() => {
+                                const selectResolved = resolvePromotoraSelectValue(item.responsibleName);
+                                return (
+                                  <div className="flex items-center gap-1.5">
+                                    <div className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[9px] flex items-center justify-center shrink-0">
+                                      {(item.responsibleName || 'P')[0]}
+                                    </div>
+                                    <select
+                                      value={selectResolved.value}
+                                      onChange={(e) => void handleSelectPromotoraForTasting(item, e.target.value)}
+                                      aria-label={`Asignar promotora para ${item.storeName}`}
+                                      className="w-full max-w-[180px] px-2 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 focus:border-red-500 text-[11px] font-bold text-white focus:outline-none cursor-pointer"
+                                    >
+                                      <option value="POR ASIGNAR (Trade Marketing)">
+                                        ⏳ POR ASIGNAR (Trade Mkt)
+                                      </option>
+                                      {selectResolved.extraOption && (
+                                        <option value={selectResolved.extraOption}>
+                                          {selectResolved.extraOption}
+                                        </option>
+                                      )}
+                                      {availablePromotoras.map((prom) => (
+                                        <option key={prom} value={prom}>
+                                          {prom}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                );
+                              })()
+                            ) : (
+                              <div className="flex items-center gap-1.5">
+                                <div className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[9px] flex items-center justify-center">
+                                  {(item.responsibleName || 'P')[0]}
+                                </div>
+                                <span className="font-bold text-white text-xs">{item.responsibleName}</span>
                               </div>
-                              <span className="font-bold text-white text-xs">{item.responsibleName}</span>
-                            </div>
-                            <div className="text-[10px] text-zinc-400 font-mono mt-0.5 flex items-center gap-1">
-                              <Users className="w-2.5 h-2.5 text-zinc-500" />
+                            )}
+                            <div className="text-[10px] text-zinc-400 font-mono mt-1 flex items-center gap-1">
+                              <Users className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
                               <span>{item.sellerApplicant}</span>
                             </div>
                           </td>
@@ -3655,12 +3919,48 @@ export const FieldPromotoraView: React.FC = () => {
                     </strong>
                   </span>
                 </div>
-                <p className="text-[11px] text-zinc-300 pt-1">
-                  Asignación actual:{' '}
-                  <strong className="text-[#FFFFFF]">
-                    {selectedTastingDetail.responsibleName}
-                  </strong>
-                </p>
+                {selectedTastingDetail.status !== 'COMPLETADO' ? (
+                  (() => {
+                    const modalSelectResolved = resolvePromotoraSelectValue(
+                      selectedTastingDetail.responsibleName
+                    );
+                    return (
+                      <div className="pt-1.5 space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
+                          Asignación de Promotora Activa:
+                        </label>
+                        <select
+                          value={modalSelectResolved.value}
+                          onChange={(e) =>
+                            void handleSelectPromotoraForTasting(selectedTastingDetail, e.target.value)
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-xl bg-black border border-white/15 focus:border-red-500 text-xs font-bold text-white focus:outline-none cursor-pointer"
+                        >
+                          <option value="POR ASIGNAR (Trade Marketing)">
+                            ⏳ POR ASIGNAR (Trade Marketing)
+                          </option>
+                          {modalSelectResolved.extraOption && (
+                            <option value={modalSelectResolved.extraOption}>
+                              {modalSelectResolved.extraOption}
+                            </option>
+                          )}
+                          {availablePromotoras.map((prom) => (
+                            <option key={prom} value={prom}>
+                              {prom}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <p className="text-[11px] text-zinc-300 pt-1">
+                    Asignación actual:{' '}
+                    <strong className="text-[#FFFFFF]">
+                      {selectedTastingDetail.responsibleName}
+                    </strong>
+                  </p>
+                )}
               </div>
             </div>
 

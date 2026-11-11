@@ -101,11 +101,23 @@ export function useDegustacionesNotifications(
     }, 7500);
   }, []);
 
-  // Procesa un evento INSERT (Realtime WebSocket o puente local) garantizando deduplicación estricta (+1 exacto)
+  // Procesa un evento INSERT (Realtime WebSocket, reconciliación Render o puente local) garantizando deduplicación estricta (+1 exacto)
   const handleIncomingInsertRow = useCallback(
     (rawRow: Partial<RawSupabaseSurvey> | null | undefined, shouldNotifyToast: boolean) => {
       const parsed = parseDegustacionNotificationRow(rawRow);
-      if (!parsed || parsed.leidoTrade) return;
+      if (!parsed) return;
+      if (parsed.leidoTrade) {
+        const cKey = normalizeCanonicalDegustacionId(parsed.degustacionId, parsed.id);
+        const alreadyKnown =
+          baselineSeenIdsRef.current.has(parsed.id) ||
+          (Boolean(cKey) && baselineSeenIdsRef.current.has(cKey));
+        baselineSeenIdsRef.current.add(parsed.id);
+        if (cKey) baselineSeenIdsRef.current.add(cKey);
+        if (!alreadyKnown) {
+          onRealtimeChangeRef.current?.();
+        }
+        return;
+      }
 
       const canonicalDegKey = normalizeCanonicalDegustacionId(parsed.degustacionId, parsed.id);
       let wasInsertedNew = false;
