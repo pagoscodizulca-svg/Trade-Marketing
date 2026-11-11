@@ -1,0 +1,5 @@
+{
+  "name": "TradeTrack Audit: Sistema de Trade Marketing y Contraloría",
+  "description": "Plataforma integral de Trade Marketing, supervisión geocercada de promotoras en PDV, workflow de autorizaciones multinivel con Contraloría, trazabilidad inmutable y conciliación de inventarios y viáticos.",
+  "requestFramePermissions": ["geolocation"]
+}

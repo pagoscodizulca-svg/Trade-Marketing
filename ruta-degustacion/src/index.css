@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme {
+  /* Paleta corporativa CODIZULCA: negro, rojo y blanco */
+  --color-ink: #0a0a0a;
+  --color-brand: #c1121f;
+  --color-brand-dark: #9b0e18;
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  button {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  ::selection {
+    background: #c1121f;
+    color: #fff;
+  }
+}

@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/* =========================================================================
+   DISEÑO EJECUTIVO ESTILIZADO CODIZULCA C.A. (NEGRO GRAFITO, ROJO Y BLANCO)
+   Inspiración: Linear / Stripe / Enterprise SaaS de alta precisión
+   ========================================================================= */
+@theme {
+  /* Escala Grafito & Obsidiana Suave (Sin tonos azules ni contrastes bruscos) */
+  --color-slate-50: #fafafa;
+  --color-slate-100: #f4f4f5;
+  --color-slate-200: #e4e4e7;
+  --color-slate-300: #d4d4d8;
+  --color-slate-400: #a1a1aa;
+  --color-slate-500: #71717a;
+  --color-slate-600: #52525b;
+  --color-slate-700: #27272a;
+  --color-slate-800: #1f1f23;
+  --color-slate-900: #121215;
+  --color-slate-950: #09090b;
+
+  --color-zinc-50: #fafafa;
+  --color-zinc-100: #f4f4f5;
+  --color-zinc-200: #e4e4e7;
+  --color-zinc-300: #d4d4d8;
+  --color-zinc-400: #a1a1aa;
+  --color-zinc-500: #71717a;
+  --color-zinc-600: #52525b;
+  --color-zinc-700: #27272a;
+  --color-zinc-800: #1f1f23;
+  --color-zinc-900: #121215;
+  --color-zinc-950: #09090b;
+
+  /* Rojo Corporativo Codizulca Refinado */
+  --color-red-50: #fef2f2;
+  --color-red-100: #fee2e2;
+  --color-red-200: #fecaca;
+  --color-red-300: #fca5a5;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #dc2626;
+  --color-red-700: #b91c1c;
+  --color-red-800: #991b1b;
+  --color-red-900: #7f1d1d;
+  --color-red-950: #2d0a0a;
+
+  --color-rose-400: #f87171;
+  --color-rose-500: #ef4444;
+  --color-rose-600: #dc2626;
+  --color-rose-700: #b91c1c;
+  --color-rose-950: #2d0a0a;
+}
+
+@layer base {
+  :root {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color-scheme: dark;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #09090b;
+    color: #fafafa;
+    background-image:
+      radial-gradient(ellipse 75% 35% at 50% -10%, rgba(220, 38, 38, 0.11), transparent 70%),
+      radial-gradient(ellipse 50% 30% at 90% 100%, rgba(220, 38, 38, 0.05), transparent 65%);
+    background-attachment: fixed;
+    letter-spacing: -0.011em;
+  }
+
+  /* Estilizado global de botones: bisel superior fino, transiciones fluidas y tacto ejecutivo */
+  button {
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  button:not(:disabled):active {
+    transform: scale(0.985);
+  }
+
+  /* Botones primarios rojos con acabado satinado y bisel de luz */
+  button.bg-red-600,
+  a.bg-red-600 {
+    background-image: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.22),
+      0 2px 10px -2px rgba(220, 38, 38, 0.4);
+  }
+
+  button.bg-red-600:hover,
+  a.bg-red-600:hover {
+    background-image: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.3),
+      0 4px 16px -2px rgba(220, 38, 38, 0.55);
+  }
+
+  /* Tablas ejecutivas limpias */
+  table thead tr {
+    background-color: rgba(15, 15, 18, 0.95);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  table tbody tr {
+    transition: background-color 0.15s ease;
+  }
+
+  /* Inputs y Selects estilizados */
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):focus,
+  select:focus,
+  textarea:focus {
+    border-color: rgba(239, 68, 68, 0.7) !important;
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.14);
+  }
+}
+
+/* Custom Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #dc2626;
+}
+
+/* Glassmorphism & Elevation Utilities */
+.glass-panel {
+  background: rgba(18, 18, 21, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7), inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+}
+
+.glass-card {
+  background: rgba(18, 18, 21, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card:hover {
+  border-color: rgba(220, 38, 38, 0.35);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 0 15px -3px rgba(220, 38, 38, 0.12);
+}
+
+/* Interactive focus ring standard */
+*:focus-visible {
+  outline: 2px solid #ef4444;
+  outline-offset: 2px;
+}
+
+/* =========================================================================
+   ESTILOS DE IMPRESIÓN Y SOPORTE FÍSICO / PDF PARA CODIZULCA C.A.
+   Optimizado para cero gasto de tinta negra: fondo blanco, tipografía nítida
+   y membrete corporativo oficial en papel.
+   ========================================================================= */
+
+@media print {
+  /* Ocultar elementos no imprimibles de interfaz */
+  header,
+  footer,
+  .no-print,
+  button:not(.force-print),
+  input:not(.force-print),
+  select:not(.force-print),
+  .fixed,
+  [role="dialog"] {
+    display: none !important;
+  }
+
+  /* Fondo blanco y texto oscuro nítido */
+  html, body, #root, main {
+    background-color: #ffffff !important;
+    background-image: none !important;
+    color: #111827 !important;
+    font-size: 11pt !important;
+    line-height: 1.4 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Contenedores y tarjetas */
+  .bg-black,
+  .bg-zinc-950,
+  .bg-zinc-900,
+  .bg-zinc-900\/50,
+  .bg-zinc-800,
+  .glass-panel,
+  .glass-card {
+    background-color: #ffffff !important;
+    border-color: #e5e7eb !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+  }
+
+  /* Colores de texto en impresión */
+  .text-white,
+  .text-zinc-200,
+  .text-zinc-300,
+  .text-zinc-400,
+  .text-slate-100,
+  .text-slate-200,
+  .text-slate-300,
+  .text-slate-400 {
+    color: #1f2937 !important;
+  }
+
+  .text-red-500,
+  .text-red-600 {
+    color: #b91c1c !important;
+  }
+
+  .text-zinc-500,
+  .text-slate-500 {
+    color: #4b5563 !important;
+  }
+
+  /* Tablas para impresión */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+    background-color: #f3f4f6 !important;
+  }
+
+  tr {
+    page-break-inside: avoid !important;
+    page-break-after: auto !important;
+  }
+
+  th, td {
+    border: 1px solid #d1d5db !important;
+    padding: 6px 8px !important;
+    color: #111827 !important;
+  }
+
+  th {
+    background-color: #e5e7eb !important;
+    font-weight: 800 !important;
+    text-transform: uppercase !important;
+  }
+
+  /* Elementos específicos que solo aparecen en impresión */
+  .print-only {
+    display: block !important;
+  }
+
+  /* Paginación y márgenes */
+  @page {
+    margin: 1.2cm 1cm 1.5cm 1cm;
+    size: auto;
+  }
+}
+
+/* Ocultar elementos print-only en pantalla normal */
+@media screen {
+  .print-only {
+    display: none !important;
+  }
+}
