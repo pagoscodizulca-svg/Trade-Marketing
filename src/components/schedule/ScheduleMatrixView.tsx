@@ -6,7 +6,6 @@ import {
   FileSpreadsheet,
   Plus,
   Trash2,
-  RefreshCw,
   ExternalLink,
   Store as StoreIcon,
   Zap,
@@ -46,7 +45,10 @@ import {
   Metric360SwitcherItem,
 } from '../common/Metric360DashboardModal';
 import { canonicalStaffKey } from '../../services/supabaseModule1';
-import { updateCronogramaPromotoraIdInSupabase } from '../../services/degustacionesPipelineService';
+import {
+  assignAcceptedDegustacionToPromotoraRoute,
+  isValidUuid,
+} from '../../services/degustacionesPipelineService';
 
 export const ScheduleMatrixView: React.FC = () => {
   const { 
@@ -54,6 +56,7 @@ export const ScheduleMatrixView: React.FC = () => {
     stores, 
     users,
     module1Bundle,
+    isCronogramaRealtimeConnected,
     updateVisitFromProductFill, 
     updateVisit, 
     addVisit, 
@@ -79,10 +82,15 @@ export const ScheduleMatrixView: React.FC = () => {
       const isMorning = v.shift === 'MAÑANA';
       const totalUnits = v.plannedUnits || (v.mortadelaQty + v.espaldaQty + v.arrozQty) || supItem?.requestedQty || 1;
       const targetSamples = supItem?.targetSamples ?? 0;
-      const isArchived = Boolean(supItem?.isArchived) || Boolean(v.date && v.date < todayYmd);
-      const status: TastingScheduleItem['status'] = isArchived
-        ? 'COMPLETADO'
-        : v.status === 'COMPLETADA' || supItem?.status === 'COMPLETADO'
+      const enHistorial = Boolean(
+        supItem?.enHistorial ??
+          supItem?.isArchived ??
+          v.enHistorial ??
+          (!supItem && Boolean(v.date && v.date < todayYmd))
+      );
+      const isArchived = enHistorial;
+      const status: TastingScheduleItem['status'] =
+        v.status === 'COMPLETADA' || supItem?.status === 'COMPLETADO'
           ? 'COMPLETADO'
           : v.status === 'EN_CURSO' || supItem?.status === 'EN_CURSO'
             ? 'EN_CURSO'
@@ -108,6 +116,9 @@ export const ScheduleMatrixView: React.FC = () => {
         acceptancePercent: supItem?.acceptancePercent,
         sellerApplicant: supItem?.sellerApplicant || `${v.sellerName || 'SIN VENDEDOR'} (Vendedor FDV)`,
         isArchived,
+        enHistorial,
+        archivadoEn: supItem?.archivadoEn ?? v.archivadoEn ?? null,
+        motivoArchivo: supItem?.motivoArchivo ?? v.motivoArchivo ?? null,
         notes: v.notes || supItem?.notes,
         rawComments: supItem?.rawComments,
       };
@@ -692,11 +703,28 @@ export const ScheduleMatrixView: React.FC = () => {
         
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative z-10">
           <div>
-            <div className="flex items-center gap-2 mb-1.5">
+            <div className="flex flex-wrap items-center gap-2 mb-1.5">
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-red-600/20 text-red-400 uppercase tracking-wider border border-red-500/30">
                 CODIZULCA C.A. · AUTOMATIZACIÓN DE TRADE
               </span>
               <span className="text-xs text-slate-400 font-mono">Sincronización Supabase · Llenado por Lote</span>
+              <span
+                className={`inline-flex items-center gap-1.5 text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full border ${
+                  isCronogramaRealtimeConnected
+                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                    : 'bg-zinc-900 text-zinc-400 border-white/10'
+                }`}
+                title="Sincronización automática con las autorizaciones del Módulo 1"
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isCronogramaRealtimeConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+                {isCronogramaRealtimeConnected
+                  ? 'En Vivo · Realtime Módulo 1 ↔ Cronograma'
+                  : 'Sincronizado con Módulo 1'}
+              </span>
             </div>
             <h2 className="text-2xl font-black text-white tracking-tight flex items-center gap-2">
               <span>Llenado por Lote y Matriz General de Degustaciones</span>
@@ -2082,16 +2110,45 @@ export const ScheduleMatrixView: React.FC = () => {
                                   promotoraId: targetActiveUser?.id || '',
                                 });
 
-                                if (targetActiveUser?.id) {
-                                  void updateCronogramaPromotoraIdInSupabase({
-                                    cronogramaId: v.id,
-                                    promotoraId: targetActiveUser.id,
-                                    allowedPromotoraIds: allowedIds,
-                                  });
+                                if (targetActiveUser?.id && isValidUuid(targetActiveUser.id)) {
+                                  const candidateCronogramaId = isValidUuid(v.cronogramaId)
+                                    ? v.cronogramaId!
+                                    : isValidUuid(v.id) && !v.solicitudId
+                                      ? v.id
+                                      : null;
+                                  const candidateSurveyId = isValidUuid(v.solicitudId)
+                                    ? v.solicitudId!
+                                    : isValidUuid(v.id)
+                                      ? v.id
+                                      : null;
+
+                                  if (candidateCronogramaId || candidateSurveyId) {
+                                    void assignAcceptedDegustacionToPromotoraRoute({
+                                      promotoraId: targetActiveUser.id,
+                                      surveyId: candidateSurveyId,
+                                      cronogramaId: candidateCronogramaId,
+                                      confirmarAceptacion: true,
+                                      allowedPromotoraIds: allowedIds,
+                                    })
+                                      .then((rpcRes) => {
+                                        updateVisit(v.id, {
+                                          cronogramaId: rpcRes.cronograma_id,
+                                          promotoraId: targetActiveUser.id,
+                                        });
+                                      })
+                                      .catch((err) => {
+                                        showNotification(
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'No se pudo sincronizar la asignación con /portal/ruta.',
+                                          0
+                                        );
+                                      });
+                                  }
                                 }
 
                                 showNotification(
-                                  `✓ Promotora ${newPromotora} agendada en ${v.storeName} (${v.dayLabel} - ${v.shift}).`,
+                                  `✓ Promotora ${newPromotora} agendada en ${v.storeName} (${v.dayLabel} - ${v.shift}) y sincronizada con /portal/ruta.`,
                                   1
                                 );
                               }}

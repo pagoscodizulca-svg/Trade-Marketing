@@ -17,7 +17,17 @@
     "verify:excel-dates": "tsx scripts/verifyExcelDateNormalizer.ts",
     "verify:excel-parser": "tsx scripts/verifyExcelDateParser.ts",
     "verify:carga-multiformato": "tsx scripts/verifyRefactorCargaMultiformato.ts",
-    "verify:fdv-restore": "tsx scripts/verifyFdvDegustacionesRestoration.ts"
+    "verify:fdv-restore": "tsx scripts/verifyFdvDegustacionesRestoration.ts",
+    "verify:zero-trust-ruta": "tsx scripts/verifyZeroTrustRutaSync.ts",
+    "verify:metric-360": "tsx scripts/verifyMetric360Integrity.ts",
+    "corte:historial": "tsx scripts/migrateCorteInicialHistorial.ts",
+    "verify:historial-fase1": "tsx scripts/verifyHistorialDegustacionesFase1.ts",
+    "verify:cierre-dominical": "tsx scripts/verifyFase2CierreDominicalCron.ts",
+    "verify:asistencia-evidencias": "tsx scripts/verifyAsistenciaEvidenciasCondicional.ts",
+    "verify:ciclo-semanal": "tsx scripts/verifyCicloSemanalDegustaciones.ts",
+    "verify:pdf-autorizacion": "tsx scripts/verifyPendingAuthorizationPdf.ts",
+    "verify:maestros": "tsx scripts/verifyMasterDataSync.ts",
+    "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts"
   },
   "dependencies": {
     "@google/genai": "3.1.0",
@@ -33,7 +43,8 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^8.3.0",
-    "xlsx": "0.18.5"
+    "xlsx": "0.18.5",
+    "zod": "3.24.2"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

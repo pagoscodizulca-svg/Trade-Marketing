@@ -7,13 +7,25 @@ import {
   ShiftType,
 } from '../types';
 import type { TastingScheduleItem } from '../components/field/FieldPromotoraView';
+import type {
+  AsistenciaEvidenciaDbRow,
+  AsistenciaJornadaDbRow,
+} from '../types/attendanceEvidences';
 import type { CronogramaDegustacionRecord } from '../types/degustacionesPipeline';
 import { calculateProductionSupplies } from '../utils/productionSuppliesCalculator';
-import { formatToDdMmYyyy, normalizeExcelDate } from '../utils/excelDateNormalizer';
+import { formatToDdMmYyyy } from '../utils/excelDateNormalizer';
+import { FEATURE_FLAGS } from '../config/featureFlags';
+import {
+  extractCaracasWallClockParts,
+  isTastingBeforeTodayCaracas,
+  isTastingInPastCaracasWeek,
+} from '../utils/caracasWeekCycle';
+import { assertCanMutateTastingByWeekCycle } from './degustacionesWeeklyCycleService';
 import {
   SUPABASE_ANON_KEY as CLIENT_SUPABASE_ANON_KEY,
   SUPABASE_REST_URL as CLIENT_SUPABASE_REST_URL,
   assertSupabaseConfigured,
+  getCachedAccessToken,
   getSupabaseRealtimeClient,
 } from './supabaseClient';
 import {
@@ -22,6 +34,7 @@ import {
   fetchFdvPlanificadorRenderDegustaciones,
   fetchNonDegustacionSurveysViaSdk,
   getCronogramaTableSupport,
+  getSurveysArchiveColumnsSupport,
   getSurveysLeidoTradeSupport,
   isMissingColumnPostgrestError,
   isMissingTablePostgrestError,
@@ -34,6 +47,7 @@ import {
   sanitizeExternalHttpsUrl,
   sanitizeFdvText,
   setCronogramaTableSupport,
+  setSurveysArchiveColumnsSupport,
   setSurveysLeidoTradeSupport,
   syncDecisionToFdvPlanificadorRender,
   validateFdvRenderEndpoint,
@@ -54,12 +68,15 @@ export const FDV_PLANIFICADOR_RENDER_API_URL =
       ?.VITE_FDV_PLANIFICADOR_API_URL
   ) || DEFAULT_FDV_RENDER_API_URL;
 
-const supabaseHeaders = (extra?: Record<string, string>): Record<string, string> => ({
-  apikey: SUPABASE_ANON_KEY,
-  Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-  'Content-Type': 'application/json',
-  ...extra,
-});
+const supabaseHeaders = (extra?: Record<string, string>): Record<string, string> => {
+  const activeJwt = getCachedAccessToken();
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${activeJwt || SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+};
 
 const PROGRESSIVE_RETRY_DELAYS_MS = [600, 1400] as const;
 
@@ -209,6 +226,9 @@ export interface RawSupabaseSurvey {
   created_at?: string;
   leido_trade?: boolean | null;
   visto_en_trade_at?: string | null;
+  en_historial?: boolean | null;
+  archivado_en?: string | null;
+  motivo_archivo?: string | null;
 }
 
 // ============================================================================
@@ -281,6 +301,8 @@ export interface AttendanceSlotEvent {
 
 export interface AttendanceRecord {
   id: string;
+  promotoraId?: string;
+  masterCategory?: StaffCategory;
   promotora: string;
   initials: string;
   email: string;
@@ -378,6 +400,23 @@ export interface StaffMemberRecord {
   totalUnits: number;
 }
 
+export interface ConsumerSurveyRecord {
+  id: string;
+  surveyType: 'Breve' | 'Profunda';
+  date: string; // YYYY-MM-DD en America/Caracas (UTC-4)
+  dayLabel: string;
+  shift: ShiftType;
+  storeName: string;
+  zone: string;
+  promotora: string;
+  productName: string;
+  rating: number | null; // Acotado en [0, 5] o null si sin calificación
+  highAcceptance: boolean;
+  acceptanceLabel: string;
+  purchaseIntent: string;
+  createdAt?: string;
+}
+
 export interface ConsumerSurveySummary {
   totalSurveys: number;
   breveCount: number;
@@ -393,8 +432,11 @@ export interface Module1SupabaseBundle {
   priceComparisons: PriceComparisonThreeBrands[];
   inventorySampling: InventorySamplingRecord[];
   attendanceRecords: AttendanceRecord[];
+  asistenciaJornadas?: AsistenciaJornadaDbRow[];
+  asistenciaEvidencias?: AsistenciaEvidenciaDbRow[];
   merchandisingRecords: MerchandisingRecord[];
   staffMembers: StaffMemberRecord[];
+  consumerSurveys: ConsumerSurveyRecord[];
   surveySummary: ConsumerSurveySummary;
   fetchedAt: string;
 }
@@ -418,9 +460,7 @@ function toNum(val: unknown, fallback = 0): number {
 }
 
 export function getTodayVeYmd(): string {
-  const now = new Date();
-  const ve = new Date(now.getTime() - 4 * 60 * 60 * 1000);
-  return ve.toISOString().slice(0, 10);
+  return extractCaracasWallClockParts().ymd;
 }
 
 function formatDateYmd(dateStr: string | undefined | null): string {
@@ -715,12 +755,23 @@ export function toSortableTimestamp(dateVal?: string | null, createdAtVal?: stri
     if (!s) return 0;
     const trimmed = String(s).trim();
     if (!trimmed) return 0;
-    const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    // Fechas calendario puras YYYY-MM-DD (o T00:00:00Z sintético): fijar al mediodía Venezuela (16:00 UTC) para evitar desfase -1 día en UTC-4
+    const ymdCalendarMatch = trimmed.match(
+      /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]00:00(?::00(?:\.0+)?)?(?:Z|[+-]00:?00)?)?$/i
+    );
+    if (ymdCalendarMatch) {
+      const yyyy = Number(ymdCalendarMatch[1]);
+      const mm = Number(ymdCalendarMatch[2]);
+      const dd = Number(ymdCalendarMatch[3]);
+      const dt = Date.UTC(yyyy, mm - 1, dd, 16, 0, 0);
+      if (!Number.isNaN(dt)) return dt;
+    }
+    const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
     if (dmyMatch) {
       const dd = Number(dmyMatch[1]);
       const mm = Number(dmyMatch[2]);
       const yyyy = Number(dmyMatch[3]);
-      const dt = new Date(yyyy, mm - 1, dd).getTime();
+      const dt = Date.UTC(yyyy, mm - 1, dd, 16, 0, 0);
       if (!Number.isNaN(dt)) return dt;
     }
     const parsed = new Date(trimmed).getTime();
@@ -920,6 +971,75 @@ async function fetchCronogramaDegustacionesSafe(): Promise<CronogramaDegustacion
   }
 }
 
+let asistenciaTablesSupport: boolean | null = null;
+
+async function fetchAsistenciaEvidenciasSafe(): Promise<{
+  jornadas: AsistenciaJornadaDbRow[];
+  evidencias: AsistenciaEvidenciaDbRow[];
+}> {
+  if (asistenciaTablesSupport === false) {
+    return { jornadas: [], evidencias: [] };
+  }
+  try {
+    const client = getSupabaseRealtimeClient();
+    if (!client) return { jornadas: [], evidencias: [] };
+
+    const [jornadasRes, evidenciasRes] = await Promise.all([
+      client
+        .from('asistencias_jornada')
+        .select('*')
+        .order('fecha_jornada', { ascending: false })
+        .limit(1000),
+      client
+        .from('asistencia_evidencias')
+        .select('*')
+        .order('capturado_en_servidor', { ascending: false })
+        .limit(3000),
+    ]);
+
+    if (jornadasRes.error) {
+      if (
+        isMissingTablePostgrestError(
+          jornadasRes.status || jornadasRes.error.code || '',
+          jornadasRes.error.message
+        )
+      ) {
+        asistenciaTablesSupport = false;
+      }
+      return { jornadas: [], evidencias: [] };
+    }
+
+    if (evidenciasRes.error) {
+      if (
+        isMissingTablePostgrestError(
+          evidenciasRes.status || evidenciasRes.error.code || '',
+          evidenciasRes.error.message
+        )
+      ) {
+        asistenciaTablesSupport = false;
+      }
+      return {
+        jornadas: Array.isArray(jornadasRes.data)
+          ? (jornadasRes.data as AsistenciaJornadaDbRow[])
+          : [],
+        evidencias: [],
+      };
+    }
+
+    asistenciaTablesSupport = true;
+    return {
+      jornadas: Array.isArray(jornadasRes.data)
+        ? (jornadasRes.data as AsistenciaJornadaDbRow[])
+        : [],
+      evidencias: Array.isArray(evidenciasRes.data)
+        ? (evidenciasRes.data as AsistenciaEvidenciaDbRow[])
+        : [],
+    };
+  } catch {
+    return { jornadas: [], evidencias: [] };
+  }
+}
+
 export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: number): Promise<Module1SupabaseBundle> {
   // Sin tasa de respaldo: si no se puede obtener en vivo, es null y los importes en Bs no se calculan.
   const liveBcvRate: number | null =
@@ -940,6 +1060,7 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     rawOtherSurveyRowsFromDb,
     rawRenderDegustacionRowsFast,
     rawCronogramaRows,
+    asistenciaRelationalBundle,
   ] = await Promise.all([
     supabaseGet<RawSupabaseStaff[]>(
       'staff?select=id,name,role,email,status,creatorId,uploaderEmail,created_at&order=created_at.desc&limit=1000'
@@ -953,12 +1074,15 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     supabaseGet<RawSupabasePrice[]>('prices?select=*&order=date.desc&limit=1000'),
     supabaseGet<RawSupabaseInventory[]>('inventory?select=*&order=date.desc&limit=1000'),
     fetchDegustacionSurveysViaSdk(),
-    fetchNonDegustacionSurveysViaSdk(),
+    fetchNonDegustacionSurveysViaSdk(undefined, {
+      includeConsumerSurveys: FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS,
+    }),
     Promise.race([
       renderReconciliationPromise,
       waitMs(3200).then(() => null),
     ]),
     fetchCronogramaDegustacionesSafe(),
+    fetchAsistenciaEvidenciasSafe(),
   ]);
 
   // --------------------------------------------------------------------------
@@ -1012,7 +1136,6 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const cleanAddress = String(statusObj.address || '').trim();
     const cleanPhone = String(statusObj.phone || '').trim();
     const cleanEmail = String(s.email || '').trim();
-    const cleanPassword = String(statusObj.password || '').trim();
     const validPhoto =
       typeof statusObj.photoUrl === 'string' &&
       (statusObj.photoUrl.startsWith('data:image') ||
@@ -1033,7 +1156,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
       address: cleanAddress,
       assignedStore: assignedLoc,
       status: 'Activo',
-      password: cleanPassword,
+      // Seguridad Zero Trust: jamás hidratar contraseñas de base de datos en memoria del cliente
+      password: '',
       creatorId: s.creatorId ? String(s.creatorId) : undefined,
       photoUrl: validPhoto,
       shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${cleanAddress}`,
@@ -1151,17 +1275,37 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     }
 
     const ymd = formatDateYmd(c.date || row.date);
-    const createdYmd = formatDateYmd(row.created_at || c.created_at || row.date || c.date);
     const aprobadoYmd = formatDateYmd(c.aprobadoEnTradeAt);
+    const isPastDateOrCycle = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+      ? isTastingInPastCaracasWeek(ymd, undefined, row.created_at || c.created_at)
+      : isTastingBeforeTodayCaracas(ymd, undefined, row.created_at || c.created_at);
+
     const lifecycle = resolveFdvRequestLifecycle({
       rawEstado: c.estado || c.status,
       isFromSellerApp,
       ymd,
       todayYmd,
       aprobadoYmd,
+      enHistorial: Boolean(row.en_historial) || isPastDateOrCycle,
     });
-    const isRejectedOrCancelled = lifecycle.isRejectedOrCancelled;
     const itemStatus = lifecycle.uiStatus;
+    const resolvedEnHistorial =
+      Boolean(row.en_historial) ||
+      isPastDateOrCycle ||
+      lifecycle.enHistorial ||
+      itemStatus === 'NO_AUTORIZADA';
+    const resolvedArchivadoEn =
+      (row.archivado_en ? String(row.archivado_en) : null) ||
+      (c.archivado_en ? String(c.archivado_en) : null) ||
+      null;
+    const resolvedMotivoArchivo =
+      (row.motivo_archivo ? String(row.motivo_archivo) : null) ||
+      (c.motivo_archivo ? String(c.motivo_archivo) : null) ||
+      (itemStatus === 'NO_AUTORIZADA'
+        ? 'NO_AUTORIZADA'
+        : resolvedEnHistorial
+          ? 'CORTE_DIARIO_CARACAS'
+          : null);
     const dayLabel = formatDayLabelEs(ymd);
 
     const rawTurnoToken = sanitizeFdvText(c.turno, 30).toUpperCase();
@@ -1244,11 +1388,12 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     const requierePromotora = c.requierePromotora !== undefined ? Boolean(c.requierePromotora) : true;
     const notasTradeMarketing = sanitizeFdvText(c.notasTradeMarketing, 500);
     const createdAtIso = sanitizeFdvText(row.created_at || c.created_at, 60);
+    const createdYmd = createdAtIso ? formatDateYmd(createdAtIso) : ymd;
     const estadoUpper = lifecycle.canonicalEstado;
     const isTerminalEstado = isTerminalDegustacionEstado(estadoUpper);
     const localLedgerStamp = getLocalDegustacionReadStamp(row.id, canonicalDegId);
     const resolvedLeidoTrade =
-      Boolean(localLedgerStamp) || row.leido_trade === true || c.leido_trade === true
+      resolvedEnHistorial || Boolean(localLedgerStamp) || row.leido_trade === true || c.leido_trade === true
         ? true
         : typeof row.leido_trade === 'boolean'
           ? !isFromSellerApp || isTerminalEstado || (ymd < todayYmd && createdYmd < todayYmd)
@@ -1296,56 +1441,60 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     );
     const safeMapsUrl = sanitizeExternalHttpsUrl(c.mapsUrl);
 
-    if (!isRejectedOrCancelled) {
-      tastingItems.push({
-        id: row.id,
-        degustacionId: canonicalDegId,
-        source: isFromSellerApp ? 'vendedor_app' : sanitizeFdvText(c.source || 'trade_marketing', 60),
-        createdAt: createdAtIso,
-        date: ymd,
-        dayLabel,
-        shift,
-        turnoRaw: normalizedTurnoRaw,
-        timeRange: String(timeRange),
-        activityTitle: `Degustación ${productName}`,
-        productName,
-        productsList,
-        responsibleName: assignedPromoter,
-        storeName,
-        clienteCodigo,
-        zone,
-        address,
-        contactoPunto,
-        telefonoContacto,
-        requierePromotora,
-        promoterType,
-        materialPop,
-        notasTradeMarketing,
-        resultado: resultadoObj,
-        leidoTrade: resolvedLeidoTrade,
-        vistoEnTradeAt: resolvedVistoAt,
-        mapsUrl: safeMapsUrl,
-        status: itemStatus,
-        currentSamples: deliveredSamples,
-        targetSamples,
-        requestedQty: qty,
-        mortadelaQty,
-        espaldaQty,
-        arrozQty,
-        azucarGrams,
-        lecheGrams,
-        operationalSupplies: supplies.operationalSupplies,
-        fillProductSelection: normProd,
-        fillQuantityInput: String(qty),
-        acceptancePercent: acceptance,
-        sellerApplicant: isFromSellerApp ? `${sellerName} (Vendedor FDV)` : sellerName,
-        salesAssistedCount,
-        lotNumber: canonicalDegId || `SUP-${row.id.slice(0, 8).toUpperCase()}`,
-        isArchived: lifecycle.isArchived,
-        notes: notesParts || `Registro en Supabase (${row.type}) • ${promoterType || 'Promotora'}`,
-        rawComments: c,
-      });
-    }
+    // Todas las degustaciones ingresan a `tastingItems`:
+    // - `fecha >= hoy_caracas` y no descartadas -> Bandeja de Entrada
+    // - `fecha < hoy_caracas` o `NO_AUTORIZADA` -> Pestaña de Historial (conservando Autorizada vs No Autorizada)
+    tastingItems.push({
+      id: row.id,
+      degustacionId: canonicalDegId,
+      source: isFromSellerApp ? 'vendedor_app' : sanitizeFdvText(c.source || 'trade_marketing', 60),
+      createdAt: createdAtIso,
+      date: ymd,
+      dayLabel,
+      shift,
+      turnoRaw: normalizedTurnoRaw,
+      timeRange: String(timeRange),
+      activityTitle: `Degustación ${productName}`,
+      productName,
+      productsList,
+      responsibleName: assignedPromoter,
+      storeName,
+      clienteCodigo,
+      zone,
+      address,
+      contactoPunto,
+      telefonoContacto,
+      requierePromotora,
+      promoterType,
+      materialPop,
+      notasTradeMarketing,
+      resultado: resultadoObj,
+      leidoTrade: resolvedLeidoTrade,
+      vistoEnTradeAt: resolvedVistoAt,
+      mapsUrl: safeMapsUrl,
+      status: itemStatus,
+      currentSamples: deliveredSamples,
+      targetSamples,
+      requestedQty: qty,
+      mortadelaQty,
+      espaldaQty,
+      arrozQty,
+      azucarGrams,
+      lecheGrams,
+      operationalSupplies: supplies.operationalSupplies,
+      fillProductSelection: normProd,
+      fillQuantityInput: String(qty),
+      acceptancePercent: acceptance,
+      sellerApplicant: isFromSellerApp ? `${sellerName} (Vendedor FDV)` : sellerName,
+      salesAssistedCount,
+      lotNumber: canonicalDegId || `SUP-${row.id.slice(0, 8).toUpperCase()}`,
+      isArchived: resolvedEnHistorial,
+      enHistorial: resolvedEnHistorial,
+      archivadoEn: resolvedArchivadoEn,
+      motivoArchivo: resolvedMotivoArchivo,
+      notes: notesParts || `Registro en Supabase (${row.type}) • ${promoterType || 'Promotora'}`,
+      rawComments: c,
+    });
 
     // Regla de Negocio Estricta (Módulo 1 -> Módulo 2):
     // Al Cronograma de Producción (Matriz de Llenado e Insumos) SOLO ingresan las solicitudes
@@ -1383,6 +1532,9 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
             : itemStatus === 'EN_CURSO'
               ? 'EN_CURSO'
               : 'PENDIENTE',
+        enHistorial: resolvedEnHistorial,
+        archivadoEn: resolvedArchivadoEn,
+        motivoArchivo: resolvedMotivoArchivo,
         additionalGoods: supplies.additionalGoods,
         operationalSupplies: supplies.operationalSupplies,
       });
@@ -1406,7 +1558,6 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
   rawCronogramaRows.forEach((cd, idx) => {
     if (!cd || !cd.id) return;
-    if (cd.estado === 'RECHAZADA' || cd.estado === 'CANCELADA') return;
 
     const ymd = formatDateYmd(cd.fecha);
     const dayLabel = formatDayLabelEs(ymd);
@@ -1424,25 +1575,149 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         : null;
     const assignedPromoter = matchedProm
       ? matchedProm.name
-      : 'POR ASIGNAR (Trade Marketing)';
-    const resolvedPromotoraId = matchedProm ? matchedProm.id : '';
+      : cd.promotora_nombre?.trim() || 'POR ASIGNAR (Trade Marketing)';
+    const resolvedPromotoraId = matchedProm ? matchedProm.id : cd.promotora_id || '';
 
     const storeName = String(cd.cliente_nombre || 'PDV Sin Nombre').trim();
     const zone = String(cd.zona_direccion || 'Maracaibo / Zulia').trim();
     const sellerName = String(cd.vendedor_fdv || 'Trade Marketing').trim();
+
+    const isPastCronograma = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+      ? isTastingInPastCaracasWeek(ymd, undefined, cd.created_at)
+      : isTastingBeforeTodayCaracas(ymd, undefined, cd.created_at);
+
+    const isDiscardedEstado =
+      cd.estado === 'NO_AUTORIZADA' ||
+      cd.estado === 'RECHAZADA' ||
+      cd.estado === 'CANCELADA';
+    const isUnapprovedPast = cd.estado === 'PENDIENTE_APROBACION' && isPastCronograma;
+
     const itemStatus: TastingScheduleItem['status'] =
-      cd.estado === 'COMPLETADA'
-        ? 'COMPLETADO'
-        : cd.estado === 'EN_CURSO'
-          ? 'EN_CURSO'
-          : cd.estado === 'PENDIENTE_APROBACION'
-            ? 'PENDIENTE'
-            : 'PROGRAMADO';
+      isDiscardedEstado || isUnapprovedPast
+        ? 'NO_AUTORIZADA'
+        : cd.estado === 'COMPLETADA'
+          ? 'COMPLETADO'
+          : cd.estado === 'EN_CURSO'
+            ? 'EN_CURSO'
+            : cd.estado === 'PENDIENTE_APROBACION'
+              ? 'PENDIENTE'
+              : 'PROGRAMADO';
+
+    const isAuthorizedForModule2 =
+      cd.estado === 'APROBADA' || cd.estado === 'EN_CURSO' || cd.estado === 'COMPLETADA';
+
+    const cronEnHistorial =
+      Boolean(cd.en_historial) || isPastCronograma || itemStatus === 'NO_AUTORIZADA';
+    const cronArchivadoEn = cd.archivado_en ?? null;
+    const cronMotivoArchivo =
+      cd.motivo_archivo ??
+      (itemStatus === 'NO_AUTORIZADA'
+        ? 'NO_AUTORIZADA'
+        : cronEnHistorial
+          ? 'CORTE_DIARIO_CARACAS'
+          : null);
+
+    // Si esta fila de cronograma proviene de una solicitud FDV (survey_origen_id),
+    // enriquecer el registro existente en lugar de duplicarlo.
+    if (cd.survey_origen_id) {
+      const originSurveyId = String(cd.survey_origen_id).trim();
+      const existingTastingIdx = tastingItems.findIndex((t) => t.id === originSurveyId);
+      if (existingTastingIdx >= 0) {
+        const prevTasting = tastingItems[existingTastingIdx]!;
+        const mergedEnHistorial = cronEnHistorial || Boolean(prevTasting.enHistorial);
+        tastingItems[existingTastingIdx] = {
+          ...prevTasting,
+          cronogramaId: cd.id,
+          promotoraId: resolvedPromotoraId || undefined,
+          responsibleName: assignedPromoter,
+          status: itemStatus,
+          isArchived: mergedEnHistorial,
+          enHistorial: mergedEnHistorial,
+          archivadoEn: cronArchivadoEn || prevTasting.archivadoEn || null,
+          motivoArchivo: cronMotivoArchivo || prevTasting.motivoArchivo || null,
+          rawComments: {
+            ...(prevTasting.rawComments || {}),
+            estado: itemStatus === 'NO_AUTORIZADA' ? 'NO_AUTORIZADA' : cd.estado,
+            promotoraEmail: cd.promotora_email || prevTasting.rawComments?.promotoraEmail,
+          },
+        };
+      }
+      const existingVisitIdx = visitsForSchedule.findIndex(
+        (v) => v.id === originSurveyId || v.solicitudId === originSurveyId
+      );
+      if (existingVisitIdx >= 0) {
+        if (!isAuthorizedForModule2) {
+          visitsForSchedule.splice(existingVisitIdx, 1);
+        } else {
+          const prevVisit = visitsForSchedule[existingVisitIdx]!;
+          visitsForSchedule[existingVisitIdx] = {
+            ...prevVisit,
+            cronogramaId: cd.id,
+            promotoraId: resolvedPromotoraId || prevVisit.promotoraId,
+            promotoraName: assignedPromoter,
+            enHistorial: cronEnHistorial,
+            archivadoEn: cronArchivadoEn || prevVisit.archivadoEn || null,
+            motivoArchivo: cronMotivoArchivo || prevVisit.motivoArchivo || null,
+            status:
+              cd.estado === 'COMPLETADA'
+                ? 'COMPLETADA'
+                : cd.estado === 'EN_CURSO'
+                  ? 'EN_CURSO'
+                  : 'PENDIENTE',
+          };
+        }
+      } else if (isAuthorizedForModule2 && !existingScheduleIds.has(originSurveyId)) {
+        existingScheduleIds.add(originSurveyId);
+        visitsForSchedule.push({
+          id: originSurveyId,
+          cronogramaId: cd.id,
+          solicitudId: originSurveyId,
+          date: ymd,
+          dayLabel,
+          shift,
+          storeId: cd.cliente_codigo ? `st_${cd.cliente_codigo}` : `st_cron_${idx + 1}`,
+          storeName,
+          zone,
+          productFocus: productName,
+          fillProductSelection: supplies.fillProductSelection,
+          fillQuantityInput: String(qty),
+          promotoraId: resolvedPromotoraId,
+          promotoraName: assignedPromoter,
+          sellerName,
+          plannedUnits: qty,
+          mortadelaQty: supplies.mortadelaQty,
+          espaldaQty: supplies.espaldaQty,
+          arrozQty: supplies.arrozQty,
+          azucarGrams: supplies.azucarGrams,
+          lecheGrams: supplies.lecheGrams,
+          rowHighlight: supplies.rowHighlight,
+          tastedUnits: cd.estado === 'COMPLETADA' ? qty : 0,
+          assistedSalesUnits: 0,
+          notes: cd.observaciones || `Estado: ${cd.estado}`,
+          status:
+            cd.estado === 'COMPLETADA'
+              ? 'COMPLETADA'
+              : cd.estado === 'EN_CURSO'
+                ? 'EN_CURSO'
+                : 'PENDIENTE',
+          enHistorial: cronEnHistorial,
+          archivadoEn: cronArchivadoEn,
+          motivoArchivo: cronMotivoArchivo,
+          additionalGoods: supplies.additionalGoods,
+          operationalSupplies: supplies.operationalSupplies,
+        });
+      }
+      if (existingTastingIdx >= 0 || existingVisitIdx >= 0 || isAuthorizedForModule2) {
+        return;
+      }
+    }
 
     if (!existingTastingIds.has(cd.id)) {
       existingTastingIds.add(cd.id);
       tastingItems.push({
         id: cd.id,
+        cronogramaId: cd.id,
+        promotoraId: resolvedPromotoraId || undefined,
         source: 'carga_multiformato',
         createdAt: cd.created_at,
         date: ymd,
@@ -1473,19 +1748,29 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         fillQuantityInput: String(qty),
         sellerApplicant: sellerName,
         lotNumber: cd.carga_id ? `LOTE-${cd.carga_id.slice(0, 8).toUpperCase()}` : `CRON-${cd.id.slice(0, 8).toUpperCase()}`,
-        isArchived: Boolean(ymd && ymd < todayYmd),
+        isArchived: cronEnHistorial,
+        enHistorial: cronEnHistorial,
+        archivadoEn: cronArchivadoEn,
+        motivoArchivo: cronMotivoArchivo,
         notes:
           cd.observaciones ||
-          (cd.estado === 'PENDIENTE_APROBACION'
-            ? 'Volcado desde Carga Multiformato (PENDIENTE_APROBACION)'
-            : 'Cronograma Aprobado'),
+          (itemStatus === 'NO_AUTORIZADA'
+            ? 'No Autorizada en Coordinación de Trade Marketing'
+            : cd.estado === 'PENDIENTE_APROBACION'
+              ? 'Pendiente de Autorización'
+              : 'Autorizada en Trade Marketing'),
+        rawComments: {
+          estado: itemStatus === 'NO_AUTORIZADA' ? 'NO_AUTORIZADA' : cd.estado,
+          promotoraEmail: cd.promotora_email || undefined,
+        },
       });
     }
 
-    if (!existingScheduleIds.has(cd.id)) {
+    if (isAuthorizedForModule2 && !existingScheduleIds.has(cd.id)) {
       existingScheduleIds.add(cd.id);
       visitsForSchedule.push({
         id: cd.id,
+        cronogramaId: cd.id,
         solicitudId: cd.id,
         date: ymd,
         dayLabel,
@@ -1515,6 +1800,9 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
             : cd.estado === 'EN_CURSO'
               ? 'EN_CURSO'
               : 'PENDIENTE',
+        enHistorial: cronEnHistorial,
+        archivadoEn: cronArchivadoEn,
+        motivoArchivo: cronMotivoArchivo,
         additionalGoods: supplies.additionalGoods,
         operationalSupplies: supplies.operationalSupplies,
       });
@@ -1587,6 +1875,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     string,
     {
       id: string;
+      promotoraId: string;
+      masterCategory: StaffCategory;
       promotora: string;
       email: string;
       stores: Set<string>;
@@ -1628,6 +1918,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     if (!attendanceGroupMap.has(key)) {
       attendanceGroupMap.set(key, {
         id: chk.id,
+        promotoraId: activeMember.id,
+        masterCategory: activeMember.category,
         promotora: promoter,
         email: activeMember.email || (chk.creatorId || '').trim(),
         stores: new Set<string>(),
@@ -1742,6 +2034,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
       return {
         id: `ATT-${g.id.slice(0, 8).toUpperCase()}`,
+        promotoraId: g.promotoraId,
+        masterCategory: g.masterCategory,
         promotora: g.promotora,
         initials: getInitials(g.promotora),
         email: g.email,
@@ -1782,7 +2076,7 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     .filter((row) => !isSyntheticPriceOrInventoryRow(row) && resolveActiveMember(row.promoter, row.creatorId) !== null)
     .sort((a, b) => toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at));
 
-  const priceComparisons: PriceComparisonThreeBrands[] = cleanRawPrices.map((p, idx) => {
+  const priceComparisons: PriceComparisonThreeBrands[] = cleanRawPrices.map((p) => {
     const rate = liveBcvRate;
     const ownUsd = Number(p.ourPrice) || 0;
     const ownBs = rate !== null ? Number((ownUsd * rate).toFixed(2)) : null;
@@ -2363,25 +2657,84 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
   });
 
   // --------------------------------------------------------------------------
-  // 7. RESUMEN DE ENCUESTAS DE CONSUMIDORES (Breve + Profunda)
+  // 7. RESUMEN Y FILAS DE ENCUESTAS DE CONSUMIDORES (Breve + Profunda)
+  //    Omitido cuando `ENABLE_MODULO1_TABLAS_METRICAS === false`.
   // --------------------------------------------------------------------------
-  const consumerSurveys = rawSurveys.filter((s) => s.type === 'Breve' || s.type === 'Profunda');
-  const breveCount = consumerSurveys.filter((s) => s.type === 'Breve').length;
-  const profundaCount = consumerSurveys.filter((s) => s.type === 'Profunda').length;
-  const rated = consumerSurveys.filter((s) => typeof s.rating === 'number' && s.rating > 0);
+  const rawConsumerSurveys = FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS
+    ? rawSurveys
+        .filter((s) => s.type === 'Breve' || s.type === 'Profunda')
+        .sort(
+          (a, b) =>
+            toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at)
+        )
+    : [];
+
+  const consumerSurveys: ConsumerSurveyRecord[] = rawConsumerSurveys.map((s, idx) => {
+    const c = safeParseJson<Record<string, any>>(s.comments);
+    const activeMember = resolveActiveMember(s.promoter || c.promoter, s.creatorId);
+    const promoterName = activeMember
+      ? activeMember.name
+      : resolvePromoterNameFromRaw(s.promoter || c.promoter, s.creatorId, activeStaffByKey);
+    const rawDateSource = String(s.date || c.date || s.created_at || '').trim();
+    const ymd = formatDateYmd(rawDateSource) || formatDateYmd(s.created_at) || '';
+    const storeName = String(s.store || c.store || c.cliente || 'PDV Sin Nombre').trim() || 'PDV Sin Nombre';
+    const zone =
+      String(c.zone || c.zona || activeMember?.address || resolvePromoterZone(promoterName, staffMembers) || 'Zulia').trim() ||
+      'Zulia';
+    const productName =
+      String(s.product || c.product || c.producto || 'Portafolio Codizulca').trim() ||
+      'Portafolio Codizulca';
+
+    const parsedRating = toNum(s.rating ?? c.rating, NaN);
+    const cleanRating =
+      Number.isFinite(parsedRating) && parsedRating > 0
+        ? +Math.min(5, Math.max(0, parsedRating)).toFixed(2)
+        : null;
+
+    const accRaw = String(c.acceptance || c.aceptacion || '').trim();
+    const accLower = accRaw.toLowerCase();
+    const isHighAcceptance = accLower.includes('alta') || (cleanRating !== null && cleanRating >= 4);
+    const acceptanceLabel = isHighAcceptance
+      ? 'ALTA'
+      : accRaw
+        ? accRaw.toUpperCase()
+        : cleanRating !== null
+          ? cleanRating >= 3
+            ? 'MEDIA'
+            : 'BAJA'
+          : 'REGISTRADA';
+
+    return {
+      id: String(s.id || `srv_cons_${idx + 1}`),
+      surveyType: s.type === 'Profunda' ? 'Profunda' : 'Breve',
+      date: ymd,
+      dayLabel: ymd ? formatDayLabelEs(ymd) : 'Sin Fecha',
+      shift: inferShiftFromTime(String(c.shift || c.turno || c.time || ''), s.created_at || s.date),
+      storeName,
+      zone,
+      promotora: promoterName || 'SIN ASIGNAR',
+      productName,
+      rating: cleanRating,
+      highAcceptance: isHighAcceptance,
+      acceptanceLabel,
+      purchaseIntent: String(s.intent || s.purchase || c.intent || '').trim(),
+      createdAt: s.created_at || undefined,
+    };
+  });
+
+  const breveCount = consumerSurveys.filter((s) => s.surveyType === 'Breve').length;
+  const profundaCount = consumerSurveys.filter((s) => s.surveyType === 'Profunda').length;
+  const rated = consumerSurveys.filter((s): s is ConsumerSurveyRecord & { rating: number } => s.rating !== null && s.rating > 0);
   const avgRating =
     rated.length > 0
-      ? +(rated.reduce((acc, s) => acc + (s.rating || 0), 0) / rated.length).toFixed(2)
+      ? +Math.min(5, Math.max(0, rated.reduce((acc, s) => acc + s.rating, 0) / rated.length)).toFixed(2)
       : 0;
 
-  let highAcceptance = 0;
-  consumerSurveys.forEach((s) => {
-    const c = safeParseJson<Record<string, any>>(s.comments);
-    const acc = String(c.acceptance || '').toLowerCase();
-    if (acc.includes('alta') || (s.rating && s.rating >= 4)) highAcceptance += 1;
-  });
+  const highAcceptanceCount = consumerSurveys.filter((s) => s.highAcceptance).length;
   const highAcceptancePercent =
-    consumerSurveys.length > 0 ? Math.round((highAcceptance / consumerSurveys.length) * 100) : 0;
+    consumerSurveys.length > 0
+      ? Math.min(100, Math.max(0, Math.round((highAcceptanceCount / consumerSurveys.length) * 100)))
+      : 0;
 
   return {
     tastingItems,
@@ -2390,8 +2743,11 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     priceComparisons,
     inventorySampling,
     attendanceRecords,
+    asistenciaJornadas: asistenciaRelationalBundle.jornadas,
+    asistenciaEvidencias: asistenciaRelationalBundle.evidencias,
     merchandisingRecords,
     staffMembers,
+    consumerSurveys,
     surveySummary: {
       totalSurveys: consumerSurveys.length,
       breveCount,
@@ -2536,9 +2892,14 @@ export function parseDegustacionNotificationRow(
   const isTerminalEstado = isTerminalDegustacionEstado(estado);
   const localLedgerStamp = getLocalDegustacionReadStamp(String(row.id), canonicalDegId);
 
-  // Evaluación exacta de leido_trade (ledger anti-resurrección + columna nativa SQL + respaldo JSON + filtro de históricos previos)
+  // Evaluación exacta de leido_trade (ledger anti-resurrección + ciclo semanal < inicio_semana_actual + columna nativa SQL + respaldo JSON)
+  const isArchivedInHistorial = isTastingInPastCaracasWeek(
+    ymd,
+    undefined,
+    row.created_at || c.created_at
+  );
   let leidoTrade: boolean;
-  if (localLedgerStamp || row.leido_trade === true || c.leido_trade === true) {
+  if (isArchivedInHistorial || localLedgerStamp || row.leido_trade === true || c.leido_trade === true) {
     leidoTrade = true;
   } else if (!isFromSellerApp || isTerminalEstado) {
     leidoTrade = true;
@@ -2610,52 +2971,17 @@ export async function fetchUnreadDegustacionNotifications(): Promise<Degustacion
     throw new Error('Cliente oficial de Supabase no disponible.');
   }
 
-  let rows: RawSupabaseSurvey[] = [];
-  const useReadCols = getSurveysLeidoTradeSupport() !== false;
-
-  if (useReadCols) {
-    const { data, error } = await client
-      .from('surveys')
-      .select(
-        'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at'
-      )
-      .eq('type', 'Degustacion')
-      .eq('leido_trade', false)
-      .order('created_at', { ascending: false })
-      .limit(150);
-
-    if (!error) {
-      setSurveysLeidoTradeSupport(true);
-      rows = (data || []) as unknown as RawSupabaseSurvey[];
-    } else if (isMissingColumnPostgrestError(error)) {
-      setSurveysLeidoTradeSupport(false);
-    } else {
-      throw new Error(`No se pudieron consultar notificaciones de degustación: ${error.message}`);
-    }
-  }
-
-  if (getSurveysLeidoTradeSupport() === false) {
-    const { data, error } = await client
-      .from('surveys')
-      .select('id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at')
-      .eq('type', 'Degustacion')
-      .order('created_at', { ascending: false })
-      .limit(200);
-
-    if (error) {
-      throw new Error(`No se pudieron consultar notificaciones de degustación: ${error.message}`);
-    }
-    rows = (data || []) as unknown as RawSupabaseSurvey[];
-  }
-
-  const renderRows = await Promise.race([
-    fetchFdvPlanificadorRenderDegustaciones({
-      endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
-      timeoutMs: 3000,
-    }),
-    waitMs(3000).then(() => [] as RawSupabaseSurvey[]),
+  const [allDegustacionRows, renderRows] = await Promise.all([
+    fetchDegustacionSurveysViaSdk(client),
+    Promise.race([
+      fetchFdvPlanificadorRenderDegustaciones({
+        endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
+        timeoutMs: 3000,
+      }),
+      waitMs(3000).then(() => [] as RawSupabaseSurvey[]),
+    ]),
   ]);
-  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(rows, renderRows);
+  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(allDegustacionRows, renderRows);
 
   // Si alguna fila gemela por el mismo `degustacionId` ya fue marcada como leída, excluir duplicados
   const readCanonicalIdsInBatch = new Set<string>();
@@ -2889,8 +3215,9 @@ async function syncStatusBackToFdvPlanificadorRender(
 export async function updateSupabaseDegustacionStatus(
   surveyId: string,
   updates: {
-    estado: 'APROBADA' | 'RECHAZADA' | 'CANCELADA' | 'EN_CURSO' | 'COMPLETADA';
+    estado: 'APROBADA' | 'NO_AUTORIZADA' | 'RECHAZADA' | 'CANCELADA' | 'EN_CURSO' | 'COMPLETADA';
     promotoraAsignada?: string;
+    promotoraEmail?: string;
     delivered?: number;
     salesAssisted?: number;
     acceptanceRate?: number;
@@ -2902,11 +3229,19 @@ export async function updateSupabaseDegustacionStatus(
       lecheGrams?: number;
     };
     rawComments?: Record<string, any>;
+    eventDateYmd?: string;
+    isStrictAdmin?: boolean;
   }
 ): Promise<void> {
   assertSupabaseConfigured();
-  const isoNow = new Date().toISOString();
   const safeBaseComments = safeParseJson<Record<string, any>>(updates.rawComments ?? {});
+  assertCanMutateTastingByWeekCycle({
+    eventDate: updates.eventDateYmd || safeBaseComments.date || safeBaseComments.fecha,
+    fallbackDate: safeBaseComments.created_at,
+    isStrictAdmin: Boolean(updates.isStrictAdmin),
+    allowMarkNoAutorizada: updates.estado === 'NO_AUTORIZADA',
+  });
+  const isoNow = new Date().toISOString();
   const canonicalDegId = normalizeCanonicalDegustacionId(
     safeBaseComments.degustacionId || safeBaseComments.id,
     surveyId
@@ -2917,6 +3252,10 @@ export async function updateSupabaseDegustacionStatus(
     updates.promotoraAsignada !== undefined
       ? sanitizeFdvText(updates.promotoraAsignada, 140)
       : undefined;
+  const cleanPromotoraEmail =
+    updates.promotoraEmail !== undefined
+      ? sanitizeFdvText(updates.promotoraEmail, 160).toLowerCase()
+      : undefined;
 
   const updatedComments = {
     ...safeBaseComments,
@@ -2925,8 +3264,10 @@ export async function updateSupabaseDegustacionStatus(
     leido_trade: true,
     visto_en_trade_at: safeBaseComments.visto_en_trade_at || isoNow,
     ...(updates.estado === 'APROBADA' ? { aprobadoEnTradeAt: isoNow } : {}),
-    ...(updates.estado === 'RECHAZADA' || updates.estado === 'CANCELADA'
-      ? { revertidoEnTradeAt: isoNow }
+    ...(updates.estado === 'NO_AUTORIZADA' ||
+    updates.estado === 'RECHAZADA' ||
+    updates.estado === 'CANCELADA'
+      ? { revertidoEnTradeAt: isoNow, en_historial: true }
       : {}),
     ...(cleanPromotora !== undefined
       ? {
@@ -2934,6 +3275,7 @@ export async function updateSupabaseDegustacionStatus(
           promoter: cleanPromotora || 'POR ASIGNAR (Trade Marketing)',
         }
       : {}),
+    ...(cleanPromotoraEmail ? { promotoraEmail: cleanPromotoraEmail } : {}),
     ...(updates.delivered !== undefined ? { delivered: updates.delivered } : {}),
     ...(updates.salesAssisted !== undefined ? { salesAssisted: updates.salesAssisted } : {}),
     ...(updates.acceptanceRate !== undefined ? { acceptanceRate: updates.acceptanceRate } : {}),
@@ -2976,7 +3318,7 @@ export async function updateSupabaseDegustacionStatus(
       ? 'REALIZADA'
       : updates.estado === 'EN_CURSO'
         ? 'APROBADA'
-        : updates.estado === 'CANCELADA'
+        : updates.estado === 'NO_AUTORIZADA' || updates.estado === 'CANCELADA'
           ? 'RECHAZADA'
           : updates.estado;
   void syncStatusBackToFdvPlanificadorRender(canonicalDegId, {
@@ -2996,12 +3338,18 @@ export async function updateSupabaseDegustacionStatus(
 export async function assignSupabaseDegustacionPromotora(
   surveyId: string,
   promotoraAsignada: string,
-  rawComments?: Record<string, any>
+  rawComments?: Record<string, any>,
+  options?: { eventDateYmd?: string; isStrictAdmin?: boolean }
 ): Promise<void> {
   if (!surveyId) return;
   assertSupabaseConfigured();
-  const isoNow = new Date().toISOString();
   const safeBaseComments = safeParseJson<Record<string, any>>(rawComments ?? {});
+  assertCanMutateTastingByWeekCycle({
+    eventDate: options?.eventDateYmd || safeBaseComments.date || safeBaseComments.fecha,
+    fallbackDate: safeBaseComments.created_at,
+    isStrictAdmin: Boolean(options?.isStrictAdmin),
+  });
+  const isoNow = new Date().toISOString();
   const canonicalDegId = normalizeCanonicalDegustacionId(
     safeBaseComments.degustacionId || safeBaseComments.id,
     surveyId
@@ -3213,6 +3561,9 @@ export async function createSupabaseSellerDegustacionRequest(
       status: 'pendiente',
       leido_trade: false,
       visto_en_trade_at: null,
+      en_historial: false,
+      archivado_en: null,
+      motivo_archivo: null,
       created_at: isoNow,
       requierePromotora,
       promoterType,
@@ -3241,9 +3592,38 @@ export async function createSupabaseSellerDegustacionRequest(
     };
 
     let createdRow: RawSupabaseSurvey | undefined;
+    const useArchiveCols =
+      getSurveysArchiveColumnsSupport() !== false && getSurveysLeidoTradeSupport() !== false;
     const useReadCols = getSurveysLeidoTradeSupport() !== false;
 
-    if (useReadCols) {
+    if (useArchiveCols) {
+      const { data, error } = await client
+        .from('surveys')
+        .insert({
+          ...baseBody,
+          leido_trade: false,
+          visto_en_trade_at: null,
+          en_historial: false,
+          archivado_en: null,
+          motivo_archivo: null,
+        })
+        .select(
+          'id,type,date,store,promoter,product,comments,creatorId,created_at,leido_trade,visto_en_trade_at,en_historial,archivado_en,motivo_archivo'
+        )
+        .limit(1);
+
+      if (!error) {
+        setSurveysArchiveColumnsSupport(true);
+        setSurveysLeidoTradeSupport(true);
+        createdRow = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0];
+      } else if (isMissingColumnPostgrestError(error)) {
+        setSurveysArchiveColumnsSupport(false);
+      } else {
+        throw new Error(`No se pudo crear la solicitud en Supabase: ${error.message}`);
+      }
+    }
+
+    if (!createdRow && useReadCols) {
       const { data, error } = await client
         .from('surveys')
         .insert({
@@ -3381,19 +3761,19 @@ export async function saveSupabaseStaffMember(params: {
   status: 'Activo' | 'Inactivo';
   password?: string;
   photoUrl?: string;
-}): Promise<void> {
+}): Promise<{ id: string }> {
   const isExistingRow = Boolean(params.id && !params.id.startsWith('stf_'));
   const cleanPassword = (params.password || '').trim();
   if (!cleanPassword && !isExistingRow) {
-    throw new Error('Debe definir una contraseña para el nuevo integrante (no existe contraseña por defecto).');
+    throw new Error('Debe definir una contraseña inicial (mínimo 8 caracteres) para aprovisionar la cuenta en Supabase Auth.');
   }
-  const statusPayload: Record<string, any> = {
+  // Seguridad Zero Trust: jamás persistir contraseñas en texto plano dentro de public.staff.status
+  const statusPayload: Record<string, unknown> = {
     status: params.status,
     category: params.category,
     phone: params.phone.trim(),
     address: params.address.trim(),
     assignedLocation: params.assignedStore.trim(),
-    ...(cleanPassword ? { password: cleanPassword } : {}),
     ...(params.photoUrl ? { photoUrl: params.photoUrl } : {}),
   };
 
@@ -3411,7 +3791,7 @@ export async function saveSupabaseStaffMember(params: {
 
   const res = await fetch(endpoint, {
     method: isExistingSupabaseRow ? 'PATCH' : 'POST',
-    headers: supabaseHeaders({ Prefer: 'return=minimal' }),
+    headers: supabaseHeaders({ Prefer: 'return=representation' }),
     body: JSON.stringify(bodyPayload),
   });
 
@@ -3419,6 +3799,10 @@ export async function saveSupabaseStaffMember(params: {
     const text = await res.text().catch(() => '');
     throw new Error(`No se pudo guardar el perfil de personal en Supabase (${res.status}): ${text}`);
   }
+
+  const rows = (await res.json().catch(() => [])) as Array<{ id?: string }>;
+  const savedId = String(rows?.[0]?.id || params.id || '').trim();
+  return { id: savedId };
 }
 
 export async function updateSupabaseStaffPhoto(

@@ -1,0 +1,12 @@
+{
+  "zero-residue-stop-guard": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ../scripts/check-ledger-clean.mjs",
+        "timeout": 15
+      }
+    ]
+  }
+}

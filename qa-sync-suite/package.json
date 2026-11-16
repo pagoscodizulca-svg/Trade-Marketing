@@ -1,0 +1,22 @@
+{
+  "name": "codizulca-qa-sync-suite",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Suite aislada de pruebas E2E de sincronización, concurrencia y seguridad RLS con protocolo estricto Cero-Residuos.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "seed:dry-run": "node scripts/seed-qa-environment.mjs --lifecycle-check",
+    "teardown": "node scripts/teardown-qa-environment.mjs",
+    "verify:zero-residue": "node scripts/verify-zero-residue.mjs",
+    "check:ledger": "node scripts/check-ledger-clean.mjs --cli",
+    "test": "node --test tests/qa-sync-suite.spec.mjs",
+    "test:hold-for-browser": "node scripts/run-with-browser-hold.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.118.0",
+    "dotenv": "17.2.3"
+  }
+}

@@ -1,0 +1,14 @@
+# Entornos y credenciales — PROHIBIDO commitear
+.env
+.env.*
+!.env.test.example
+
+# Bitácora transaccional y estados efímeros de corrida QA
+.tmp/
+*.tmp
+
+# Dependencias y artefactos locales
+node_modules/
+reports/
+*.log
+.DS_Store

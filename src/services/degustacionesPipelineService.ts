@@ -6,6 +6,7 @@ import type {
   InsumosCalculadosDegustacion,
   MetodoExtraccionArchivo,
   NivelValidacionFilaCarga,
+  ResultadoAsignacionRutaDegustacion,
   ResultadoVolcadoLoteCronograma,
 } from '../types/degustacionesPipeline';
 import {
@@ -27,9 +28,11 @@ import {
 } from '../utils/excelDateParser';
 import { calculateProductionSupplies } from '../utils/productionSuppliesCalculator';
 import {
+  getCachedAccessToken,
   getSupabaseCoordinatorClient,
   isSupabaseConfigured,
 } from './supabaseClient';
+import { getActiveAccessToken } from './authService';
 import type { StaffMemberRecord } from './supabaseModule1';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -690,11 +693,13 @@ export async function extractPdfViaBackend(fileBuffer: ArrayBuffer, fileName: st
   model: string;
   rows: RawExtractedDegustacionRow[];
 }> {
+  const bearerToken = getCachedAccessToken() || (await getActiveAccessToken());
   const res = await fetch('/api/degustaciones/extract-pdf', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/pdf',
       'X-Filename': encodeURIComponent(sanitizeCellText(fileName, 180) || 'planificacion.pdf'),
+      ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
     },
     body: fileBuffer,
   });
@@ -896,4 +901,161 @@ export async function updateCronogramaPromotoraIdInSupabase(params: {
   } catch {
     return false;
   }
+}
+
+export function isValidUuid(value: string | null | undefined): boolean {
+  return UUID_REGEX.test(String(value ?? '').trim());
+}
+
+function isMissingRpcError(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').trim();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    (msg.includes('function') && (msg.includes('does not exist') || msg.includes('schema cache')))
+  );
+}
+
+/**
+ * RPC Transaccional Idempotente Zero Trust (`public.rpc_autorizar_degustacion_trade`):
+ * - Exige sesión autenticada de Coordinadora, Gerencia o Admin (`app_metadata`).
+ * - Valida a la promotora activa en `public.staff`, exige correo válido registrado en la
+ *   Pestaña de Personal y normaliza `LOWER(TRIM(email))`.
+ * - Actualiza `public.surveys`, hace UPSERT sin duplicados en `public.cronograma_degustaciones`
+ *   (Módulo 2) y proyecta a `public.rutas_promotoras` (`/portal/`).
+ * - Incluye respaldo compatible hacia `asignar_degustacion_aceptada_a_ruta` mientras se ejecuta
+ *   la migración `20261114_portal_promotoras_bandeja_realtime.sql`.
+ */
+export async function assignAcceptedDegustacionToPromotoraRoute(params: {
+  promotoraId: string;
+  promotoraEmail?: string | null;
+  surveyId?: string | null;
+  cronogramaId?: string | null;
+  confirmarAceptacion?: boolean;
+  aprobadoPor?: string | null;
+  allowedPromotoraIds?: ReadonlySet<string>;
+}): Promise<ResultadoAsignacionRutaDegustacion> {
+  if (!isSupabaseConfigured) {
+    throw new Error('Supabase no está configurado.');
+  }
+
+  const safePromotoraId = enforceSafePromotoraFkId(
+    params.promotoraId,
+    params.allowedPromotoraIds
+  );
+  if (!safePromotoraId) {
+    throw new Error('Seleccione una promotora activa válida (UUID verificado) antes de autorizar la degustación.');
+  }
+
+  if (params.promotoraEmail !== undefined) {
+    const normalizedEmail = String(params.promotoraEmail || '').trim().toLowerCase();
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      throw new Error(
+        'La promotora seleccionada no tiene un correo electrónico válido registrado en la Pestaña de Personal del Módulo 1.'
+      );
+    }
+  }
+
+  const cleanSurveyId = isValidUuid(params.surveyId) ? String(params.surveyId).trim() : null;
+  const cleanCronogramaId = isValidUuid(params.cronogramaId)
+    ? String(params.cronogramaId).trim()
+    : null;
+
+  if (!cleanSurveyId && !cleanCronogramaId) {
+    throw new Error('La degustación seleccionada no posee un identificador UUID válido en Supabase.');
+  }
+
+  const client = getSupabaseCoordinatorClient();
+  const cleanApprover = sanitizeCellText(params.aprobadoPor, 120) || null;
+
+  const primaryRpc = await client.rpc('rpc_autorizar_degustacion_trade', {
+    p_promotora_id: safePromotoraId,
+    p_survey_id: cleanSurveyId,
+    p_cronograma_id: cleanCronogramaId,
+    p_aprobado_por: cleanApprover,
+  });
+
+  if (!primaryRpc.error && primaryRpc.data) {
+    return primaryRpc.data as ResultadoAsignacionRutaDegustacion;
+  }
+
+  if (primaryRpc.error && !isMissingRpcError(primaryRpc.error)) {
+    throw new Error(
+      primaryRpc.error.message ||
+        'No se pudo autorizar y sincronizar la degustación hacia el Portal de Promotoras.'
+    );
+  }
+
+  const fallbackRpc = await client.rpc('asignar_degustacion_aceptada_a_ruta', {
+    p_promotora_id: safePromotoraId,
+    p_survey_id: cleanSurveyId,
+    p_cronograma_id: cleanCronogramaId,
+    p_confirmar_aceptacion: Boolean(params.confirmarAceptacion ?? true),
+    p_aprobado_por: cleanApprover,
+  });
+
+  if (fallbackRpc.error || !fallbackRpc.data) {
+    throw new Error(
+      fallbackRpc.error?.message ||
+        'No se pudo sincronizar la degustación autorizada hacia la hoja de ruta de la promotora.'
+    );
+  }
+
+  return fallbackRpc.data as ResultadoAsignacionRutaDegustacion;
+}
+
+/**
+ * RPC Transaccional (`public.rpc_no_autorizar_degustacion_trade` / `public.retirar_degustacion_de_ruta`):
+ * Marca una degustación como `NO_AUTORIZADA` (o `RECHAZADA`/`CANCELADA`), la envía a la Pestaña de
+ * Historial y retira de inmediato cualquier proyección en `public.rutas_promotoras`.
+ */
+export async function withdrawDegustacionFromPromotoraRoute(params: {
+  surveyId?: string | null;
+  cronogramaId?: string | null;
+  nuevoEstado: 'NO_AUTORIZADA' | 'RECHAZADA' | 'CANCELADA';
+  motivo?: string;
+}): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  const cleanSurveyId = isValidUuid(params.surveyId) ? String(params.surveyId).trim() : null;
+  const cleanCronogramaId = isValidUuid(params.cronogramaId)
+    ? String(params.cronogramaId).trim()
+    : null;
+  if (!cleanSurveyId && !cleanCronogramaId) return false;
+
+  const client = getSupabaseCoordinatorClient();
+  const cleanMotivo = sanitizeCellText(params.motivo, 300) || null;
+
+  if (params.nuevoEstado === 'NO_AUTORIZADA') {
+    const noAutRpc = await client.rpc('rpc_no_autorizar_degustacion_trade', {
+      p_survey_id: cleanSurveyId,
+      p_cronograma_id: cleanCronogramaId,
+      p_motivo: cleanMotivo,
+    });
+
+    if (!noAutRpc.error) {
+      return true;
+    }
+    if (!isMissingRpcError(noAutRpc.error)) {
+      throw new Error(
+        noAutRpc.error.message || 'No se pudo marcar la degustación como No Autorizada.'
+      );
+    }
+  }
+
+  const fallbackEstado =
+    params.nuevoEstado === 'NO_AUTORIZADA' ? 'RECHAZADA' : params.nuevoEstado;
+
+  const { error } = await client.rpc('retirar_degustacion_de_ruta', {
+    p_survey_id: cleanSurveyId,
+    p_cronograma_id: cleanCronogramaId,
+    p_nuevo_estado: fallbackEstado,
+    p_motivo: cleanMotivo,
+  });
+
+  if (error) {
+    throw new Error(error.message || 'No se pudo retirar la degustación de la ruta.');
+  }
+  return true;
 }

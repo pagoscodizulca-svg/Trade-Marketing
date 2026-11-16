@@ -28,8 +28,6 @@ import {
   Database,
   FileSignature,
   Eye,
-  EyeOff,
-  Copy,
   Loader2,
   Clock,
   Maximize2,
@@ -38,14 +36,24 @@ import {
   ChevronRight,
   ChevronDown,
   Download,
-  Phone,
   Upload,
+  Lock,
+  ShieldCheck,
+  MessageCircle,
+  Ban,
 } from 'lucide-react';
+import { FEATURE_FLAGS } from '../../config/featureFlags';
+import {
+  buildPromotoraWhatsAppLink,
+  getPromotorasPortalUrl,
+} from '../../utils/portalLinkSharing';
 import { ExportPdfButton } from '../common/ExportPdfButton';
 import {
   exportTastingSchedulePdf,
   exportPromotoraReportsPdf,
   exportMonthlyTastingGeneralReportPdf,
+  exportPendingTastingAuthorizationPdf,
+  buildPendingAuthorizationReportModel,
 } from '../../utils/pdfExport';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
 import { evaluateTastingFeasibility } from '../../utils/tastingFeasibility';
@@ -60,6 +68,8 @@ import {
   Metric360Id,
   Metric360SwitcherItem,
 } from '../common/Metric360DashboardModal';
+import { AttendanceEvidenceSubTab } from './AttendanceEvidenceSubTab';
+import { buildDailyPromotoraAttendanceViewModels } from '../../services/attendanceEvidencesService';
 import {
   DegustacionNotificationItem,
   OperationalSupplies,
@@ -68,7 +78,7 @@ import {
   ShiftType,
 } from '../../types';
 import {
-  fetchCheckinPhotoById,
+  fetchAllModule1FromSupabase,
   fetchCheckinPhotosBatch,
   updateSupabaseDegustacionStatus,
   assignSupabaseDegustacionPromotora,
@@ -80,13 +90,11 @@ import {
   saveSupabaseStaffMember,
   updateSupabaseStaffPhoto,
   deleteSupabaseStaffMember,
-  getTodayVeYmd,
   canonicalStaffKey,
-  canonicalizeActivePromoterOrNull,
+  parseDegustacionNotificationRow,
   VisitHistoryRecord,
   InventorySamplingRecord,
   AttendanceRecord,
-  AttendanceSlotEvent,
   MerchandisingRecord,
   StaffMemberRecord,
   StaffCategory,
@@ -95,7 +103,33 @@ import {
   resolveFdvRequestLifecycle,
   sanitizeExternalHttpsUrl,
 } from '../../services/fdvDegustacionesAdapter';
+import { provisionStaffAuthAccountViaBackend } from '../../services/authService';
+import {
+  assignAcceptedDegustacionToPromotoraRoute,
+  buildActivePromotoraCatalog,
+  isValidUuid,
+  updateCronogramaPromotoraIdInSupabase,
+  withdrawDegustacionFromPromotoraRoute,
+} from '../../services/degustacionesPipelineService';
 import { calculateProductionSupplies } from '../../utils/productionSuppliesCalculator';
+import {
+  getCaracasWeekCycleBounds,
+  getPastCaracasWeeksRange,
+  isTastingBeforeTodayCaracas,
+  isTastingInPastCaracasWeek,
+  partitionTastingsByCaracasWeek,
+  partitionTastingsByTodayAndAuthorization,
+  resolveTastingAuthorizationState,
+  resolveTastingEventCaracasYmd,
+} from '../../utils/caracasWeekCycle';
+import {
+  assertCanMutateTastingByWeekCycle,
+  DEFAULT_HISTORIAL_PAGE_SIZE,
+  HistoricalTastingLockError,
+  paginateSanitizedHistorialCollection,
+  queryServerPaginatedHistorialSurveys,
+  ServerPaginatedHistorialSurveyResult,
+} from '../../services/degustacionesWeeklyCycleService';
 import { TradeContraloriaSolicitudesTab } from './TradeContraloriaSolicitudesTab';
 import { MultiFormatTastingUploadModal } from './MultiFormatTastingUploadModal';
 
@@ -108,6 +142,8 @@ export type FieldSubTab =
 
 export interface TastingScheduleItem {
   id: string;
+  cronogramaId?: string;
+  promotoraId?: string;
   degustacionId?: string;
   source?: string;
   createdAt?: string;
@@ -139,7 +175,7 @@ export interface TastingScheduleItem {
   leidoTrade?: boolean;
   vistoEnTradeAt?: string | null;
   mapsUrl?: string;
-  status: 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO';
+  status: 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO' | 'NO_AUTORIZADA';
   currentSamples: number;
   targetSamples: number;
   requestedQty?: number;
@@ -156,19 +192,110 @@ export interface TastingScheduleItem {
   salesAssistedCount?: number;
   lotNumber?: string;
   isArchived: boolean;
+  enHistorial?: boolean;
+  archivadoEn?: string | null;
+  motivoArchivo?: string | null;
   notes?: string;
   rawComments?: Record<string, any>;
+}
+
+const SHORT_WEEKDAYS_ES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'] as const;
+
+const INTERNAL_ROUTE_CONSTANTS = new Set([
+  '',
+  '-',
+  '--',
+  'N/A',
+  'NA',
+  'NULL',
+  'UNDEFINED',
+  'ALL_MY_ROUTES',
+  'ALL_ROUTES',
+  'MY_ROUTES',
+  'DEFAULT_ROUTE',
+  'SIN_RUTA',
+  'SIN RUTA',
+  'SIN ZONA',
+  'ZONA GENERAL',
+  'POR DEFINIR',
+]);
+
+function formatCompactScheduleDayDate(
+  dateRaw?: string | null,
+  dayLabelFallback?: string | null
+): string {
+  const parsed = normalizeExcelDate(dateRaw ?? '');
+  if (parsed.isValid && parsed.fechaIso && parsed.fechaFormateada) {
+    const [y, m, d] = parsed.fechaIso.split('-').map(Number);
+    const utcNoon = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    if (!Number.isNaN(utcNoon.getTime())) {
+      const shortDay = SHORT_WEEKDAYS_ES[utcNoon.getUTCDay()] ?? '';
+      return shortDay ? `${shortDay}, ${parsed.fechaFormateada}` : parsed.fechaFormateada;
+    }
+    return parsed.fechaFormateada;
+  }
+  const cleanFallback = dayLabelFallback?.trim();
+  return cleanFallback || 'Sin fecha';
+}
+
+function formatSafeRouteDisplay(rawZone?: string | null): {
+  label: string;
+  isGeneric: boolean;
+} {
+  const trimmed = rawZone?.trim() ?? '';
+  const upper = trimmed.toUpperCase();
+  if (INTERNAL_ROUTE_CONSTANTS.has(upper) || /^[A-Z0-9]+_[A-Z0-9_]+$/.test(trimmed)) {
+    return { label: 'Ruta general', isGeneric: true };
+  }
+  return { label: trimmed, isGeneric: false };
+}
+
+function resolveCompactBrandBadge(
+  productName?: string | null,
+  fillSelection?: string | null
+): { label: string; isAmberBrand: boolean } {
+  const normalized = `${productName ?? ''} ${fillSelection ?? ''}`
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+
+  if (
+    normalized.includes('VENCAMPO') ||
+    normalized.includes('ARROZ') ||
+    normalized.includes('LECHE') ||
+    normalized.includes('AZUCAR') ||
+    normalized.includes('CARAOTA') ||
+    normalized.includes('AVENA') ||
+    normalized.includes('ACEITE')
+  ) {
+    return { label: 'Vencampo', isAmberBrand: true };
+  }
+
+  if (
+    normalized.includes('ASTURIAS') ||
+    normalized.includes('MORTADELA') ||
+    normalized.includes('JAMON') ||
+    normalized.includes('ESPALDA') ||
+    normalized.includes('SALCHICHA') ||
+    normalized.includes('CHORIZO') ||
+    normalized.includes('PECHUGA') ||
+    normalized.includes('FIAMBRE')
+  ) {
+    return { label: 'Asturias', isAmberBrand: false };
+  }
+
+  return { label: 'Codizulca', isAmberBrand: false };
 }
 
 export const FieldPromotoraView: React.FC = () => {
   const {
     currentUser,
     currentRole,
+    isStrictAdmin,
+    caracasWeekStartYmd,
     stores,
     visits,
-    addVisit,
     updateVisit,
-    deleteVisit,
     upsertVisitFromApprovedTasting,
     removeVisitByTastingRequest,
     module1Bundle,
@@ -217,18 +344,28 @@ export const FieldPromotoraView: React.FC = () => {
 
   // Sub-tab inside Degustaciones: 'actual' | 'historial'
   const [tastingViewMode, setTastingViewMode] = useState<'actual' | 'historial'>('actual');
+  const [historialPage, setHistorialPage] = useState<number>(1);
+  const [historialPageSize, setHistorialPageSize] = useState<number>(DEFAULT_HISTORIAL_PAGE_SIZE);
+  const [serverHistorialState, setServerHistorialState] = useState<{
+    loading: boolean;
+    result: ServerPaginatedHistorialSurveyResult | null;
+  }>({ loading: false, result: null });
 
   // Solicitudes locales adicionales creadas si falla red
   const [localSellerRequests, setLocalSellerRequests] = useState<TastingScheduleItem[]>([]);
 
-  // Registro de IDs archivados manualmente o al cierre de semana
-  const [archivedVisitIds, setArchivedVisitIds] = useState<string[]>([]);
-
-  // Registro de IDs de solicitudes aprobadas/rechazadas localmente en esta sesión
+  // Registro de IDs de solicitudes autorizadas o marcadas como No Autorizadas en esta sesión
   const [approvedIdsInSession, setApprovedIdsInSession] = useState<Record<string, string>>({});
   const [rejectedIdsInSession, setRejectedIdsInSession] = useState<Set<string>>(() => new Set());
   const approvingIdsRef = useRef<Set<string>>(new Set());
   const [processingTastingId, setProcessingTastingId] = useState<string | null>(null);
+  const [lastAuthorizedShareBanner, setLastAuthorizedShareBanner] = useState<{
+    promotoraName: string;
+    promotoraEmail: string;
+    phone: string;
+    storeName: string;
+    fechaYmd: string;
+  } | null>(null);
 
   // Filtros de búsqueda en la tabla de degustaciones
   const [tastingSearchQuery, setTastingSearchQuery] = useState('');
@@ -249,226 +386,302 @@ export const FieldPromotoraView: React.FC = () => {
   // =========================================================================
   // SINCRONIZACIÓN EXACTA ENTRE SUPABASE (MÓDULO 1) Y TRADE MARKETING (MÓDULO 2)
   // =========================================================================
-  const supabaseTastingMap = useMemo(() => {
-    const map = new Map<string, TastingScheduleItem>();
-    (module1Bundle?.tastingItems || []).forEach((item) => {
-      map.set(item.id, item);
-    });
-    return map;
-  }, [module1Bundle]);
+  const reconcileModule1ItemsWithVisits = useCallback(
+    (
+      bundleTastingItems: TastingScheduleItem[],
+      scheduleVisits: ScheduledVisit[]
+    ): TastingScheduleItem[] => {
+      const todayYmd = liveClock.todayYmd;
+      const supItemMap = new Map<string, TastingScheduleItem>();
+      bundleTastingItems.forEach((item) => {
+        supItemMap.set(item.id, item);
+      });
 
-  const synchronizedScheduleItems = useMemo<TastingScheduleItem[]>(() => {
-    const todayYmd = liveClock.todayYmd;
-    const visitById = new Map<string, ScheduledVisit>();
-    const visitByDegId = new Map<string, ScheduledVisit>();
-    visits.forEach((v) => {
-      visitById.set(v.id, v);
-      if (v.solicitudId) visitById.set(v.solicitudId, v);
-      if (v.degustacionId) visitByDegId.set(v.degustacionId, v);
-    });
+      const visitById = new Map<string, ScheduledVisit>();
+      const visitByDegId = new Map<string, ScheduledVisit>();
+      scheduleVisits.forEach((v) => {
+        visitById.set(v.id, v);
+        if (v.solicitudId) visitById.set(v.solicitudId, v);
+        if (v.degustacionId) visitByDegId.set(v.degustacionId, v);
+      });
 
-    const consumedVisitIds = new Set<string>();
-    const result: TastingScheduleItem[] = [];
+      const consumedVisitIds = new Set<string>();
+      const result: TastingScheduleItem[] = [];
 
-    const buildMergedItem = (
-      supItem?: TastingScheduleItem,
-      v?: ScheduledVisit
-    ): TastingScheduleItem | null => {
-      const id = v?.id || supItem?.id || '';
-      const solId = v?.solicitudId || supItem?.id || id;
-      const degId = v?.degustacionId || supItem?.degustacionId;
-      if (!id) return null;
-      if (
-        rejectedIdsInSession.has(id) ||
-        rejectedIdsInSession.has(solId) ||
-        (degId && rejectedIdsInSession.has(degId))
-      ) {
-        return null;
-      }
+      const buildMergedItem = (
+        supItem?: TastingScheduleItem,
+        v?: ScheduledVisit
+      ): TastingScheduleItem | null => {
+        const id = v?.id || supItem?.id || '';
+        const solId = v?.solicitudId || supItem?.id || id;
+        const degId = v?.degustacionId || supItem?.degustacionId;
+        if (!id) return null;
+        const isDiscardedInSession =
+          rejectedIdsInSession.has(id) ||
+          rejectedIdsInSession.has(solId) ||
+          Boolean(degId && rejectedIdsInSession.has(degId));
 
-      const effectiveShift: ShiftType = v?.shift || supItem?.shift || 'MAÑANA';
-      const isMorning = effectiveShift === 'MAÑANA';
-      const timeRange = supItem?.timeRange || (isMorning ? '08:30 - 12:30' : '14:00 - 18:00');
-      const prodLabel =
-        v?.productFocus || supItem?.productName || 'Mortadela Especial Asturias 0.900kg';
-      const prodUpper = (
-        v?.fillProductSelection ||
-        supItem?.fillProductSelection ||
-        prodLabel ||
-        ''
-      ).toUpperCase();
+        if (FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE && isDiscardedInSession) {
+          return null;
+        }
 
-      const totalUnits =
-        v?.plannedUnits ||
-        (v ? v.mortadelaQty + v.espaldaQty + v.arrozQty : 0) ||
-        supItem?.requestedQty ||
-        1;
-      const targetSamples = supItem?.targetSamples ?? 0;
-      const suppliesCalc = calculateProductionSupplies(prodLabel, totalUnits, targetSamples);
+        const effectiveShift: ShiftType = v?.shift || supItem?.shift || 'MAÑANA';
+        const isMorning = effectiveShift === 'MAÑANA';
+        const timeRange = supItem?.timeRange || (isMorning ? '08:30 - 12:30' : '14:00 - 18:00');
+        const prodLabel =
+          v?.productFocus || supItem?.productName || 'Mortadela Especial Asturias 0.900kg';
+        const prodUpper = (
+          v?.fillProductSelection ||
+          supItem?.fillProductSelection ||
+          prodLabel ||
+          ''
+        ).toUpperCase();
 
-      const effectiveDate = v?.date || supItem?.date || todayYmd;
-      const effectiveDayLabel = v?.dayLabel || supItem?.dayLabel || effectiveDate;
-      const manuallyArchived =
-        archivedVisitIds.includes(id) || archivedVisitIds.includes(solId);
-      const hasSessionApproval = Boolean(approvedIdsInSession[id] || approvedIdsInSession[solId]);
-      const isPendingSellerRequest =
-        supItem?.status === 'PENDIENTE' && !v && !hasSessionApproval;
+        const totalUnits =
+          v?.plannedUnits ||
+          (v ? v.mortadelaQty + v.espaldaQty + v.arrozQty : 0) ||
+          supItem?.requestedQty ||
+          1;
+        const targetSamples = supItem?.targetSamples ?? 0;
+        const suppliesCalc = calculateProductionSupplies(prodLabel, totalUnits, targetSamples);
 
-      const isArchived = isPendingSellerRequest
-        ? manuallyArchived
-        : manuallyArchived ||
-          Boolean(supItem?.isArchived) ||
-          (Boolean(effectiveDate && effectiveDate < todayYmd) && !hasSessionApproval && !supItem);
+        const effectiveDate = v?.date || supItem?.date || todayYmd;
+        const effectiveDayLabel = v?.dayLabel || supItem?.dayLabel || effectiveDate;
+        const hasSessionApproval =
+          !isDiscardedInSession && Boolean(approvedIdsInSession[id] || approvedIdsInSession[solId]);
+        const isPendingSellerRequest =
+          !isDiscardedInSession &&
+          supItem?.status === 'PENDIENTE' &&
+          !v &&
+          !hasSessionApproval;
 
-      let itemStatus: TastingScheduleItem['status'] = 'PROGRAMADO';
-      if (isPendingSellerRequest) {
-        itemStatus = 'PENDIENTE';
-      } else if (hasSessionApproval) {
-        itemStatus = 'PROGRAMADO';
-      } else if (v?.status === 'COMPLETADA' || supItem?.status === 'COMPLETADO') {
-        itemStatus = 'COMPLETADO';
-      } else if (v?.status === 'EN_CURSO' || supItem?.status === 'EN_CURSO') {
-        itemStatus = 'EN_CURSO';
-      } else if (supItem?.status === 'PROGRAMADO') {
-        itemStatus = 'PROGRAMADO';
-      } else if (isArchived) {
-        itemStatus = 'COMPLETADO';
-      } else {
-        itemStatus = 'PROGRAMADO';
-      }
+        let baseUiStatus: TastingScheduleItem['status'] = 'PROGRAMADO';
+        if (isDiscardedInSession || supItem?.status === 'NO_AUTORIZADA') {
+          baseUiStatus = 'NO_AUTORIZADA';
+        } else if (isPendingSellerRequest) {
+          baseUiStatus = 'PENDIENTE';
+        } else if (hasSessionApproval) {
+          baseUiStatus = 'PROGRAMADO';
+        } else if (v?.status === 'COMPLETADA' || supItem?.status === 'COMPLETADO') {
+          baseUiStatus = 'COMPLETADO';
+        } else if (v?.status === 'EN_CURSO' || supItem?.status === 'EN_CURSO') {
+          baseUiStatus = 'EN_CURSO';
+        } else if (supItem?.status === 'PENDIENTE') {
+          baseUiStatus = 'PENDIENTE';
+        } else {
+          baseUiStatus = 'PROGRAMADO';
+        }
 
-      const currentSamples = supItem?.currentSamples ?? 0;
-      const acceptancePercent = supItem?.acceptancePercent;
-      const salesAssisted = v?.assistedSalesUnits || supItem?.salesAssistedCount || 0;
-      const assignedPromotora =
-        selectedPromotoraByTastingId[solId] ||
-        selectedPromotoraByTastingId[id] ||
-        approvedIdsInSession[id] ||
-        approvedIdsInSession[solId] ||
-        v?.promotoraName ||
-        supItem?.responsibleName ||
-        'POR ASIGNAR (Trade Marketing)';
+        let enHistorial: boolean;
+        let itemStatus: TastingScheduleItem['status'] = baseUiStatus;
 
-      const isUnreadInSession = degustacionNotifications.unreadItems.some(
-        (u) => u.id === id || u.id === solId || (Boolean(degId) && u.degustacionId === degId)
-      );
+        if (FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE) {
+          enHistorial = isTastingInPastCaracasWeek(
+            effectiveDate,
+            undefined,
+            supItem?.rawComments?.date || supItem?.createdAt
+          );
+        } else {
+          const authResolution = resolveTastingAuthorizationState({
+            rawEstado: isDiscardedInSession
+              ? 'NO_AUTORIZADA'
+              : (supItem?.rawComments?.estado ?? supItem?.rawComments?.status),
+            statusUi: baseUiStatus,
+            rawEventDate: effectiveDate,
+            fallbackDate: supItem?.rawComments?.date || supItem?.createdAt,
+          });
+          enHistorial = authResolution.belongsToHistorial;
+          if (authResolution.authorizationState === 'NO_AUTORIZADA') {
+            itemStatus = 'NO_AUTORIZADA';
+          }
+        }
+        const isArchived = enHistorial;
 
-      return {
-        id: solId,
-        degustacionId: degId,
-        source: supItem?.source,
-        createdAt: supItem?.createdAt,
-        date: effectiveDate,
-        dayLabel: effectiveDayLabel,
-        shift: effectiveShift,
-        turnoRaw: supItem?.turnoRaw,
-        timeRange,
-        activityTitle: supItem?.activityTitle || `Degustación ${prodLabel}`,
-        productName: prodLabel,
-        productsList: supItem?.productsList,
-        responsibleName: assignedPromotora,
-        storeName: v?.storeName || supItem?.storeName || 'PDV Sin Nombre',
-        clienteCodigo: supItem?.clienteCodigo,
-        zone: v?.zone || supItem?.zone || 'ZONA GENERAL',
-        address: supItem?.address,
-        contactoPunto: supItem?.contactoPunto,
-        telefonoContacto: supItem?.telefonoContacto,
-        requierePromotora: supItem?.requierePromotora,
-        promoterType: supItem?.promoterType,
-        materialPop: supItem?.materialPop,
-        notasTradeMarketing: supItem?.notasTradeMarketing,
-        resultado: supItem?.resultado,
-        leidoTrade: isUnreadInSession ? false : (supItem?.leidoTrade ?? true),
-        vistoEnTradeAt: supItem?.vistoEnTradeAt,
-        mapsUrl: sanitizeExternalHttpsUrl(v?.mapsUrl || supItem?.mapsUrl),
-        status: itemStatus,
-        currentSamples,
-        targetSamples,
-        requestedQty: totalUnits,
-        mortadelaQty: v?.mortadelaQty ?? supItem?.mortadelaQty ?? suppliesCalc.mortadelaQty,
-        espaldaQty: v?.espaldaQty ?? supItem?.espaldaQty ?? suppliesCalc.espaldaQty,
-        arrozQty: v?.arrozQty ?? supItem?.arrozQty ?? suppliesCalc.arrozQty,
-        azucarGrams: v?.azucarGrams ?? supItem?.azucarGrams ?? suppliesCalc.azucarGrams,
-        lecheGrams: v?.lecheGrams ?? supItem?.lecheGrams ?? suppliesCalc.lecheGrams,
-        operationalSupplies:
-          v?.operationalSupplies || supItem?.operationalSupplies || suppliesCalc.operationalSupplies,
-        fillProductSelection:
-          v?.fillProductSelection || supItem?.fillProductSelection || suppliesCalc.fillProductSelection,
-        fillQuantityInput:
-          v?.fillQuantityInput || supItem?.fillQuantityInput || String(totalUnits),
-        acceptancePercent,
-        sellerApplicant:
-          supItem?.sellerApplicant || `${v?.sellerName || 'Ventas'} (Vendedor FDV)`,
-        salesAssistedCount: salesAssisted,
-        lotNumber:
-          supItem?.lotNumber || (prodUpper ? `REF-${solId.slice(0, 8).toUpperCase()}` : 'SIN-LOTE'),
-        isArchived,
-        notes:
-          v?.notes ||
-          supItem?.notes ||
-          `Sincronizado con Base de Datos Supabase y Trade Marketing (${effectiveShift} - ${effectiveDayLabel}).`,
-        rawComments: supItem?.rawComments,
+        const currentSamples = supItem?.currentSamples ?? 0;
+        const acceptancePercent = supItem?.acceptancePercent;
+        const salesAssisted = v?.assistedSalesUnits || supItem?.salesAssistedCount || 0;
+        const assignedPromotora =
+          selectedPromotoraByTastingId[solId] ||
+          selectedPromotoraByTastingId[id] ||
+          approvedIdsInSession[id] ||
+          approvedIdsInSession[solId] ||
+          v?.promotoraName ||
+          supItem?.responsibleName ||
+          'POR ASIGNAR (Trade Marketing)';
+
+        const isUnreadInSession = degustacionNotifications.unreadItems.some(
+          (u) => u.id === id || u.id === solId || (Boolean(degId) && u.degustacionId === degId)
+        );
+
+        return {
+          id: solId,
+          degustacionId: degId,
+          source: supItem?.source,
+          createdAt: supItem?.createdAt,
+          date: effectiveDate,
+          dayLabel: effectiveDayLabel,
+          shift: effectiveShift,
+          turnoRaw: supItem?.turnoRaw,
+          timeRange,
+          activityTitle: supItem?.activityTitle || `Degustación ${prodLabel}`,
+          productName: prodLabel,
+          productsList: supItem?.productsList,
+          responsibleName: assignedPromotora,
+          storeName: v?.storeName || supItem?.storeName || 'PDV Sin Nombre',
+          clienteCodigo: supItem?.clienteCodigo,
+          zone: v?.zone || supItem?.zone || 'ZONA GENERAL',
+          address: supItem?.address,
+          contactoPunto: supItem?.contactoPunto,
+          telefonoContacto: supItem?.telefonoContacto,
+          requierePromotora: supItem?.requierePromotora,
+          promoterType: supItem?.promoterType,
+          materialPop: supItem?.materialPop,
+          notasTradeMarketing: supItem?.notasTradeMarketing,
+          resultado: supItem?.resultado,
+          leidoTrade: isUnreadInSession ? false : (supItem?.leidoTrade ?? true),
+          vistoEnTradeAt: supItem?.vistoEnTradeAt,
+          mapsUrl: sanitizeExternalHttpsUrl(v?.mapsUrl || supItem?.mapsUrl),
+          status: itemStatus,
+          currentSamples,
+          targetSamples,
+          requestedQty: totalUnits,
+          mortadelaQty: v?.mortadelaQty ?? supItem?.mortadelaQty ?? suppliesCalc.mortadelaQty,
+          espaldaQty: v?.espaldaQty ?? supItem?.espaldaQty ?? suppliesCalc.espaldaQty,
+          arrozQty: v?.arrozQty ?? supItem?.arrozQty ?? suppliesCalc.arrozQty,
+          azucarGrams: v?.azucarGrams ?? supItem?.azucarGrams ?? suppliesCalc.azucarGrams,
+          lecheGrams: v?.lecheGrams ?? supItem?.lecheGrams ?? suppliesCalc.lecheGrams,
+          operationalSupplies:
+            v?.operationalSupplies || supItem?.operationalSupplies || suppliesCalc.operationalSupplies,
+          fillProductSelection:
+            v?.fillProductSelection || supItem?.fillProductSelection || suppliesCalc.fillProductSelection,
+          fillQuantityInput:
+            v?.fillQuantityInput || supItem?.fillQuantityInput || String(totalUnits),
+          acceptancePercent,
+          sellerApplicant:
+            supItem?.sellerApplicant || `${v?.sellerName || 'Ventas'} (Vendedor FDV)`,
+          salesAssistedCount: salesAssisted,
+          lotNumber:
+            supItem?.lotNumber || (prodUpper ? `REF-${solId.slice(0, 8).toUpperCase()}` : 'SIN-LOTE'),
+          isArchived,
+          enHistorial,
+          archivadoEn: supItem?.archivadoEn ?? v?.archivadoEn ?? null,
+          motivoArchivo: supItem?.motivoArchivo ?? v?.motivoArchivo ?? null,
+          notes:
+            v?.notes ||
+            supItem?.notes ||
+            `Sincronizado con Base de Datos Supabase y Trade Marketing (${effectiveShift} - ${effectiveDayLabel}).`,
+          rawComments: supItem?.rawComments,
+        };
       };
-    };
 
-    // 1. Incluir todas las solicitudes de degustación de Módulo 1 (tanto PENDIENTE como APROBADAS), superponiendo datos del Módulo 2 si ya fue aprobada
-    (module1Bundle?.tastingItems || []).forEach((supItem) => {
-      const matchedVisit =
-        visitById.get(supItem.id) ||
-        (supItem.degustacionId ? visitByDegId.get(supItem.degustacionId) : undefined);
-      if (matchedVisit) {
-        consumedVisitIds.add(matchedVisit.id);
-      }
-      const merged = buildMergedItem(supItem, matchedVisit);
-      if (merged) result.push(merged);
-    });
+      // 1. Incluir todas las solicitudes de degustación de Módulo 1 (tanto PENDIENTE como APROBADAS), superponiendo datos del Módulo 2 si ya fue aprobada
+      bundleTastingItems.forEach((supItem) => {
+        const matchedVisit =
+          visitById.get(supItem.id) ||
+          (supItem.degustacionId ? visitByDegId.get(supItem.degustacionId) : undefined);
+        if (matchedVisit) {
+          consumedVisitIds.add(matchedVisit.id);
+        }
+        const merged = buildMergedItem(supItem, matchedVisit);
+        if (merged) result.push(merged);
+      });
 
-    // 2. Incluir activaciones creadas o presentes en Módulo 2 que no estén ya en module1Bundle.tastingItems
-    visits.forEach((v) => {
-      if (consumedVisitIds.has(v.id)) return;
-      const supItem =
-        supabaseTastingMap.get(v.id) ||
-        (v.solicitudId ? supabaseTastingMap.get(v.solicitudId) : undefined);
-      const merged = buildMergedItem(supItem, v);
-      if (merged) result.push(merged);
-    });
+      // 2. Incluir activaciones creadas o presentes en Módulo 2 que no estén ya en bundleTastingItems
+      scheduleVisits.forEach((v) => {
+        if (consumedVisitIds.has(v.id)) return;
+        const supItem =
+          supItemMap.get(v.id) ||
+          (v.solicitudId ? supItemMap.get(v.solicitudId) : undefined);
+        const merged = buildMergedItem(supItem, v);
+        if (merged) result.push(merged);
+      });
 
-    return result;
-  }, [
-    visits,
-    module1Bundle?.tastingItems,
-    supabaseTastingMap,
-    archivedVisitIds,
-    approvedIdsInSession,
-    rejectedIdsInSession,
-    selectedPromotoraByTastingId,
-    liveClock.todayYmd,
-    degustacionNotifications.unreadItems,
-  ]);
-
-  // Lista unificada de degustaciones (las solicitudes SOLICITADA FDV permanecen activas hasta decisión explícita de Trade Marketing)
-  const tastingSchedule = useMemo<TastingScheduleItem[]>(() => {
-    const todayYmd = liveClock.todayYmd;
-    const normalizedLocal = localSellerRequests.map((item) =>
-      item.status !== 'PENDIENTE' && item.date && item.date < todayYmd
-        ? { ...item, isArchived: true, status: 'COMPLETADO' as const }
-        : item
-    );
-    return [...normalizedLocal, ...synchronizedScheduleItems];
-  }, [localSellerRequests, synchronizedScheduleItems, liveClock.todayYmd]);
-
-  const activeTastingCount = useMemo(
-    () => tastingSchedule.filter((item) => !item.isArchived).length,
-    [tastingSchedule]
+      return result;
+    },
+    [
+      approvedIdsInSession,
+      rejectedIdsInSession,
+      selectedPromotoraByTastingId,
+      liveClock.todayYmd,
+      caracasWeekStartYmd,
+      degustacionNotifications.unreadItems,
+    ]
   );
+
+  const synchronizedScheduleItems = useMemo<TastingScheduleItem[]>(
+    () => reconcileModule1ItemsWithVisits(module1Bundle?.tastingItems || [], visits),
+    [reconcileModule1ItemsWithVisits, module1Bundle?.tastingItems, visits]
+  );
+
+  // Lista unificada de degustaciones preservando estado Autorizada vs No Autorizada en Bandeja e Historial
+  const tastingSchedule = useMemo<TastingScheduleItem[]>(() => {
+    const normalizedLocal = localSellerRequests.map((item) => {
+      if (FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE) {
+        const inHist = isTastingInPastCaracasWeek(
+          item.date,
+          undefined,
+          item.rawComments?.date || item.createdAt
+        );
+        return {
+          ...item,
+          isArchived: inHist,
+          enHistorial: inHist,
+        };
+      }
+      const authState = resolveTastingAuthorizationState({
+        rawEstado: item.rawComments?.estado ?? item.rawComments?.status,
+        statusUi: item.status,
+        rawEventDate: item.date,
+        fallbackDate: item.rawComments?.date || item.createdAt,
+      });
+      return {
+        ...item,
+        status:
+          authState.authorizationState === 'NO_AUTORIZADA' ? 'NO_AUTORIZADA' : item.status,
+        isArchived: authState.belongsToHistorial,
+        enHistorial: authState.belongsToHistorial,
+      };
+    });
+    return [...normalizedLocal, ...synchronizedScheduleItems];
+  }, [localSellerRequests, synchronizedScheduleItems, caracasWeekStartYmd, liveClock.todayYmd]);
+
+  // Partición disjunta determinista (0 duplicados, 0 pérdida) en `America/Caracas`
+  const partitionedAllTastings = useMemo(
+    () =>
+      FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+        ? partitionTastingsByCaracasWeek(tastingSchedule)
+        : partitionTastingsByTodayAndAuthorization(tastingSchedule),
+    [tastingSchedule, caracasWeekStartYmd, liveClock.todayYmd]
+  );
+
+  const activeTastingCount = partitionedAllTastings.bandejaEntrada.length;
   const archivedTastingCount = useMemo(
-    () => tastingSchedule.filter((item) => item.isArchived).length,
-    [tastingSchedule]
+    () =>
+      Math.max(
+        partitionedAllTastings.historial.length,
+        serverHistorialState.result &&
+          tastingDayFilter === 'TODOS' &&
+          tastingSellerFilter === 'TODOS' &&
+          tastingPromotoraFilter === 'TODAS' &&
+          tastingProductFilter === 'TODOS' &&
+          !tastingSearchQuery.trim()
+          ? serverHistorialState.result.totalCount
+          : 0
+      ),
+    [
+      partitionedAllTastings.historial.length,
+      serverHistorialState.result,
+      tastingDayFilter,
+      tastingSellerFilter,
+      tastingPromotoraFilter,
+      tastingProductFilter,
+      tastingSearchQuery,
+    ]
   );
   const pendingSolicitadasCount = useMemo(
     () =>
-      tastingSchedule.filter((item) => !item.isArchived && item.status === 'PENDIENTE').length,
-    [tastingSchedule]
+      partitionedAllTastings.bandejaEntrada.filter((item) => item.status === 'PENDIENTE').length,
+    [partitionedAllTastings.bandejaEntrada]
   );
 
   const extractCleanSellerLabel = useCallback((rawApplicant?: string): string => {
@@ -496,29 +709,36 @@ export const FieldPromotoraView: React.FC = () => {
     return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b, 'es'));
   }, [tastingSchedule, extractCleanSellerLabel]);
 
-  // Opciones únicas de filtros derivadas directamente de tastingSchedule y visits
-  const availableDays = useMemo(() => {
-    return Array.from(
-      new Set([
-        ...tastingSchedule.map((t) => t.dayLabel).filter((d): d is string => Boolean(d)),
-        ...visits.map((v) => v.dayLabel).filter((d): d is string => Boolean(d)),
-      ])
-    );
-  }, [tastingSchedule, visits]);
-
   // Mapa de conteo de degustaciones por fecha YYYY-MM-DD según la pestaña activa (Actual o Historial)
   const tastingDatesCountMap = useMemo(() => {
     const map = new Map<string, number>();
-    tastingSchedule.forEach((item) => {
-      if (tastingViewMode === 'actual' && item.isArchived) return;
-      if (tastingViewMode === 'historial' && !item.isArchived) return;
-      const iso = normalizeExcelDate(item.date || item.rawComments?.date).fechaIso;
+    const sourcePool =
+      tastingViewMode === 'actual'
+        ? partitionedAllTastings.bandejaEntrada
+        : partitionedAllTastings.historial;
+    sourcePool.forEach((item) => {
+      const iso = resolveTastingEventCaracasYmd(item.date, item.rawComments?.date || item.createdAt);
       if (iso) {
         map.set(iso, (map.get(iso) || 0) + 1);
       }
     });
+    if (tastingViewMode === 'historial' && serverHistorialState.result?.rows) {
+      const seenIds = new Set(sourcePool.map((i) => i.id));
+      for (const r of serverHistorialState.result.rows) {
+        if (!r?.id || seenIds.has(r.id)) continue;
+        const iso = resolveTastingEventCaracasYmd(r.fecha_evento || r.date, r.created_at);
+        if (iso) {
+          map.set(iso, (map.get(iso) || 0) + 1);
+        }
+      }
+    }
     return map;
-  }, [tastingSchedule, tastingViewMode]);
+  }, [
+    tastingViewMode,
+    partitionedAllTastings.bandejaEntrada,
+    partitionedAllTastings.historial,
+    serverHistorialState.result,
+  ]);
 
   // Sincronizar el mes visible del calendario con la fecha o mes seleccionado
   useEffect(() => {
@@ -785,6 +1005,173 @@ export const FieldPromotoraView: React.FC = () => {
     }
   };
 
+  // =========================================================================
+  // INFORME EJECUTIVO DE SOLICITUD DE AUTORIZACIÓN (SOLO PENDIENTES · SOLO LECTURA)
+  // =========================================================================
+  const [isExportingAuthPdf, setIsExportingAuthPdf] = useState(false);
+  const [authPdfSuccess, setAuthPdfSuccess] = useState(false);
+  const isExportingAuthLockRef = useRef<boolean>(false);
+
+  const pendingAuthorizationScopeMeta = useMemo(() => {
+    const filterParts: string[] = [];
+
+    if (tastingDayFilter === 'RANGO' && (tastingDateFrom || tastingDateTo)) {
+      const fromFmt = tastingDateFrom ? formatToDdMmYyyy(tastingDateFrom, 'Inicio') : 'Inicio';
+      const toFmt = tastingDateTo ? formatToDdMmYyyy(tastingDateTo, 'Actual') : 'Actual';
+      filterParts.push(`Rango: ${fromFmt} al ${toFmt}`);
+    } else if (
+      tastingDayFilter !== 'TODOS' &&
+      tastingDayFilter !== 'SEMANA_ACTUAL' &&
+      tastingDayFilter.trim() !== ''
+    ) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(tastingDayFilter)) {
+        filterParts.push(`Fecha: ${formatToDdMmYyyy(tastingDayFilter, tastingDayFilter)}`);
+      } else {
+        filterParts.push(`Período: ${tastingDayFilter}`);
+      }
+    }
+
+    if (tastingSellerFilter !== 'TODOS') {
+      filterParts.push(`Vendedor: ${tastingSellerFilter}`);
+    }
+    if (tastingShiftFilter !== 'TODOS') {
+      filterParts.push(`Jornada: ${tastingShiftFilter}`);
+    }
+    if (tastingProductFilter !== 'TODOS') {
+      filterParts.push(`Producto: ${tastingProductFilter}`);
+    }
+    if (tastingPromotoraFilter !== 'TODAS') {
+      filterParts.push(
+        `Promotora: ${
+          tastingPromotoraFilter === 'POR_ASIGNAR' ? 'Por Asignar' : tastingPromotoraFilter
+        }`
+      );
+    }
+    if (tastingSearchQuery.trim()) {
+      filterParts.push(`Búsqueda: "${tastingSearchQuery.trim()}"`);
+    }
+
+    const hasActiveFilters = filterParts.length > 0;
+    return {
+      hasActiveFilters,
+      filterSummaryLabel: hasActiveFilters ? filterParts.join(' | ') : null,
+    };
+  }, [
+    tastingDayFilter,
+    tastingDateFrom,
+    tastingDateTo,
+    tastingSellerFilter,
+    tastingShiftFilter,
+    tastingProductFilter,
+    tastingPromotoraFilter,
+    tastingSearchQuery,
+  ]);
+
+  const visiblePendingAuthorizationCount = useMemo(() => {
+    const previewModel = buildPendingAuthorizationReportModel({
+      items: partitionedAllTastings.bandejaEntrada,
+      filterPredicate: matchesActiveTastingFilters,
+      hasActiveFilters: pendingAuthorizationScopeMeta.hasActiveFilters,
+      filterSummaryLabel: pendingAuthorizationScopeMeta.filterSummaryLabel,
+    });
+    return previewModel.rows.length;
+  }, [
+    partitionedAllTastings.bandejaEntrada,
+    matchesActiveTastingFilters,
+    pendingAuthorizationScopeMeta,
+  ]);
+
+  const handleExportPendingAuthorizationPdf = async () => {
+    if (isExportingAuthPdf || isExportingAuthLockRef.current) return;
+
+    if (visiblePendingAuthorizationCount === 0) {
+      showToast(
+        'No existen degustaciones pendientes de aceptación para exportar con los filtros actuales.'
+      );
+      return;
+    }
+
+    isExportingAuthLockRef.current = true;
+    setIsExportingAuthPdf(true);
+
+    try {
+      // 1. Revalidación fresca autenticada 100% SOLO LECTURA (respetando RLS; cero UPDATE/DELETE)
+      const freshBundle = await fetchAllModule1FromSupabase();
+
+      const mergedVisitsMap = new Map<string, ScheduledVisit>();
+      (freshBundle.visitsForSchedule || []).forEach((v) => {
+        mergedVisitsMap.set(v.id, v);
+      });
+      visits.forEach((v) => {
+        if (!mergedVisitsMap.has(v.id)) {
+          mergedVisitsMap.set(v.id, v);
+        }
+      });
+
+      const freshSynchronized = reconcileModule1ItemsWithVisits(
+        freshBundle.tastingItems || [],
+        Array.from(mergedVisitsMap.values())
+      );
+
+      const nowSnapshot = new Date();
+      const normalizedLocalPending = localSellerRequests.map((item) => {
+        const inHist = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+          ? isTastingInPastCaracasWeek(
+              item.date,
+              nowSnapshot,
+              item.rawComments?.date || item.createdAt
+            )
+          : isTastingBeforeTodayCaracas(
+              item.date,
+              nowSnapshot,
+              item.rawComments?.date || item.createdAt
+            );
+        return {
+          ...item,
+          isArchived: inHist,
+          enHistorial: inHist,
+        };
+      });
+
+      const freshCandidatePool = [...normalizedLocalPending, ...freshSynchronized];
+
+      // 2. Construcción determinista y sanitizada del modelo de pre-aprobación
+      const reportModel = buildPendingAuthorizationReportModel({
+        items: freshCandidatePool,
+        filterPredicate: matchesActiveTastingFilters,
+        hasActiveFilters: pendingAuthorizationScopeMeta.hasActiveFilters,
+        filterSummaryLabel: pendingAuthorizationScopeMeta.filterSummaryLabel,
+        issuerName: currentUser?.name || null,
+        issuerRole: currentRole || null,
+        now: nowSnapshot,
+      });
+
+      if (reportModel.rows.length === 0) {
+        showToast(
+          'No existen degustaciones pendientes de aceptación tras sincronizar con la base de datos.'
+        );
+        return;
+      }
+
+      // 3. Generación y descarga directa en Carta Horizontal (America/Caracas)
+      const exported = await exportPendingTastingAuthorizationPdf(reportModel);
+      setAuthPdfSuccess(true);
+      setTimeout(() => setAuthPdfSuccess(false), 3200);
+      showToast(
+        `Informe de Solicitud de Autorización descargado (${exported.exportedRows} pendiente${
+          exported.exportedRows === 1 ? '' : 's'
+        }).`
+      );
+    } catch {
+      showToast(
+        'No se pudo generar el PDF de Solicitud de Autorización. Verifica tu conexión e inténtalo nuevamente.'
+      );
+    } finally {
+      isExportingAuthLockRef.current = false;
+      setIsExportingAuthPdf(false);
+    }
+  };
+
   const activeTastingStaffNames = useMemo<string[]>(() => {
     const fromBundle = (module1Bundle?.staffMembers || [])
       .filter((s) => s.status === 'Activo' && s.category !== 'merchandising')
@@ -845,11 +1232,15 @@ export const FieldPromotoraView: React.FC = () => {
 
   const buildScheduleItemFromNotification = useCallback(
     (notif: DegustacionNotificationItem): TastingScheduleItem => {
+      const inHist = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+        ? isTastingInPastCaracasWeek(notif.date, undefined, notif.createdAt)
+        : isTastingBeforeTodayCaracas(notif.date, undefined, notif.createdAt);
       const lifecycle = resolveFdvRequestLifecycle({
         rawEstado: notif.estado,
         isFromSellerApp: notif.source === 'vendedor_app' || Boolean(notif.degustacionId),
         ymd: notif.date,
         todayYmd: liveClock.todayYmd,
+        enHistorial: inHist,
       });
       return {
         id: notif.id,
@@ -884,12 +1275,13 @@ export const FieldPromotoraView: React.FC = () => {
         requestedQty: notif.requestedQty,
         sellerApplicant: `${notif.sellerName} (Vendedor FDV)`,
         lotNumber: notif.degustacionId,
-        isArchived: lifecycle.isArchived,
+        isArchived: lifecycle.enHistorial,
+        enHistorial: lifecycle.enHistorial,
         notes: notif.notes,
         rawComments: notif.rawComments,
       };
     },
-    [liveClock.todayYmd]
+    [liveClock.todayYmd, caracasWeekStartYmd]
   );
 
   // Cuando el usuario hace clic en una degustación desde el Globito o Toast en cualquier módulo
@@ -945,14 +1337,51 @@ export const FieldPromotoraView: React.FC = () => {
     setFocusedTastingSnapshot,
   ]);
 
+  const isTastingHistoricalItem = useCallback(
+    (
+      item?: Pick<
+        TastingScheduleItem,
+        'date' | 'status' | 'isArchived' | 'enHistorial' | 'rawComments' | 'createdAt'
+      > | null
+    ): boolean => {
+      if (!item) return false;
+      if (item.isArchived || item.enHistorial || item.status === 'NO_AUTORIZADA') return true;
+      if (FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE) {
+        return isTastingInPastCaracasWeek(
+          item.date,
+          undefined,
+          item.rawComments?.date || item.createdAt
+        );
+      }
+      return isTastingBeforeTodayCaracas(
+        item.date,
+        undefined,
+        item.rawComments?.date || item.createdAt
+      );
+    },
+    [caracasWeekStartYmd, liveClock.todayYmd]
+  );
+
+  const isReadOnlyHistoricalItem = useCallback(
+    (
+      item?: Pick<
+        TastingScheduleItem,
+        'date' | 'status' | 'isArchived' | 'enHistorial' | 'rawComments' | 'createdAt'
+      > | null
+    ): boolean => {
+      return isTastingHistoricalItem(item) && !isStrictAdmin;
+    },
+    [isTastingHistoricalItem, isStrictAdmin]
+  );
+
   const handleOpenTastingDetail = useCallback(
     (item: TastingScheduleItem) => {
-      if (item.leidoTrade === false) {
+      if (item.leidoTrade === false && !isReadOnlyHistoricalItem(item)) {
         void degustacionNotifications.markAsRead(item.id);
       }
       setSelectedTastingDetail({ ...item, leidoTrade: true });
     },
-    [degustacionNotifications]
+    [degustacionNotifications, isReadOnlyHistoricalItem]
   );
 
   // Modal para ejecutar activación activa (Check-in, conteo de muestras, venta)
@@ -985,8 +1414,33 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   // =========================================================================
-  // ASIGNACIÓN / REASIGNACIÓN DE PROMOTORA ACTIVA (VALIDADA CONTRA NÓMINA)
+  // ASIGNACIÓN / REASIGNACIÓN DE PROMOTORA ACTIVA (ZERO TRUST + /portal/ruta)
   // =========================================================================
+  const activePromotoraCatalog = useMemo(
+    () => buildActivePromotoraCatalog(module1Bundle?.staffMembers),
+    [module1Bundle]
+  );
+
+  const allowedActivePromotoraIds = useMemo(
+    () => new Set(activePromotoraCatalog.map((p) => p.id)),
+    [activePromotoraCatalog]
+  );
+
+  const findActivePromotoraByName = useCallback(
+    (rawName?: string | null) => {
+      const clean = String(rawName || '')
+        .replace(/\(Sugerida\)/gi, '')
+        .trim();
+      if (!clean || /^POR ASIGNAR|^SIN ASIGNAR/i.test(clean)) return null;
+      const targetKey = canonicalStaffKey(clean);
+      if (!targetKey) return null;
+      return (
+        activePromotoraCatalog.find((opt) => canonicalStaffKey(opt.name) === targetKey) || null
+      );
+    },
+    [activePromotoraCatalog]
+  );
+
   const resolvePromotoraSelectValue = useCallback(
     (rawResponsible?: string): { value: string; extraOption: string | null } => {
       const trimmed = String(rawResponsible || '').trim();
@@ -1008,39 +1462,138 @@ export const FieldPromotoraView: React.FC = () => {
     item: TastingScheduleItem,
     rawSelectedPromotora: string
   ) => {
-    if (!item?.id) return;
+    if (!item?.id || approvingIdsRef.current.has(item.id)) return;
+    try {
+      assertCanMutateTastingByWeekCycle({
+        eventDate: item.date,
+        fallbackDate: item.rawComments?.date || item.createdAt,
+        isStrictAdmin,
+      });
+    } catch (lockErr) {
+      showToast(
+        lockErr instanceof HistoricalTastingLockError
+          ? lockErr.message
+          : 'Registro Histórico (Cerrado): Solo lectura para usuarios estándar.'
+      );
+      return;
+    }
     const trimmed = String(rawSelectedPromotora || '').trim();
     const isUnassignedChoice =
       !trimmed || /^POR ASIGNAR/i.test(trimmed) || /^SIN ASIGNAR/i.test(trimmed);
 
-    let validatedPromotora = 'POR ASIGNAR (Trade Marketing)';
-    if (!isUnassignedChoice) {
-      const matchedActive = activeTastingStaffNames.find(
-        (name) => canonicalStaffKey(name) === canonicalStaffKey(trimmed)
+    // Si la degustación ya fue APROBADA, no puede quedar sin promotora activa en ruta
+    if (item.status !== 'PENDIENTE' && isUnassignedChoice) {
+      showToast(
+        'Una degustación aprobada en ruta debe tener promotora activa asignada. Seleccione otra promotora o cancele la actividad.'
       );
-      if (!matchedActive) {
-        showToast('Seleccione únicamente una promotora activa de la nómina sincronizada.');
-        return;
+      return;
+    }
+
+    const matchedOption = !isUnassignedChoice ? findActivePromotoraByName(trimmed) : null;
+    if (!isUnassignedChoice && !matchedOption) {
+      showToast('Seleccione únicamente una promotora activa verificada de la nómina (public.staff).');
+      return;
+    }
+
+    const validatedPromotora = matchedOption
+      ? matchedOption.name
+      : 'POR ASIGNAR (Trade Marketing)';
+
+    // CASO 1: Solicitud aún PENDIENTE (SOLICITADA / PENDIENTE_APROBACION) -> Origen aún NO aceptado:
+    // Solo guarda la preselección sugerida sin proyectar a rutas_promotoras (/portal/ruta).
+    if (item.status === 'PENDIENTE') {
+      setSelectedPromotoraByTastingId((prev) => ({
+        ...prev,
+        [item.id]: validatedPromotora,
+      }));
+
+      if (selectedTastingDetail?.id === item.id) {
+        setSelectedTastingDetail((prev) =>
+          prev ? { ...prev, responsibleName: validatedPromotora } : null
+        );
       }
-      validatedPromotora = matchedActive;
+
+      try {
+        if (item.source === 'carga_multiformato' && isValidUuid(item.cronogramaId || item.id)) {
+          await updateCronogramaPromotoraIdInSupabase({
+            cronogramaId: item.cronogramaId || item.id,
+            promotoraId: matchedOption ? matchedOption.id : null,
+            allowedPromotoraIds: allowedActivePromotoraIds,
+          });
+        } else {
+          await assignSupabaseDegustacionPromotora(item.id, validatedPromotora, item.rawComments, {
+            eventDateYmd: item.date,
+            isStrictAdmin,
+          });
+        }
+        showToast(
+          isUnassignedChoice
+            ? `Promotora marcada como Por Asignar en ${item.storeName}.`
+            : `Promotora ${validatedPromotora} preseleccionada en ${item.storeName} (pendiente de aprobar para enviar a /portal/ruta).`
+        );
+      } catch {
+        // Conserva selección en memoria ante micro-corte
+      }
+      return;
     }
 
-    setSelectedPromotoraByTastingId((prev) => ({
-      ...prev,
-      [item.id]: validatedPromotora,
-    }));
-
-    if (selectedTastingDetail?.id === item.id) {
-      setSelectedTastingDetail((prev) =>
-        prev ? { ...prev, responsibleName: validatedPromotora } : null
+    // CASO 2: Degustación YA ACEPTADA (APROBADA / EN_CURSO) -> Reasignación atómica en vivo hacia /portal
+    if (!matchedOption) return;
+    const matchedStaffReassign = (module1Bundle?.staffMembers || []).find(
+      (s) =>
+        s.id === matchedOption.id ||
+        canonicalStaffKey(s.name) === canonicalStaffKey(matchedOption.name)
+    );
+    const reassignEmail = String(matchedStaffReassign?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reassignEmail)) {
+      showToast(
+        `Registra primero el correo electrónico de "${matchedOption.name}" en la Pestaña de Personal antes de asignarle la ruta en /portal.`
       );
+      return;
     }
 
-    if (item.status !== 'PENDIENTE') {
+    approvingIdsRef.current.add(item.id);
+    setProcessingTastingId(item.id);
+
+    try {
+      const originSurveyId =
+        item.source !== 'carga_multiformato' && isValidUuid(item.id) ? item.id : null;
+      const targetCronogramaId =
+        item.cronogramaId ||
+        (item.source === 'carga_multiformato' && isValidUuid(item.id) ? item.id : null);
+
+      const rpcResult = await assignAcceptedDegustacionToPromotoraRoute({
+        promotoraId: matchedOption.id,
+        promotoraEmail: reassignEmail,
+        surveyId: originSurveyId,
+        cronogramaId: targetCronogramaId,
+        confirmarAceptacion: false,
+        aprobadoPor: currentUser?.name || currentUser?.email || null,
+        allowedPromotoraIds: allowedActivePromotoraIds,
+      });
+
+      setSelectedPromotoraByTastingId((prev) => ({
+        ...prev,
+        [item.id]: validatedPromotora,
+      }));
       setApprovedIdsInSession((prev) => ({
         ...prev,
         [item.id]: validatedPromotora,
       }));
+
+      if (selectedTastingDetail?.id === item.id) {
+        setSelectedTastingDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                responsibleName: validatedPromotora,
+                promotoraId: matchedOption.id,
+                cronogramaId: rpcResult.cronograma_id,
+              }
+            : null
+        );
+      }
+
       const matchedVisit = visits.find(
         (v) =>
           v.id === item.id ||
@@ -1050,60 +1603,121 @@ export const FieldPromotoraView: React.FC = () => {
       if (matchedVisit) {
         updateVisit(matchedVisit.id, {
           promotoraName: validatedPromotora,
-          ...(isUnassignedChoice ? { promotoraId: '' } : {}),
+          promotoraId: matchedOption.id,
+          cronogramaId: rpcResult.cronograma_id,
         });
       }
-    }
 
-    try {
-      await assignSupabaseDegustacionPromotora(item.id, validatedPromotora, item.rawComments);
+      if (originSurveyId) {
+        void assignSupabaseDegustacionPromotora(item.id, validatedPromotora, item.rawComments, {
+          eventDateYmd: item.date,
+          isStrictAdmin,
+        }).catch(
+          () => {}
+        );
+      }
+
+      setLastAuthorizedShareBanner({
+        promotoraName: validatedPromotora,
+        promotoraEmail: reassignEmail,
+        phone: matchedStaffReassign?.phone || '',
+        storeName: item.storeName,
+        fechaYmd: item.date,
+      });
+
       showToast(
-        isUnassignedChoice
-          ? `Promotora marcada como Por Asignar en ${item.storeName}.`
-          : `Promotora ${validatedPromotora} asignada a ${item.storeName}.`
+        `Ruta reasignada en tiempo real a ${validatedPromotora} (${item.storeName}) en /portal.`
       );
-    } catch {
-      // Si hay latencia transitoria de red se conserva la selección en sesión
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo reasignar la degustación en la hoja de ruta.'
+      );
+    } finally {
+      approvingIdsRef.current.delete(item.id);
+      setProcessingTastingId((prev) => (prev === item.id ? null : prev));
     }
   };
 
   // =========================================================================
-  // ACCIÓN PRINCIPAL: APROBAR SOLICITUD DE DEGUSTACIÓN (SINCRONIZA SUPABASE + MÓDULO 2)
+  // ACCIÓN PRINCIPAL: APROBAR SOLICITUD DE DEGUSTACIÓN (ORIGEN VALIDADO -> /portal/ruta)
   // =========================================================================
   const handleApproveTastingRequest = async (item: TastingScheduleItem) => {
     if (!item?.id || approvingIdsRef.current.has(item.id)) {
       return;
     }
+    try {
+      assertCanMutateTastingByWeekCycle({
+        eventDate: item.date,
+        fallbackDate: item.rawComments?.date || item.createdAt,
+        isStrictAdmin,
+      });
+    } catch (lockErr) {
+      showToast(
+        lockErr instanceof HistoricalTastingLockError
+          ? lockErr.message
+          : 'Registro Histórico (Cerrado): Solo lectura para usuarios estándar.'
+      );
+      return;
+    }
+
+    const explicitSessionChoice = selectedPromotoraByTastingId[item.id];
+    const explicitlyLeftUnassigned =
+      typeof explicitSessionChoice === 'string' &&
+      /^POR ASIGNAR|^SIN ASIGNAR/i.test(explicitSessionChoice.trim());
+
+    const rawPreferred = explicitSessionChoice ?? item.responsibleName ?? '';
+    const matchedPromotora = !explicitlyLeftUnassigned
+      ? findActivePromotoraByName(rawPreferred)
+      : null;
+
+    // Bloqueo estricto: prohibido auto-asignar silenciosamente promotoraPool[0] o aprobar sin UUID y correo real
+    if (!matchedPromotora || !matchedPromotora.id) {
+      showToast(
+        `Seleccione una promotora activa antes de autorizar "${item.storeName}" para sincronizar su ruta en /portal y en el Cronograma de productos.`
+      );
+      return;
+    }
+
+    const matchedStaffRecord = (module1Bundle?.staffMembers || []).find(
+      (s) =>
+        s.id === matchedPromotora.id ||
+        canonicalStaffKey(s.name) === canonicalStaffKey(matchedPromotora.name)
+    );
+    const promotoraEmail = String(matchedStaffRecord?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(promotoraEmail)) {
+      showToast(
+        `Registra primero el correo electrónico de "${matchedPromotora.name}" en la Pestaña de Personal para habilitar su acceso a /portal y autorizar la degustación.`
+      );
+      return;
+    }
+
     approvingIdsRef.current.add(item.id);
     setProcessingTastingId(item.id);
 
     try {
-      const promotoraPool = activeTastingStaffNames;
-      const explicitSessionChoice = selectedPromotoraByTastingId[item.id];
-      const explicitlyLeftUnassigned =
-        typeof explicitSessionChoice === 'string' &&
-        /^POR ASIGNAR|^SIN ASIGNAR/i.test(explicitSessionChoice.trim());
+      const originSurveyId =
+        item.source !== 'carga_multiformato' && isValidUuid(item.id) ? item.id : null;
+      const targetCronogramaId =
+        item.cronogramaId ||
+        (item.source === 'carga_multiformato' && isValidUuid(item.id) ? item.id : null);
 
-      const rawPreferred = explicitSessionChoice ?? item.responsibleName ?? '';
-      const cleanCurrent = rawPreferred
-        .replace(/\(Sugerida\)/gi, '')
-        .replace(/POR ASIGNAR.*/gi, '')
-        .replace(/SIN ASIGNAR.*/gi, '')
-        .trim();
-      const canonicalCurrentProfile = cleanCurrent
-        ? canonicalizeActivePromoterOrNull(cleanCurrent, undefined, module1Bundle?.staffMembers)
-        : null;
-      const candidatePromotora = explicitlyLeftUnassigned
-        ? 'POR ASIGNAR (Trade Marketing)'
-        : canonicalCurrentProfile?.name &&
-            promotoraPool.some(
-              (p) => canonicalStaffKey(p) === canonicalStaffKey(canonicalCurrentProfile.name)
-            )
-          ? canonicalCurrentProfile.name
-          : promotoraPool[0] || 'POR ASIGNAR (Trade Marketing)';
+      const rpcResult = await assignAcceptedDegustacionToPromotoraRoute({
+        promotoraId: matchedPromotora.id,
+        promotoraEmail,
+        surveyId: originSurveyId,
+        cronogramaId: targetCronogramaId,
+        confirmarAceptacion: true,
+        aprobadoPor: currentUser?.name || currentUser?.email || null,
+        allowedPromotoraIds: allowedActivePromotoraIds,
+      });
+
+      const finalAssignedPromotora = matchedPromotora.name;
 
       const syncResult = upsertVisitFromApprovedTasting({
         solicitudId: item.id,
+        cronogramaId: rpcResult.cronograma_id,
         degustacionId: item.degustacionId,
         date: item.date,
         dayLabel: item.dayLabel,
@@ -1116,21 +1730,11 @@ export const FieldPromotoraView: React.FC = () => {
         requestedQty: item.requestedQty || item.fillQuantityInput || 1,
         targetSamples: item.targetSamples,
         sellerName: item.sellerApplicant,
-        promotoraName: candidatePromotora,
+        promotoraId: matchedPromotora.id,
+        promotoraName: finalAssignedPromotora,
         mapsUrl: item.mapsUrl,
         notes: item.notes,
       });
-
-      const finalAssignedPromotora = explicitlyLeftUnassigned
-        ? 'POR ASIGNAR (Trade Marketing)'
-        : syncResult.assignedPromotora;
-
-      if (explicitlyLeftUnassigned && syncResult.visit?.id) {
-        updateVisit(syncResult.visit.id, {
-          promotoraName: 'POR ASIGNAR (Trade Marketing)',
-          promotoraId: '',
-        });
-      }
 
       setLocalSellerRequests((prev) => prev.filter((r) => r.id !== item.id));
       setRejectedIdsInSession((prev) => {
@@ -1151,10 +1755,11 @@ export const FieldPromotoraView: React.FC = () => {
         [item.id]: finalAssignedPromotora,
       }));
 
-      try {
-        await updateSupabaseDegustacionStatus(item.id, {
+      // Notificar en segundo plano al servicio FDV Render sin bloquear la ruta ya proyectada en Supabase
+      if (originSurveyId) {
+        void updateSupabaseDegustacionStatus(item.id, {
           estado: 'APROBADA',
-          promotoraAsignada: explicitlyLeftUnassigned ? '' : finalAssignedPromotora,
+          promotoraAsignada: finalAssignedPromotora,
           insumosCalculados: {
             ...syncResult.supplies.operationalSupplies,
             mortadelaQty: syncResult.supplies.mortadelaQty,
@@ -1164,9 +1769,9 @@ export const FieldPromotoraView: React.FC = () => {
             lecheGrams: syncResult.supplies.lecheGrams,
           },
           rawComments: item.rawComments,
-        });
-      } catch {
-        // Fallo transitorio de red silenciado para no exponer trazas crudas en consola
+          eventDateYmd: item.date,
+          isStrictAdmin,
+        }).catch(() => {});
       }
 
       void degustacionNotifications.markAsRead(item.id);
@@ -1174,8 +1779,22 @@ export const FieldPromotoraView: React.FC = () => {
         setSelectedTastingDetail(null);
       }
 
+      setLastAuthorizedShareBanner({
+        promotoraName: finalAssignedPromotora,
+        promotoraEmail,
+        phone: matchedStaffRecord?.phone || '',
+        storeName: item.storeName,
+        fechaYmd: item.date,
+      });
+
       showToast(
-        `Solicitud aprobada y agregada automáticamente al Cronograma de Producción (${item.storeName} • ${syncResult.supplies.productFocus}: ${syncResult.supplies.plannedUnits} kg/un • Promotora: ${finalAssignedPromotora}).`
+        `Degustación autorizada y sincronizada en tiempo real hacia /portal y Cronograma de productos (${item.storeName} • ${finalAssignedPromotora}).`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo autorizar y sincronizar la degustación hacia /portal.'
       );
     } finally {
       approvingIdsRef.current.delete(item.id);
@@ -1183,10 +1802,10 @@ export const FieldPromotoraView: React.FC = () => {
     }
   };
 
-  // Rechazar o cancelar solicitud (revierte también la fila en el Cronograma de Producción si estaba aprobada)
+  // Marcar como No Autorizada o cancelar solicitud (retira inmediatamente de /portal y Cronograma de productos y pasa a Historial como No Autorizada)
   const handleRejectTastingRequest = async (
     id: string,
-    targetEstado: 'RECHAZADA' | 'CANCELADA' = 'RECHAZADA'
+    targetEstado: 'NO_AUTORIZADA' | 'RECHAZADA' | 'CANCELADA' = 'NO_AUTORIZADA'
   ) => {
     if (!id || approvingIdsRef.current.has(id)) {
       return;
@@ -1198,6 +1817,27 @@ export const FieldPromotoraView: React.FC = () => {
       const target =
         tastingSchedule.find((t) => t.id === id) ||
         (selectedTastingDetail?.id === id ? selectedTastingDetail : null);
+
+      assertCanMutateTastingByWeekCycle({
+        eventDate: target?.date,
+        fallbackDate: target?.rawComments?.date || target?.createdAt,
+        isStrictAdmin,
+      });
+
+      const originSurveyId =
+        target?.source !== 'carga_multiformato' && isValidUuid(id) ? id : null;
+      const targetCronogramaId =
+        target?.cronogramaId ||
+        (target?.source === 'carga_multiformato' && isValidUuid(id) ? id : null);
+
+      if (originSurveyId || targetCronogramaId) {
+        await withdrawDegustacionFromPromotoraRoute({
+          surveyId: originSurveyId,
+          cronogramaId: targetCronogramaId,
+          nuevoEstado: targetEstado,
+          motivo: `Solicitud ${targetEstado.toLowerCase()} por Coordinación`,
+        });
+      }
 
       void degustacionNotifications.markAsRead(id);
       setLocalSellerRequests((prev) => prev.filter((t) => t.id !== id));
@@ -1225,39 +1865,30 @@ export const FieldPromotoraView: React.FC = () => {
         setSelectedTastingDetail(null);
       }
 
-      if (target?.rawComments || !String(id).startsWith('vis_')) {
-        try {
-          await updateSupabaseDegustacionStatus(id, {
-            estado: targetEstado,
-            rawComments: target?.rawComments,
-          });
-        } catch {
-          // Fallo transitorio de red silenciado
-        }
+      if (originSurveyId && (target?.rawComments || !String(id).startsWith('vis_'))) {
+        void updateSupabaseDegustacionStatus(id, {
+          estado: targetEstado,
+          rawComments: target?.rawComments,
+          eventDateYmd: target?.date,
+          isStrictAdmin,
+        }).catch(() => {});
       }
 
       showToast(
         wasRemovedFromSchedule
-          ? `Solicitud ${targetEstado.toLowerCase()} y removida automáticamente del Cronograma de Producción.`
-          : `Solicitud de degustación ${targetEstado.toLowerCase()}.`
+          ? `Degustación marcada como No Autorizada, archivada en Historial y retirada de /portal y del Cronograma de productos.`
+          : `Degustación trasladada al Historial con etiqueta "No Autorizada".`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : `No se pudo marcar la degustación como ${targetEstado.toLowerCase()}.`
       );
     } finally {
       approvingIdsRef.current.delete(id);
       setProcessingTastingId((prev) => (prev === id ? null : prev));
     }
-  };
-
-  // Cierre dominical
-  const handleSundayCloseArchive = () => {
-    setArchivedVisitIds(visits.map((v) => v.id));
-    setLocalSellerRequests((prev) =>
-      prev.map((item) =>
-        !item.isArchived && item.status !== 'PENDIENTE'
-          ? { ...item, isArchived: true, status: 'COMPLETADO' }
-          : item
-      )
-    );
-    showToast('Semana archivada exitosamente en el Historial.');
   };
 
   // Enviar nueva solicitud FDV directo a Supabase con blindaje anti-duplicados y confirmación real de BD
@@ -1364,6 +1995,20 @@ export const FieldPromotoraView: React.FC = () => {
 
   // Iniciar degustación en PDV
   const handleStartTasting = (item: TastingScheduleItem) => {
+    try {
+      assertCanMutateTastingByWeekCycle({
+        eventDate: item.date,
+        fallbackDate: item.rawComments?.date || item.createdAt,
+        isStrictAdmin,
+      });
+    } catch (lockErr) {
+      showToast(
+        lockErr instanceof HistoricalTastingLockError
+          ? lockErr.message
+          : 'Registro Histórico (Cerrado): Solo lectura para usuarios estándar.'
+      );
+      return;
+    }
     updateVisit(item.id, { status: 'EN_CURSO' });
     setExecutingItem({ ...item, status: 'EN_CURSO' });
   };
@@ -1375,6 +2020,20 @@ export const FieldPromotoraView: React.FC = () => {
     acceptance: number
   ) => {
     if (!executingItem) return;
+    try {
+      assertCanMutateTastingByWeekCycle({
+        eventDate: executingItem.date,
+        fallbackDate: executingItem.rawComments?.date || executingItem.createdAt,
+        isStrictAdmin,
+      });
+    } catch (lockErr) {
+      showToast(
+        lockErr instanceof HistoricalTastingLockError
+          ? lockErr.message
+          : 'Registro Histórico (Cerrado): Solo lectura para usuarios estándar.'
+      );
+      return;
+    }
     const isCompleted = currentSamples >= executingItem.targetSamples;
     updateVisit(executingItem.id, {
       tastedUnits: Math.max(1, Math.ceil(currentSamples / 70)),
@@ -1390,6 +2049,8 @@ export const FieldPromotoraView: React.FC = () => {
           salesAssisted: assistedSales,
           acceptanceRate: acceptance,
           rawComments: executingItem.rawComments,
+          eventDateYmd: executingItem.date,
+          isStrictAdmin,
         });
       } catch {
         // Fallo transitorio silenciado
@@ -1405,14 +2066,213 @@ export const FieldPromotoraView: React.FC = () => {
     void handleRejectTastingRequest(id, 'CANCELADA');
   };
 
-  // Elementos visibles según la pestaña seleccionada (Actual o Historial) y filtros sincronizados
+  // Consulta paginada real en servidor (`public.surveys`, 25 registros/página default) para Historial
+  useEffect(() => {
+    if (tastingViewMode !== 'historial') {
+      return;
+    }
+
+    let cancelled = false;
+    const isSingleIsoDate = /^\d{4}-\d{2}-\d{2}$/.test(tastingDayFilter);
+    const isYearMonth = /^\d{4}-\d{2}$/.test(tastingDayFilter);
+
+    setServerHistorialState((prev) => ({ ...prev, loading: true }));
+
+    void queryServerPaginatedHistorialSurveys({
+      page: historialPage,
+      pageSize: historialPageSize,
+      dateFrom: tastingDayFilter === 'RANGO' ? tastingDateFrom || undefined : undefined,
+      dateTo: tastingDayFilter === 'RANGO' ? tastingDateTo || undefined : undefined,
+      singleDate: isSingleIsoDate ? tastingDayFilter : undefined,
+      yearMonth: isYearMonth ? tastingDayFilter : undefined,
+      sellerFilter: tastingSellerFilter,
+      promotoraFilter: tastingPromotoraFilter,
+      statusFilter: tastingStatusFilter,
+      shiftFilter: tastingShiftFilter,
+      productFilter: tastingProductFilter,
+      searchQuery: tastingSearchQuery,
+    })
+      .then((res) => {
+        if (!cancelled) {
+          setServerHistorialState({ loading: false, result: res });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setServerHistorialState((prev) => ({ ...prev, loading: false }));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    tastingViewMode,
+    historialPage,
+    historialPageSize,
+    tastingDayFilter,
+    tastingDateFrom,
+    tastingDateTo,
+    tastingSellerFilter,
+    tastingPromotoraFilter,
+    tastingStatusFilter,
+    tastingShiftFilter,
+    tastingProductFilter,
+    tastingSearchQuery,
+    caracasWeekStartYmd,
+  ]);
+
+  // Reconciliación sin duplicados de filas paginadas en servidor con la colección local/cronograma
+  const toNotificationRowInput = useCallback(
+    (r: NonNullable<ServerPaginatedHistorialSurveyResult['rows']>[number]) => ({
+      id: r.id,
+      type: r.type,
+      date: r.date ?? undefined,
+      store: r.store ?? undefined,
+      promoter: r.promoter ?? undefined,
+      product: r.product ?? undefined,
+      comments: r.comments ?? undefined,
+      creatorId: r.creatorId ?? undefined,
+      created_at: r.created_at ?? undefined,
+      leido_trade: r.leido_trade,
+      visto_en_trade_at: r.visto_en_trade_at,
+      en_historial: r.en_historial,
+      archivado_en: r.archivado_en,
+      motivo_archivo: r.motivo_archivo,
+    }),
+    []
+  );
+
+  const enrichedHistorialPool = useMemo<TastingScheduleItem[]>(() => {
+    const baseHistorial = partitionedAllTastings.historial;
+    const serverRows = serverHistorialState.result?.rows;
+    if (!serverRows || serverRows.length === 0) {
+      return baseHistorial;
+    }
+
+    const seenIds = new Set<string>(baseHistorial.map((i) => i.id));
+    const seenDegIds = new Set<string>(
+      baseHistorial.map((i) => i.degustacionId).filter((d): d is string => Boolean(d))
+    );
+    const extraFromServer: TastingScheduleItem[] = [];
+
+    for (const rawRow of serverRows) {
+      if (!rawRow?.id || seenIds.has(rawRow.id)) continue;
+      const parsedNotif = parseDegustacionNotificationRow(
+        toNotificationRowInput(rawRow),
+        liveClock.todayYmd
+      );
+      if (!parsedNotif) continue;
+      if (parsedNotif.degustacionId && seenDegIds.has(parsedNotif.degustacionId)) continue;
+      const item = buildScheduleItemFromNotification(parsedNotif);
+      const belongsToHist = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+        ? isTastingInPastCaracasWeek(item.date, undefined, item.createdAt)
+        : item.status === 'NO_AUTORIZADA' ||
+          isTastingBeforeTodayCaracas(item.date, undefined, item.createdAt);
+      if (!belongsToHist) continue;
+      seenIds.add(item.id);
+      if (item.degustacionId) seenDegIds.add(item.degustacionId);
+      extraFromServer.push(item);
+    }
+
+    if (extraFromServer.length === 0) return baseHistorial;
+    return FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+      ? partitionTastingsByCaracasWeek([...baseHistorial, ...extraFromServer]).historial
+      : partitionTastingsByTodayAndAuthorization([...baseHistorial, ...extraFromServer]).historial;
+  }, [
+    partitionedAllTastings.historial,
+    serverHistorialState.result,
+    liveClock.todayYmd,
+    buildScheduleItemFromNotification,
+    caracasWeekStartYmd,
+  ]);
+
+  // Elementos visibles según la pestaña seleccionada (`Degustaciones` Semana en Curso vs `Historial` Semanas Anteriores)
   const displayedItems = useMemo(() => {
-    return tastingSchedule.filter((item) => {
-      if (tastingViewMode === 'actual' && item.isArchived) return false;
-      if (tastingViewMode === 'historial' && !item.isArchived) return false;
-      return matchesActiveTastingFilters(item);
+    if (tastingViewMode === 'actual') {
+      return partitionedAllTastings.bandejaEntrada.filter((item) =>
+        matchesActiveTastingFilters(item)
+      );
+    }
+    return enrichedHistorialPool.filter((item) => matchesActiveTastingFilters(item));
+  }, [
+    tastingViewMode,
+    partitionedAllTastings.bandejaEntrada,
+    enrichedHistorialPool,
+    matchesActiveTastingFilters,
+  ]);
+
+  const historialPagination = useMemo(() => {
+    const clientPaginated = paginateSanitizedHistorialCollection(displayedItems, {
+      page: historialPage,
+      pageSize: historialPageSize,
     });
-  }, [tastingSchedule, tastingViewMode, matchesActiveTastingFilters]);
+    const srv = serverHistorialState.result;
+    if (
+      srv &&
+      tastingStatusFilter === 'TODOS' &&
+      tastingShiftFilter === 'TODOS' &&
+      srv.totalCount > clientPaginated.totalItems
+    ) {
+      const serverItems: TastingScheduleItem[] = [];
+      const byId = new Map(displayedItems.map((i) => [i.id, i]));
+      for (const r of srv.rows) {
+        const existing = byId.get(r.id);
+        if (existing) {
+          serverItems.push(existing);
+          continue;
+        }
+        const parsed = parseDegustacionNotificationRow(
+          toNotificationRowInput(r),
+          liveClock.todayYmd
+        );
+        if (parsed) {
+          serverItems.push(buildScheduleItemFromNotification(parsed));
+        }
+      }
+      return {
+        items: serverItems,
+        page: srv.page,
+        pageSize: srv.pageSize,
+        totalItems: srv.totalCount,
+        totalPages: srv.totalPages,
+        startIndex: srv.startIndex,
+        endIndex: srv.endIndex,
+        inicioSemanaActualYmd: srv.inicioSemanaActualYmd,
+      };
+    }
+    return clientPaginated;
+  }, [
+    displayedItems,
+    historialPage,
+    historialPageSize,
+    serverHistorialState.result,
+    tastingStatusFilter,
+    tastingShiftFilter,
+    liveClock.todayYmd,
+    buildScheduleItemFromNotification,
+  ]);
+
+  const visibleTableItems = useMemo(
+    () => (tastingViewMode === 'historial' ? historialPagination.items : displayedItems),
+    [tastingViewMode, historialPagination.items, displayedItems]
+  );
+
+  useEffect(() => {
+    setHistorialPage(1);
+  }, [
+    tastingViewMode,
+    tastingSearchQuery,
+    tastingPromotoraFilter,
+    tastingSellerFilter,
+    tastingStatusFilter,
+    tastingDayFilter,
+    tastingDateFrom,
+    tastingDateTo,
+    tastingShiftFilter,
+    tastingProductFilter,
+    historialPageSize,
+  ]);
 
   // Métrica de Factibilidad de Degustación en tiempo real según la semana, rango o temporada filtrada
   const displayedFeasibility = useMemo(() => {
@@ -1433,10 +2293,7 @@ export const FieldPromotoraView: React.FC = () => {
   const [activeReportTab, setActiveReportTab] = useState<ReportSubTab>('asistencia');
   const [reportSearchQuery, setReportSearchQuery] = useState('');
   const [reportRowLimit, setReportRowLimit] = useState<number>(150);
-  const [attendanceCardLimit, setAttendanceCardLimit] = useState<number>(15);
   const [checkinPhotosMap, setCheckinPhotosMap] = useState<Record<string, string>>({});
-  const [isLoadingBatchPhotos, setIsLoadingBatchPhotos] = useState<boolean>(false);
-  const [hiddenSlotIds, setHiddenSlotIds] = useState<Record<string, boolean>>({});
 
   // Estados sincronizados para Inventario y Degustación
   const [editingInventoryObs, setEditingInventoryObs] = useState<{ id: string; text: string } | null>(null);
@@ -1547,142 +2404,6 @@ export const FieldPromotoraView: React.FC = () => {
     }
   };
 
-  // Filtrado de registros de asistencia para la vista visual de 4 marcajes
-  const filteredAttendanceRecords = useMemo(() => {
-    return attendanceRecords
-      .filter(
-        (a) =>
-          !reportSearchQuery ||
-          a.promotora.toLowerCase().includes(reportSearchQuery.toLowerCase()) ||
-          a.storeName.toLowerCase().includes(reportSearchQuery.toLowerCase()) ||
-          a.date.includes(reportSearchQuery) ||
-          a.dateSlash.includes(reportSearchQuery)
-      )
-      .slice(0, attendanceCardLimit);
-  }, [attendanceRecords, reportSearchQuery, attendanceCardLimit]);
-
-  // Agrupación de tarjetas de asistencia por día (Ej: LUNES, 26 DE OCTUBRE DE 2026)
-  const attendanceGroupedByDay = useMemo(() => {
-    const groups: Array<{
-      date: string;
-      dateSlash: string;
-      dateLongEs: string;
-      records: AttendanceRecord[];
-      totalMarcajes: number;
-    }> = [];
-    const map = new Map<string, (typeof groups)[number]>();
-
-    filteredAttendanceRecords.forEach((rec) => {
-      if (!map.has(rec.date)) {
-        const grp = {
-          date: rec.date,
-          dateSlash: rec.dateSlash,
-          dateLongEs: rec.dateLongEs,
-          records: [] as AttendanceRecord[],
-          totalMarcajes: 0,
-        };
-        map.set(rec.date, grp);
-        groups.push(grp);
-      }
-      const g = map.get(rec.date)!;
-      g.records.push(rec);
-      g.totalMarcajes += rec.eventsCount;
-    });
-
-    return groups;
-  }, [filteredAttendanceRecords]);
-
-  // Carga automática por lote de las fotografías reales (photoBase64) para las tarjetas de asistencia visibles
-  useEffect(() => {
-    if (activeSubTab !== 'informes') return;
-
-    const neededIds: string[] = [];
-    filteredAttendanceRecords.forEach((rec) => {
-      const slots = [rec.ingresoEvent, rec.salidaAlmorzarEvent, rec.llegadaAlmorzarEvent, rec.salidaEvent];
-      slots.forEach((slot) => {
-        if (slot?.checkinId && checkinPhotosMap[slot.checkinId] === undefined) {
-          neededIds.push(slot.checkinId);
-        }
-      });
-    });
-
-    if (neededIds.length === 0) return;
-
-    let cancelled = false;
-    setIsLoadingBatchPhotos(true);
-    fetchCheckinPhotosBatch(neededIds)
-      .then((batchResult) => {
-        if (cancelled) return;
-        setCheckinPhotosMap((prev) => {
-          const next = { ...prev };
-          neededIds.forEach((id) => {
-            next[id] = batchResult[id] || '';
-          });
-          return next;
-        });
-      })
-      .catch(() => {
-        // Error transitorio cargando lote de fotos silenciado
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingBatchPhotos(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSubTab, filteredAttendanceRecords, checkinPhotosMap]);
-
-  // Contadores exactos para las 4 tarjetas superiores de Asistencia
-  const totalIngresosCount = useMemo(
-    () => visitsHistory.filter((v) => v.checkinType.toLowerCase().includes('ingreso')).length,
-    [visitsHistory]
-  );
-  const totalPausasAlmuerzoCount = useMemo(
-    () => visitsHistory.filter((v) => v.checkinType.toLowerCase().includes('almorzar')).length,
-    [visitsHistory]
-  );
-
-  const handleOpenSlotPhotoModal = async (slot: AttendanceSlotEvent, promotoraName: string) => {
-    const cachedPhoto = checkinPhotosMap[slot.checkinId];
-    setPhotoModalState({
-      isOpen: true,
-      loading: !cachedPhoto,
-      title: `CODIZULCA ASISTENCIA - [${slot.type}]`,
-      subtitle: `${promotoraName} • ${slot.storeName} • ${slot.dateFormatted} ${slot.fullTimeFormatted}${
-        slot.lat !== undefined && slot.lng !== undefined ? ` • GPS: ${slot.lat.toFixed(6)}, ${slot.lng.toFixed(6)} (±${slot.accuracy}m)` : ''
-      }`,
-      photoBase64: cachedPhoto || null,
-    });
-    if (!cachedPhoto) {
-      try {
-        const base64 = await fetchCheckinPhotoById(slot.checkinId);
-        if (base64) {
-          setCheckinPhotosMap((prev) => ({ ...prev, [slot.checkinId]: base64 }));
-        }
-        setPhotoModalState((prev) => ({
-          ...prev,
-          loading: false,
-          photoBase64: base64,
-        }));
-      } catch {
-        setPhotoModalState((prev) => ({ ...prev, loading: false }));
-      }
-    }
-  };
-
-  const handleReloadSingleSlotPhoto = async (checkinId: string) => {
-    try {
-      const base64 = await fetchCheckinPhotoById(checkinId);
-      if (base64) {
-        setCheckinPhotosMap((prev) => ({ ...prev, [checkinId]: base64 }));
-        showToast('✓ Fotografía sincronizada desde Supabase.');
-      }
-    } catch {
-      showToast('No se pudo sincronizar la fotografía.');
-    }
-  };
-
   // Totales reales calculados desde Supabase para KPIs de Informes
   const totalReportsMuestras = useMemo(
     () => Math.round(inventorySampling.reduce((acc, c) => acc + c.portionsSampled, 0)),
@@ -1708,18 +2429,39 @@ export const FieldPromotoraView: React.FC = () => {
         i.promotora,
       ]);
     } else {
-      title = 'Registro de Asistencia y Geocerca en PDV (Supabase)';
-      head = [['PROMOTORA', 'PDV ASIGNADO', 'FECHA', 'INGRESO', 'ALMUERZO', 'SALIDA', 'HORAS EFECT.', 'GPS']];
-      body = attendanceRecords.slice(0, 300).map((a) => [
-        `${a.promotora}\n${a.email}`,
-        `${a.storeName}\n${a.zone}`,
-        a.date,
-        a.clockIn,
-        `${a.lunchOut} / ${a.lunchIn}`,
-        a.clockOut,
-        a.effectiveHours,
-        a.gpsAccuracy,
-      ]);
+      title = 'Registro de Evidencias de Asistencia Condicional por Perfil (Supabase)';
+      head = [
+        [
+          'PROMOTORA',
+          'PERFIL APLICADO',
+          'PDV & ZONA',
+          'FECHA',
+          'CUMPLIMIENTO',
+          'MARCAS OFICIALES (UTC-4)',
+        ],
+      ];
+      const exportModels = buildDailyPromotoraAttendanceViewModels({
+        staffMembers: module1Bundle?.staffMembers || [],
+        asistenciaJornadas: module1Bundle?.asistenciaJornadas || [],
+        asistenciaEvidencias: module1Bundle?.asistenciaEvidencias || [],
+        legacyAttendanceRecords: attendanceRecords,
+        selectedDateYmd: null,
+      });
+
+      body = exportModels.slice(0, 300).map((vm) => {
+        const timesSummary = Object.entries(vm.evidencesBySlot)
+          .filter(([, item]) => Boolean(item))
+          .map(([slot, item]) => `${slot}: ${item!.horaCaracasFormateada}`)
+          .join(' | ');
+        return [
+          `${vm.promotoraNombre}\n${vm.promotoraEmail || ''}`,
+          `${vm.perfilAplicado} (${vm.compliance.requiredCount} fotos)`,
+          `${vm.pdvNombre}\n${vm.zona}`,
+          vm.fechaSlash,
+          `${vm.compliance.fractionLabel} · ${vm.compliance.statusLabel}`,
+          timesSummary || 'Sin registro',
+        ];
+      });
     }
 
     exportPromotoraReportsPdf(activeReportTab, title, head, body, {
@@ -1918,11 +2660,10 @@ export const FieldPromotoraView: React.FC = () => {
     [staffList]
   );
 
-  // Mapa en vivo de degustaciones activas (no archivadas) asignadas a cada promotora activa
+  // Mapa en vivo de degustaciones activas (Semana en Curso, no históricas) asignadas a cada promotora activa
   const activeScheduledByStaffKey = useMemo(() => {
     const map = new Map<string, TastingScheduleItem[]>();
-    tastingSchedule.forEach((item) => {
-      if (item.isArchived || archivedVisitIds.includes(item.id)) return;
+    partitionedAllTastings.bandejaEntrada.forEach((item) => {
       const resp = String(item.responsibleName || '').trim();
       if (
         !resp ||
@@ -1939,7 +2680,7 @@ export const FieldPromotoraView: React.FC = () => {
       map.get(key)!.push(item);
     });
     return map;
-  }, [tastingSchedule, archivedVisitIds]);
+  }, [partitionedAllTastings.bandejaEntrada]);
 
   const matchesStaffSearch = useCallback(
     (m: StaffMemberRecord): boolean => {
@@ -2039,7 +2780,8 @@ export const FieldPromotoraView: React.FC = () => {
       email: member.email,
       assignedStore: member.assignedStore,
       address: member.address,
-      password: member.password || '',
+      // Seguridad Zero Trust: nunca poblar ni mostrar contraseñas almacenadas
+      password: '',
       status: member.status,
       photoUrl: member.photoUrl,
     });
@@ -2050,7 +2792,7 @@ export const FieldPromotoraView: React.FC = () => {
     if (!staffFormModal.name.trim()) return;
     setIsSavingStaffModal(true);
     try {
-      await saveSupabaseStaffMember({
+      const saved = await saveSupabaseStaffMember({
         id: staffFormModal.id,
         name: staffFormModal.name,
         role: staffFormModal.role,
@@ -2063,15 +2805,31 @@ export const FieldPromotoraView: React.FC = () => {
         password: staffFormModal.password,
         photoUrl: staffFormModal.photoUrl,
       });
-      setStaffFormModal((prev) => ({ ...prev, isOpen: false }));
+
+      // Aprovisionar/actualizar cuenta segura en Supabase Auth (sin texto plano en public.staff)
+      const cleanPass = staffFormModal.password.trim();
+      if (saved.id && isValidUuid(saved.id) && (cleanPass || staffFormModal.status === 'Inactivo')) {
+        await provisionStaffAuthAccountViaBackend({
+          staffId: saved.id,
+          name: staffFormModal.name.trim(),
+          email: staffFormModal.email.trim(),
+          password: cleanPass || undefined,
+          appRole: 'promotora',
+          active: staffFormModal.status === 'Activo',
+        });
+      }
+
+      setStaffFormModal((prev) => ({ ...prev, isOpen: false, password: '' }));
       await refreshSupabaseData();
       showToast(
         staffFormModal.status === 'Inactivo'
-          ? `✓ ${staffFormModal.name} marcada como inactiva y retirada del padrón activo.`
-          : `✓ Perfil de ${staffFormModal.name} sincronizado en Supabase.`
+          ? `✓ ${staffFormModal.name} marcada como inactiva y revocado su acceso a /portal/ruta.`
+          : `✓ Perfil de ${staffFormModal.name} sincronizado de forma segura.`
       );
-    } catch {
-      showToast('No se pudo guardar el perfil en Supabase.');
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : 'No se pudo guardar el perfil en Supabase.'
+      );
     } finally {
       setIsSavingStaffModal(false);
     }
@@ -2094,22 +2852,25 @@ export const FieldPromotoraView: React.FC = () => {
     }
   };
 
-  const buildStaffAppLink = (member: StaffMemberRecord): string => {
-    const base = typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}` : '';
-    const mode = member.category === 'merchandising' ? 'merchandising' : 'promotora';
-    return `${base}?app=${mode}&staff=${encodeURIComponent(member.name)}`;
+  const buildStaffAppLink = (_member?: StaffMemberRecord): string => {
+    return getPromotorasPortalUrl();
   };
 
-  const handleCopyStaffAppLink = async (member: StaffMemberRecord) => {
-    const url = buildStaffAppLink(member);
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(url);
-      }
-      showToast(`✓ Enlace de App copiado para ${member.name}`);
-    } catch {
-      showToast(`Enlace App: ${url}`);
-    }
+  const handleSendWhatsAppPortalLink = (params: {
+    promotoraName?: string | null;
+    promotoraEmail?: string | null;
+    phone?: string | null;
+    storeName?: string | null;
+    fechaYmd?: string | null;
+  }) => {
+    const waUrl = buildPromotoraWhatsAppLink({
+      promotoraName: params.promotoraName,
+      promotoraEmail: params.promotoraEmail,
+      phone: params.phone,
+      storeName: params.storeName,
+      dateYmd: params.fechaYmd,
+    });
+    window.open(waUrl, '_blank', 'noopener,noreferrer');
   };
 
   const fieldMetric360SwitcherItems = useMemo<Metric360SwitcherItem[]>(
@@ -2235,7 +2996,7 @@ export const FieldPromotoraView: React.FC = () => {
       {/* ========================================================================= */}
       {/* BANNER DE SINCRONIZACIÓN EN VIVO CON BASE DE DATOS SUPABASE & MÓDULO 2 */}
       {/* ========================================================================= */}
-      {activeSubTab !== 'solicitudes_contraloria' && (
+      {FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS && activeSubTab !== 'solicitudes_contraloria' && (
       <div className="bg-[#09090c] border border-white/10 rounded-2xl p-4 shadow-xl">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-white/10">
           <div className="flex items-center gap-2.5">
@@ -2487,7 +3248,7 @@ export const FieldPromotoraView: React.FC = () => {
                         : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04]'
                     }`}
                   >
-                    <span>Cronograma Actual</span>
+                    <span>Degustaciones</span>
                     <span
                       className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                         tastingViewMode === 'actual' ? 'bg-black/30 text-white font-bold' : 'bg-zinc-950 text-zinc-400 border border-white/[0.06]'
@@ -2519,6 +3280,45 @@ export const FieldPromotoraView: React.FC = () => {
 
               {/* Botones de Acción Estilizados */}
               <div className="flex flex-wrap items-center gap-2">
+                {tastingViewMode === 'actual' && (
+                  <button
+                    type="button"
+                    onClick={handleExportPendingAuthorizationPdf}
+                    disabled={isExportingAuthPdf || visiblePendingAuthorizationCount === 0}
+                    aria-busy={isExportingAuthPdf}
+                    title={
+                      visiblePendingAuthorizationCount === 0
+                        ? 'No existen degustaciones pendientes de aceptación en el cronograma actual con los filtros seleccionados'
+                        : `Descargar Informe Detallado de Solicitud de Autorización para Gerencia (${visiblePendingAuthorizationCount} pendiente${
+                            visiblePendingAuthorizationCount === 1 ? '' : 's'
+                          } · ${
+                            pendingAuthorizationScopeMeta.hasActiveFilters
+                              ? `Filtrado: ${pendingAuthorizationScopeMeta.filterSummaryLabel}`
+                              : 'General de Pendientes'
+                          })`
+                    }
+                    className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed text-amber-100 hover:text-white border border-amber-400/50 hover:border-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_4px_14px_-2px_rgba(245,158,11,0.3)] transition-all cursor-pointer"
+                  >
+                    {isExportingAuthPdf ? (
+                      <Loader2 className="w-3.5 h-3.5 text-amber-300 animate-spin" />
+                    ) : authPdfSuccess ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />
+                    ) : (
+                      <FileSignature className="w-3.5 h-3.5 text-amber-300" />
+                    )}
+                    <span>
+                      {isExportingAuthPdf
+                        ? 'Generando PDF...'
+                        : authPdfSuccess
+                          ? '¡Autorización Descargada!'
+                          : 'Exportar PDF Autorización'}
+                    </span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-black/40 border border-amber-400/35 text-amber-200 font-mono uppercase">
+                      {visiblePendingAuthorizationCount} PEND.
+                    </span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={handleExportMonthlyReportPdf}
@@ -2555,51 +3355,212 @@ export const FieldPromotoraView: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => setIsMultiFormatUploadOpen(true)}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-500/40 hover:border-emerald-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition flex items-center gap-1.5 cursor-pointer"
-                  title="Cargar planificaciones de degustaciones en formato Excel (.xlsx/.xls), CSV (.csv) o PDF (.pdf) hacia el Módulo 2"
+                  onClick={() => {
+                    const selectedProm =
+                      tastingPromotoraFilter !== 'TODAS' && tastingPromotoraFilter !== 'POR_ASIGNAR'
+                        ? staffList.find(
+                            (s) =>
+                              canonicalStaffKey(s.name) ===
+                              canonicalStaffKey(tastingPromotoraFilter)
+                          )
+                        : null;
+                    handleSendWhatsAppPortalLink({
+                      promotoraName: selectedProm?.name || null,
+                      promotoraEmail: selectedProm?.email || null,
+                      phone: selectedProm?.phone || null,
+                    });
+                  }}
+                  className="px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-500/45 hover:border-emerald-400 transition flex items-center gap-1.5 cursor-pointer"
+                  title="Enviar link dinámico /portal por WhatsApp a promotora"
                 >
-                  <Upload className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Cargar Archivo (Excel / CSV / PDF)</span>
+                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Enviar Link por WhatsApp</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setIsSimulateSellerAppOpen(true)}
-                  className="px-3.5 py-2 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-semibold border border-white/10 hover:border-red-500/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Smartphone className="w-3.5 h-3.5 text-red-400" />
-                  <span>+ Enviar Solicitud FDV</span>
-                </button>
-
-                {tastingViewMode === 'actual' && (
+                {FEATURE_FLAGS.ENABLE_MODULO1_CARGAR_ARCHIVO && (
                   <button
                     type="button"
-                    onClick={handleSundayCloseArchive}
-                    className="px-3.5 py-2 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-semibold border border-white/10 hover:border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition flex items-center gap-1.5 cursor-pointer"
-                    title="Archivar registros actuales en el Historial"
+                    onClick={() => setIsMultiFormatUploadOpen(true)}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-500/40 hover:border-emerald-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition flex items-center gap-1.5 cursor-pointer"
+                    title="Cargar planificaciones de degustaciones en formato Excel (.xlsx/.xls), CSV (.csv) o PDF (.pdf) hacia el Módulo 2"
                   >
-                    <Archive className="w-3.5 h-3.5 text-red-400" />
-                    <span>Cierre Semanal</span>
+                    <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Cargar Archivo (Excel / CSV / PDF)</span>
                   </button>
+                )}
+
+                {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && (
+                  <button
+                    type="button"
+                    onClick={() => setIsSimulateSellerAppOpen(true)}
+                    className="px-3.5 py-2 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-semibold border border-white/10 hover:border-red-500/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-red-400" />
+                    <span>+ Enviar Solicitud FDV</span>
+                  </button>
+                )}
+
+                {FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE && (
+                  <div
+                    className="px-3 py-2 rounded-xl bg-zinc-900/90 text-zinc-300 text-[11px] font-mono border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] flex items-center gap-1.5"
+                    title={`Corte semanal ISO automático todos los lunes a las 00:00:00.000 America/Caracas (Semana actual: ${getCaracasWeekCycleBounds().inicioSemanaActualYmd} al ${getCaracasWeekCycleBounds().finSemanaActualYmd})`}
+                  >
+                    <Clock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>
+                      Ciclo ISO ({liveClock.currentWeek.shortRangeLabel} · UTC-4)
+                    </span>
+                  </div>
                 )}
               </div>
             </div>
 
-            {/* Subcabecera de Estado y Conteo */}
-            <div className="px-4 py-2.5 bg-zinc-950/80 border-b border-zinc-900 flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${tastingViewMode === 'actual' ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-500'}`} />
+            {lastAuthorizedShareBanner && (
+              <div className="px-4 py-3 bg-emerald-950/35 border-b border-emerald-500/35 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs">
+                <div className="flex items-center gap-2 text-emerald-100">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>
+                    Ruta sincronizada en vivo para{' '}
+                    <strong className="text-white">{lastAuthorizedShareBanner.promotoraName}</strong>{' '}
+                    (<span className="font-mono">{lastAuthorizedShareBanner.promotoraEmail}</span>) en{' '}
+                    <strong className="text-white">{lastAuthorizedShareBanner.storeName}</strong> ·{' '}
+                    {formatToDdMmYyyy(lastAuthorizedShareBanner.fechaYmd)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSendWhatsAppPortalLink({
+                        promotoraName: lastAuthorizedShareBanner.promotoraName,
+                        promotoraEmail: lastAuthorizedShareBanner.promotoraEmail,
+                        phone: lastAuthorizedShareBanner.phone,
+                        storeName: lastAuthorizedShareBanner.storeName,
+                        fechaYmd: lastAuthorizedShareBanner.fechaYmd,
+                      })
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 shadow cursor-pointer"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>Enviar Link por WhatsApp a {lastAuthorizedShareBanner.promotoraName}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLastAuthorizedShareBanner(null)}
+                    className="p-1 rounded-lg text-zinc-400 hover:text-white cursor-pointer"
+                    title="Cerrar aviso"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Subcabecera de Estado, Bandeja Vigente vs Historial */}
+            <div className="px-4 py-2.5 bg-zinc-950/80 border-b border-zinc-900 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${tastingViewMode === 'actual' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
                 <span className="font-black text-white uppercase tracking-wider text-[11px]">
                   {tastingViewMode === 'actual'
-                    ? 'REGISTROS DE DEGUSTACIÓN EN SUPABASE • MATRIZ GENERAL SINCRONIZADA'
-                    : 'HISTORIAL DE DEGUSTACIONES ARCHIVADAS'}
+                    ? FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+                      ? `BANDEJA DE ENTRADA • SEMANA EN CURSO (${liveClock.currentWeek.rangeLabel} · AMERICA/CARACAS)`
+                      : `BANDEJA DE ENTRADA • SOLICITUDES VIGENTES Y PRÓXIMAS (DESDE ${formatToDdMmYyyy(liveClock.todayYmd)} · AMERICA/CARACAS)`
+                    : 'PESTAÑA DE HISTORIAL • DEGUSTACIONES ANTERIORES (AUTORIZADAS / NO AUTORIZADAS)'}
+                </span>
+                {tastingViewMode === 'historial' && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-900 border border-amber-500/40 text-amber-300 font-mono text-[10px] font-bold">
+                    {isStrictAdmin ? (
+                      <>
+                        <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                        <span>🔒 Registro Histórico (Cerrado · Admin)</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3 h-3 text-amber-400" />
+                        <span>🔒 Registro Histórico (Cerrado) · Solo Lectura</span>
+                      </>
+                    )}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {tastingViewMode === 'historial' && serverHistorialState.loading && (
+                  <Loader2 className="w-3.5 h-3.5 text-zinc-400 animate-spin" />
+                )}
+                <span className="text-zinc-400 font-mono text-[11px]">
+                  {tastingViewMode === 'historial'
+                    ? historialPagination.totalItems > 0
+                      ? `Mostrando ${historialPagination.startIndex}-${historialPagination.endIndex} de ${historialPagination.totalItems} en Historial`
+                      : '0 registros en Historial'
+                    : `${displayedItems.length} solicitudes vigentes/próximas en Bandeja`}
                 </span>
               </div>
-              <span className="text-zinc-400 font-mono text-[11px]">
-                {displayedItems.length} registros cargados
-              </span>
             </div>
+
+            {/* Atajos rápidos en la pestaña Historial */}
+            {tastingViewMode === 'historial' && FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE && (
+              <div className="px-3.5 py-2 bg-zinc-950/60 border-b border-zinc-900 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-zinc-400 font-semibold uppercase tracking-wider text-[10px] mr-1">
+                    Corte por Semana ISO:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const prevWeek = getPastCaracasWeeksRange(1);
+                      setTastingDateFrom(prevWeek.dateFromYmd);
+                      setTastingDateTo(prevWeek.dateToYmd);
+                      setTastingDayFilter('RANGO');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg border font-semibold transition cursor-pointer ${
+                      tastingDayFilter === 'RANGO' &&
+                      tastingDateFrom === getPastCaracasWeeksRange(1).dateFromYmd &&
+                      tastingDateTo === getPastCaracasWeeksRange(1).dateToYmd
+                        ? 'bg-red-600 text-white border-red-500'
+                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+                    }`}
+                  >
+                    Semana Pasada ({formatToDdMmYyyy(getPastCaracasWeeksRange(1).dateFromYmd)} -{' '}
+                    {formatToDdMmYyyy(getPastCaracasWeeksRange(1).dateToYmd)})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const last4 = getPastCaracasWeeksRange(4);
+                      setTastingDateFrom(last4.dateFromYmd);
+                      setTastingDateTo(last4.dateToYmd);
+                      setTastingDayFilter('RANGO');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg border font-semibold transition cursor-pointer ${
+                      tastingDayFilter === 'RANGO' &&
+                      tastingDateFrom === getPastCaracasWeeksRange(4).dateFromYmd &&
+                      tastingDateTo === getPastCaracasWeeksRange(4).dateToYmd
+                        ? 'bg-red-600 text-white border-red-500'
+                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+                    }`}
+                  >
+                    Últimas 4 Semanas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTastingDateFrom('');
+                      setTastingDateTo('');
+                      setTastingDayFilter('TODOS');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg border font-semibold transition cursor-pointer ${
+                      tastingDayFilter === 'TODOS'
+                        ? 'bg-zinc-800 text-white border-white/20'
+                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border-zinc-800'
+                    }`}
+                  >
+                    Todo el Historial ({archivedTastingCount})
+                  </button>
+                </div>
+                <span className="text-[10px] font-mono text-zinc-500">
+                  Corte estricto: fecha &lt; {caracasWeekStartYmd} (Lun 00:00 America/Caracas)
+                </span>
+              </div>
+            )}
 
             {/* Barra de Filtros Sincronizados */}
             <div className="p-3.5 bg-slate-950/60 border-b border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
@@ -2924,10 +3885,11 @@ export const FieldPromotoraView: React.FC = () => {
                   className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
                 >
                   <option value="TODOS">Estado: Todos</option>
-                  <option value="PENDIENTE">⏳ Solicitadas FDV ({pendingSolicitadasCount})</option>
-                  <option value="PROGRAMADO">📅 Aprobadas / Prog.</option>
+                  <option value="PENDIENTE">⏳ Pendientes por Autorizar ({pendingSolicitadasCount})</option>
+                  <option value="PROGRAMADO">✓ Autorizadas / Prog.</option>
                   <option value="EN_CURSO">▶️ En Curso</option>
                   <option value="COMPLETADO">✓ Ejecutadas</option>
+                  <option value="NO_AUTORIZADA">✕ No Autorizadas</option>
                 </select>
               </div>
 
@@ -2976,6 +3938,7 @@ export const FieldPromotoraView: React.FC = () => {
             </div>
 
             {/* FRANJA EJECUTIVA DE FACTIBILIDAD DE DEGUSTACIÓN VS. COSTO DE PRODUCTOS DEGUSTADOS */}
+            {FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS && (
             <div className="px-4 py-3 bg-zinc-950/90 border-b border-zinc-800/90 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-red-600/15 border border-red-500/30 text-red-400 shrink-0">
@@ -3063,34 +4026,75 @@ export const FieldPromotoraView: React.FC = () => {
                 </div>
               </div>
             </div>
+            )}
 
             {/* TABLA DE DEGUSTACIONES SINCRONIZADA CON SUPABASE & TRADE MARKETING */}
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-black border-b border-zinc-800 text-zinc-400 font-black uppercase text-[10px] tracking-wider">
-                    <th className="p-3 text-center w-10">#</th>
-                    <th className="p-3.5">DÍA & JORNADA</th>
-                    <th className="p-3.5">CLIENTE PDV & RUTA / DIRECCIÓN</th>
-                    <th className="p-3.5">PRODUCTO & CANTIDAD</th>
-                    <th className="p-3.5">PROMOTORA & FDV</th>
-                    <th className="p-3.5 text-center">ESTADO</th>
-                    <th className="p-3.5 text-center w-36">MUESTRAS & VENTAS</th>
-                    <th className="p-3.5 text-center w-36">ACCIONES</th>
+                    <th className="py-2.5 px-2.5 text-center w-10 align-middle">#</th>
+                    <th className="py-2.5 px-3 align-middle">DÍA & JORNADA</th>
+                    <th className="py-2.5 px-3 align-middle">CLIENTE & RUTA</th>
+                    <th className="py-2.5 px-3 align-middle">PRODUCTO & CANTIDAD</th>
+                    <th className="py-2.5 px-3 align-middle">PROMOTORA & FDV</th>
+                    <th className="py-2.5 px-3 text-center align-middle">ESTADO</th>
+                    <th className="py-2.5 px-3 text-center w-36 align-middle">MUESTRAS & VENTAS</th>
+                    <th className="py-2.5 px-3 text-center w-36 align-middle">ACCIONES</th>
                   </tr>
                 </thead>
 
                 <tbody className="divide-y divide-zinc-900 text-zinc-200">
-                  {displayedItems.length > 0 ? (
-                    displayedItems.map((item, idx) => {
-                      const isPending = item.status === 'PENDIENTE';
-                      const isUnread = item.leidoTrade === false;
-                      const isHighlighted = highlightedTastingRowId === item.id;
+                  {visibleTableItems.length > 0 ? (
+                    visibleTableItems.map((item, idx) => {
+                      const rowNumber =
+                        tastingViewMode === 'historial'
+                          ? (historialPagination.startIndex || 1) + idx
+                          : idx + 1;
+                      const isPending = item?.status === 'PENDIENTE';
+                      const isUnread = item?.leidoTrade === false;
+                      const isHighlighted = highlightedTastingRowId === item?.id;
+                      const safeTimeRange = item?.timeRange?.trim() || '';
+                      const isFullShift =
+                        item?.turnoRaw === 'COMPLETO' || item?.shift === 'COMPLETO';
                       const isMorning =
-                        item.shift === 'MAÑANA' ||
-                        item.timeRange.startsWith('08') ||
-                        item.timeRange.startsWith('09') ||
-                        item.timeRange.toUpperCase().includes('MAÑANA');
+                        !isFullShift &&
+                        (item?.shift === 'MAÑANA' ||
+                          safeTimeRange.startsWith('08') ||
+                          safeTimeRange.startsWith('09') ||
+                          safeTimeRange.toUpperCase().includes('MAÑANA'));
+                      const isOverduePending = Boolean(
+                        isPending && item?.date && item.date < liveClock.todayYmd
+                      );
+
+                      const compactDayDate = formatCompactScheduleDayDate(
+                        item?.date,
+                        item?.dayLabel
+                      );
+                      const shiftBadgeText = isFullShift
+                        ? '☀️🌙 Completo'
+                        : isMorning
+                          ? '☀️ Mañana'
+                          : '🌙 Tarde';
+                      const shiftTooltip = safeTimeRange
+                        ? `Horario programado: ${safeTimeRange}`
+                        : `Jornada: ${shiftBadgeText}`;
+
+                      const safeStoreName = item?.storeName?.trim() || 'PDV Sin Nombre';
+                      const cleanClienteCodigo =
+                        item?.clienteCodigo?.trim().replace(/^#+/, '') || '';
+                      const routeDisplay = formatSafeRouteDisplay(item?.zone);
+
+                      const safeProductName = item?.productName?.trim() || 'Portafolio Codizulca';
+                      const brandBadge = resolveCompactBrandBadge(
+                        item?.productName,
+                        item?.fillProductSelection
+                      );
+                      const fallbackQtySum =
+                        (item?.mortadelaQty ?? 0) +
+                        (item?.espaldaQty ?? 0) +
+                        (item?.arrozQty ?? 0);
+                      const safeTotalQty = item?.requestedQty ?? (fallbackQtySum > 0 ? fallbackQtySum : 0);
 
                       return (
                         <tr
@@ -3106,148 +4110,91 @@ export const FieldPromotoraView: React.FC = () => {
                                   : 'hover:bg-zinc-900/50'
                           }`}
                         >
-                          <td className="p-3 text-center font-mono text-zinc-500 text-[10px]">
-                            <div>{idx + 1}</div>
-                            {isUnread && (
-                              <span className="mt-1 inline-block px-1.5 py-0.5 rounded-full bg-[#DC2626] text-[#FFFFFF] text-[8px] font-black uppercase tracking-wider animate-pulse">
-                                NUEVA
-                              </span>
-                            )}
+                          {/* # */}
+                          <td
+                            className="py-2.5 px-2.5 align-middle text-center font-mono text-zinc-400 text-[11px]"
+                            title={isUnread ? 'Solicitud nueva sin leer' : undefined}
+                          >
+                            {rowNumber}
                           </td>
 
-                          {/* DÍA & JORNADA */}
-                          <td className="p-3.5 whitespace-nowrap">
-                            <div className="font-bold text-white text-xs">
-                              {item.dayLabel || formatToDdMmYyyy(item.date, '-- -- ----')}
+                          {/* DÍA & JORNADA (Máx. 2 líneas visuales) */}
+                          <td className="py-2.5 px-3 align-middle whitespace-nowrap">
+                            <div className="font-bold text-white text-xs leading-tight">
+                              {compactDayDate}
                             </div>
-                            <div className="text-[10px] font-mono text-zinc-400">
-                              {formatToDdMmYyyy(item.date, '-- -- ----')}
-                            </div>
-                            <div className="mt-1">
+                            <div className="mt-1 flex items-center gap-1.5">
                               <span
-                                className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded font-black font-mono border ${
-                                  isMorning
-                                    ? 'bg-zinc-900 text-white border-zinc-700'
-                                    : 'bg-black text-red-400 border-red-900'
+                                title={shiftTooltip}
+                                className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md font-semibold bg-zinc-900/90 text-zinc-200 border border-zinc-700/80"
+                              >
+                                {shiftBadgeText}
+                              </span>
+                              {isOverduePending && (
+                                <span
+                                  title="Fecha solicitada vencida · Pendiente decisión"
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-950/60 text-amber-300 border border-amber-700/50 text-[10px] font-bold"
+                                >
+                                  ⚠️ Vencida
+                                </span>
+                              )}
+                            </div>
+                          </td>
+
+                          {/* CLIENTE & RUTA (Máx. 2 líneas visuales · Cero PII expuesta) */}
+                          <td className="py-2.5 px-3 align-middle min-w-[200px] max-w-[260px]">
+                            <div className="flex items-center gap-1.5 min-w-0 leading-tight">
+                              <span
+                                className="font-bold text-white text-xs truncate"
+                                title={safeStoreName}
+                              >
+                                {safeStoreName}
+                              </span>
+                              {cleanClienteCodigo && (
+                                <span className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-300 border border-white/10">
+                                  #{cleanClienteCodigo}
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              className={`mt-1 text-[11px] truncate leading-tight ${
+                                routeDisplay.isGeneric ? 'text-zinc-500' : 'text-zinc-400'
+                              }`}
+                              title={routeDisplay.label}
+                            >
+                              {routeDisplay.label}
+                            </div>
+                          </td>
+
+                          {/* PRODUCTO & CANTIDAD (Máx. 2 líneas visuales) */}
+                          <td className="py-2.5 px-3 align-middle min-w-[210px] max-w-[260px]">
+                            <div className="flex items-center gap-1.5 min-w-0 leading-tight">
+                              <span
+                                className="font-bold text-white text-xs truncate"
+                                title={safeProductName}
+                              >
+                                {safeProductName}
+                              </span>
+                              <span
+                                className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+                                  brandBadge.isAmberBrand
+                                    ? 'bg-amber-950/60 text-amber-300 border-amber-800/60'
+                                    : 'bg-zinc-900 text-zinc-300 border-zinc-700/80'
                                 }`}
                               >
-                                {item.turnoRaw === 'COMPLETO'
-                                  ? '☀️🌙 COMPLETO'
-                                  : isMorning
-                                    ? '☀️ MAÑANA'
-                                    : '🌙 TARDE'}
-                                <span className="text-[9px] text-zinc-400 font-normal">({item.timeRange})</span>
+                                {brandBadge.label}
                               </span>
                             </div>
-                            {isPending && item.date && item.date < liveClock.todayYmd && (
-                              <div className="mt-1">
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-700/50 text-[9px] font-bold">
-                                  Fecha solicitada vencida · Pendiente decisión
-                                </span>
-                              </div>
-                            )}
-                          </td>
-
-                          {/* CLIENTE PDV & ZONA */}
-                          <td className="p-3.5 min-w-[200px]">
-                            <div className="font-bold text-white text-xs flex items-center gap-1.5 flex-wrap">
-                              <StoreIcon className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                              <span>{item.storeName}</span>
-                              {item.clienteCodigo && (
-                                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-300 border border-white/10">
-                                  #{item.clienteCodigo}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1 text-[11px] text-zinc-400 mt-0.5">
-                              <MapPin className="w-3 h-3 text-zinc-500 shrink-0" />
-                              <span>{item.zone}</span>
-                            </div>
-                            {(item.contactoPunto || item.telefonoContacto) && (
-                              <div className="flex items-center gap-1 text-[10px] text-zinc-400 font-mono mt-0.5">
-                                <Phone className="w-2.5 h-2.5 text-red-400 shrink-0" />
-                                <span>
-                                  {item.contactoPunto || 'Contacto'}
-                                  {item.telefonoContacto ? ` · ${item.telefonoContacto}` : ''}
-                                </span>
-                              </div>
-                            )}
-                            {item.mapsUrl && (
-                              <a
-                                href={item.mapsUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1 mt-0.5"
-                              >
-                                <ExternalLink className="w-2.5 h-2.5" />
-                                <span>Ver en Maps</span>
-                              </a>
-                            )}
-                          </td>
-
-                          {/* PRODUCTO & CANTIDADES */}
-                          <td className="p-3.5 min-w-[230px]">
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`text-[10px] font-black px-2 py-0.5 rounded uppercase font-mono border ${
-                                  item.productName.toUpperCase().includes('ARROZ') ||
-                                  item.productName.toUpperCase().includes('VENCAMPO') ||
-                                  item.productName.toUpperCase().includes('LECHE')
-                                    ? 'bg-amber-950/70 text-amber-300 border-amber-800'
-                                    : item.productName.toUpperCase().includes('ESPALDA')
-                                      ? 'bg-rose-950/70 text-rose-300 border-rose-800'
-                                      : 'bg-red-950/70 text-red-300 border-red-800'
-                                }`}
-                              >
-                                {item.fillProductSelection || item.productName.split(' ')[0]}
-                              </span>
-                              <span className="font-bold text-white text-xs">{item.productName}</span>
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-1.5 mt-1.5 font-mono text-[10px]">
-                              {(item.mortadelaQty || 0) > 0 && (
-                                <span className="px-1.5 py-0.5 rounded bg-red-900/40 text-red-300 border border-red-800/60 font-bold">
-                                  {item.mortadelaQty} kg/un
-                                </span>
-                              )}
-                              {(item.espaldaQty || 0) > 0 && (
-                                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700 font-bold">
-                                  {item.espaldaQty} un Espalda
-                                </span>
-                              )}
-                              {(item.arrozQty || 0) > 0 && (
-                                <span className="px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-800/60 font-bold">
-                                  {item.arrozQty} un Vencampo
-                                </span>
-                              )}
-                              {((item.azucarGrams || 0) > 0 || (item.lecheGrams || 0) > 0) && (
-                                <span className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
-                                  {item.azucarGrams}g Azúcar • {item.lecheGrams}g Leche
-                                </span>
-                              )}
-                              <span className="px-1.5 py-0.5 rounded bg-black text-slate-300 border border-slate-800">
-                                Total: <strong className="text-white">{item.requestedQty} kg/un</strong>
+                            <div className="mt-1 flex items-center">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-900/90 text-zinc-300 border border-zinc-800 font-mono text-[10px]">
+                                Total: <strong className="text-white ml-1">{safeTotalQty} kg/un</strong>
                               </span>
                             </div>
-
-                            {item.operationalSupplies && (
-                              <div className="flex flex-wrap items-center gap-1.5 mt-1 font-mono text-[9px] text-zinc-400">
-                                <span className="px-1.5 py-0.5 rounded bg-zinc-900/90 border border-zinc-800">
-                                  Insumos: {item.operationalSupplies.servilletas} serv. · {item.operationalSupplies.palillos} palillos · {item.operationalSupplies.envases} envases ({item.operationalSupplies.gramajeTotalG}g)
-                                </span>
-                              </div>
-                            )}
-
-                            {item.notes && (
-                              <div className="text-[10px] text-zinc-400 italic mt-1 line-clamp-1" title={item.notes}>
-                                {item.notes}
-                              </div>
-                            )}
                           </td>
 
                           {/* RESPONSABLE & VENDEDOR */}
-                          <td className="p-3.5 whitespace-nowrap min-w-[205px]">
-                            {item.status !== 'COMPLETADO' ? (
+                          <td className="py-2.5 px-3 align-middle whitespace-nowrap min-w-[205px]">
+                            {item.status !== 'COMPLETADO' && !isReadOnlyHistoricalItem(item) ? (
                               (() => {
                                 const selectResolved = resolvePromotoraSelectValue(item.responsibleName);
                                 return (
@@ -3280,10 +4227,15 @@ export const FieldPromotoraView: React.FC = () => {
                               })()
                             ) : (
                               <div className="flex items-center gap-1.5">
-                                <div className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[9px] flex items-center justify-center">
+                                <div className="w-5 h-5 rounded-full bg-zinc-800 border border-zinc-700 text-white font-black text-[9px] flex items-center justify-center shrink-0">
                                   {(item.responsibleName || 'P')[0]}
                                 </div>
-                                <span className="font-bold text-white text-xs">{item.responsibleName}</span>
+                                <span
+                                  className="font-bold text-white text-xs truncate max-w-[175px]"
+                                  title={item.responsibleName}
+                                >
+                                  {item.responsibleName}
+                                </span>
                               </div>
                             )}
                             <div className="text-[10px] text-zinc-400 font-mono mt-1 flex items-center gap-1">
@@ -3293,42 +4245,73 @@ export const FieldPromotoraView: React.FC = () => {
                           </td>
 
                           {/* ESTADO */}
-                          <td className="p-3.5 text-center whitespace-nowrap">
-                            <span
-                              className={`inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-full uppercase border font-mono ${
-                                item.status === 'PENDIENTE'
-                                  ? 'bg-red-950 text-red-400 border-red-800 animate-pulse'
-                                  : item.status === 'PROGRAMADO'
-                                    ? 'bg-zinc-900 text-white border-zinc-700'
-                                    : item.status === 'EN_CURSO'
-                                      ? 'bg-red-600 text-white border-red-500 shadow-md shadow-red-950'
-                                      : 'bg-black text-emerald-400 border-emerald-900'
-                              }`}
-                            >
-                              {item.status === 'PENDIENTE' && <span>⏳ SOLICITADA FDV</span>}
-                              {item.status === 'PROGRAMADO' && (
+                          <td className="py-2.5 px-3 align-middle text-center whitespace-nowrap">
+                            <div className="flex flex-col items-center gap-1">
+                              {item.status === 'NO_AUTORIZADA' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-full uppercase border font-mono bg-rose-950/80 text-rose-300 border-rose-700/80">
+                                  <Ban className="w-3 h-3 text-rose-400" />
+                                  <span>No Autorizada</span>
+                                </span>
+                              ) : tastingViewMode === 'historial' ? (
                                 <>
-                                  <Calendar className="w-3 h-3 text-zinc-400" />
-                                  <span>APROBADA / PROG.</span>
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-full uppercase border font-mono bg-emerald-950/80 text-emerald-300 border-emerald-700/70">
+                                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                    <span>Autorizada</span>
+                                  </span>
+                                  {item.status === 'COMPLETADO' && (
+                                    <span className="text-[9px] font-mono text-zinc-400">
+                                      Ejecutada en PDV
+                                    </span>
+                                  )}
                                 </>
+                              ) : (
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-full uppercase border font-mono ${
+                                    item.status === 'PENDIENTE'
+                                      ? 'bg-red-950 text-red-400 border-red-800 animate-pulse'
+                                      : item.status === 'PROGRAMADO'
+                                        ? 'bg-emerald-950/75 text-emerald-300 border-emerald-700/70'
+                                        : item.status === 'EN_CURSO'
+                                          ? 'bg-red-600 text-white border-red-500 shadow-md shadow-red-950'
+                                          : 'bg-black text-emerald-400 border-emerald-900'
+                                  }`}
+                                >
+                                  {item.status === 'PENDIENTE' && (
+                                    <span>⏳ PENDIENTE POR AUTORIZAR</span>
+                                  )}
+                                  {item.status === 'PROGRAMADO' && (
+                                    <>
+                                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                      <span>AUTORIZADA</span>
+                                    </>
+                                  )}
+                                  {item.status === 'EN_CURSO' && (
+                                    <>
+                                      <Play className="w-3 h-3 text-white fill-white" />
+                                      <span>EN CURSO</span>
+                                    </>
+                                  )}
+                                  {item.status === 'COMPLETADO' && (
+                                    <>
+                                      <Check className="w-3 h-3 text-emerald-400" />
+                                      <span>EJECUTADA</span>
+                                    </>
+                                  )}
+                                </span>
                               )}
-                              {item.status === 'EN_CURSO' && (
-                                <>
-                                  <Play className="w-3 h-3 text-white fill-white" />
-                                  <span>EN CURSO</span>
-                                </>
+                              {isTastingHistoricalItem(item) && (
+                                <span
+                                  title="Registro archivado en la Pestaña de Historial (America/Caracas)"
+                                  className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-md bg-zinc-900/95 text-amber-300 border border-amber-500/35 font-mono"
+                                >
+                                  <span>🔒 Historial</span>
+                                </span>
                               )}
-                              {item.status === 'COMPLETADO' && (
-                                <>
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                  <span>EJECUTADA</span>
-                                </>
-                              )}
-                            </span>
+                            </div>
                           </td>
 
                           {/* MUESTRAS & SELL-OUT */}
-                          <td className="p-3.5 text-center">
+                          <td className="py-2.5 px-3 align-middle text-center">
                             <div className="font-mono text-xs font-bold text-white">
                               {item.currentSamples} / {item.targetSamples}
                             </div>
@@ -3349,7 +4332,7 @@ export const FieldPromotoraView: React.FC = () => {
                           </td>
 
                           {/* ACCIONES */}
-                          <td className="p-3.5 text-center whitespace-nowrap">
+                          <td className="py-2.5 px-3 align-middle text-center whitespace-nowrap">
                             <div className="flex items-center justify-center gap-1.5">
                               <button
                                 type="button"
@@ -3364,77 +4347,92 @@ export const FieldPromotoraView: React.FC = () => {
                                 <Eye className="w-3.5 h-3.5" />
                               </button>
 
-                              {isPending && (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={processingTastingId === item.id}
-                                    onClick={() => handleApproveTastingRequest(item)}
-                                    title="Aceptar solicitud: Actualiza en Supabase, Carga en Cronograma de Producción y Asigna a Ruta"
-                                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider flex items-center gap-1 shadow-md shadow-red-950 border border-red-500 transition active:scale-95 cursor-pointer"
-                                  >
-                                    {processingTastingId === item.id ? (
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    ) : (
-                                      <Check className="w-3.5 h-3.5" />
-                                    )}
-                                    <span>Aprobar</span>
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    disabled={processingTastingId === item.id}
-                                    onClick={() => handleRejectTastingRequest(item.id, 'RECHAZADA')}
-                                    title="Rechazar solicitud"
-                                    className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 disabled:opacity-50 text-zinc-400 hover:text-white transition cursor-pointer"
-                                  >
-                                    <X className="w-3.5 h-3.5" />
-                                  </button>
-                                </>
-                              )}
-
-                              {item.status === 'PROGRAMADO' && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleStartTasting(item)}
-                                  title="Iniciar activación en PDV"
-                                  className="p-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white transition shadow cursor-pointer"
+                              {isReadOnlyHistoricalItem(item) ? (
+                                <span
+                                  title="Solo lectura: Las degustaciones históricas solo pueden modificarse por un Administrador"
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-400 text-[10px] font-mono select-none"
                                 >
-                                  <Play className="w-3.5 h-3.5 fill-white" />
-                                </button>
-                              )}
-
-                              {item.status === 'EN_CURSO' && (
-                                <button
-                                  type="button"
-                                  onClick={() => setExecutingItem(item)}
-                                  title="Abrir terminal de conteo y geocerca"
-                                  className="p-1.5 rounded-lg bg-black border border-red-600 text-red-400 hover:bg-red-950 transition cursor-pointer"
-                                >
-                                  <Sliders className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-
-                              {!isPending && (
+                                  <Lock className="w-3 h-3 text-amber-400 shrink-0" />
+                                  <span>Cerrado</span>
+                                </span>
+                              ) : (
                                 <>
-                                  <button
-                                    type="button"
-                                    onClick={() => setExecutingItem(item)}
-                                    title="Editar actividad"
-                                    className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-900 transition cursor-pointer"
-                                  >
-                                    <Edit2 className="w-3.5 h-3.5" />
-                                  </button>
+                                  {isPending && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={processingTastingId === item.id}
+                                        onClick={() => handleApproveTastingRequest(item)}
+                                        title="Autorizar degustación: sincroniza al instante con /portal y con el Cronograma de productos"
+                                        className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider flex items-center gap-1 shadow-md shadow-red-950 border border-red-500 transition active:scale-95 cursor-pointer"
+                                      >
+                                        {processingTastingId === item.id ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                          <Check className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>Autorizar</span>
+                                      </button>
 
-                                  <button
-                                    type="button"
-                                    disabled={processingTastingId === item.id}
-                                    onClick={() => handleDeleteTasting(item.id)}
-                                    title="Cancelar solicitud y retirar del Cronograma de Producción"
-                                    className="p-1.5 rounded-lg text-zinc-400 hover:text-red-500 hover:bg-zinc-900 disabled:opacity-50 transition cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
+                                      <button
+                                        type="button"
+                                        disabled={processingTastingId === item.id}
+                                        onClick={() =>
+                                          handleRejectTastingRequest(item.id, 'NO_AUTORIZADA')
+                                        }
+                                        title="Marcar como No Autorizada y trasladar a la Pestaña de Historial"
+                                        className="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-rose-950/70 disabled:opacity-50 text-zinc-300 hover:text-rose-200 border border-zinc-800 hover:border-rose-700/70 text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                                      >
+                                        <Ban className="w-3 h-3 text-rose-400" />
+                                        <span>No Autorizar</span>
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {item.status === 'PROGRAMADO' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartTasting(item)}
+                                      title="Iniciar activación en PDV"
+                                      className="p-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white transition shadow cursor-pointer"
+                                    >
+                                      <Play className="w-3.5 h-3.5 fill-white" />
+                                    </button>
+                                  )}
+
+                                  {item.status === 'EN_CURSO' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setExecutingItem(item)}
+                                      title="Abrir terminal de conteo y geocerca"
+                                      className="p-1.5 rounded-lg bg-black border border-red-600 text-red-400 hover:bg-red-950 transition cursor-pointer"
+                                    >
+                                      <Sliders className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+
+                                  {!isPending && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => setExecutingItem(item)}
+                                        title="Editar actividad"
+                                        className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-900 transition cursor-pointer"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        disabled={processingTastingId === item.id}
+                                        onClick={() => handleDeleteTasting(item.id)}
+                                        title="Cancelar solicitud y retirar del Cronograma de Producción"
+                                        className="p-1.5 rounded-lg text-zinc-400 hover:text-red-500 hover:bg-zinc-900 disabled:opacity-50 transition cursor-pointer"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  )}
                                 </>
                               )}
                             </div>
@@ -3447,32 +4445,38 @@ export const FieldPromotoraView: React.FC = () => {
                       <td colSpan={8} className="p-10 text-center text-zinc-400 text-xs">
                         {isLoadingSupabase ? (
                           <span>Cargando degustaciones desde Supabase...</span>
-                        ) : tastingViewMode === 'actual' && archivedTastingCount > 0 && activeTastingCount === 0 ? (
+                        ) : tastingViewMode === 'actual' && activeTastingCount === 0 ? (
                           <div className="flex flex-col items-center gap-3 max-w-md mx-auto">
                             <Archive className="w-8 h-8 text-amber-400" />
                             <div>
                               <p className="font-bold text-white text-sm">
-                                Cronograma Actual limpio para el día de hoy ({getTodayVeYmd()})
+                                Sin degustaciones activas para esta semana
                               </p>
                               <p className="text-xs text-zinc-400 mt-1">
-                                Todas las degustaciones enviadas antes del día de hoy ({archivedTastingCount} registros) han sido archivadas en la pestaña de Historial.
+                                {archivedTastingCount > 0
+                                  ? `Los ${archivedTastingCount} registros anteriores se encuentran resguardados íntegramente en la pestaña de Historial.`
+                                  : 'Las nuevas actividades solicitadas o programadas para la semana en curso aparecerán aquí automáticamente.'}
                               </p>
                             </div>
                             <div className="flex items-center gap-2.5 mt-1">
-                              <button
-                                type="button"
-                                onClick={() => setTastingViewMode('historial')}
-                                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shadow-md"
-                              >
-                                Ver Historial ({archivedTastingCount})
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setIsSimulateSellerAppOpen(true)}
-                                className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-bold transition"
-                              >
-                                + Enviar Solicitud FDV Hoy
-                              </button>
+                              {archivedTastingCount > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTastingViewMode('historial')}
+                                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shadow-md cursor-pointer"
+                                >
+                                  Ver Historial ({archivedTastingCount})
+                                </button>
+                              )}
+                              {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && (
+                                <button
+                                  type="button"
+                                  onClick={() => setIsSimulateSellerAppOpen(true)}
+                                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-bold transition cursor-pointer"
+                                >
+                                  + Enviar Solicitud FDV
+                                </button>
+                              )}
                             </div>
                           </div>
                         ) : (
@@ -3484,6 +4488,56 @@ export const FieldPromotoraView: React.FC = () => {
                 </tbody>
               </table>
             </div>
+
+            {tastingViewMode === 'historial' && historialPagination.totalItems > 0 && (
+              <div className="px-4 py-3 bg-zinc-950/90 rounded-b-2xl border-t border-zinc-900 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2 text-zinc-400">
+                  <span>Filas por página:</span>
+                  <select
+                    value={historialPageSize}
+                    onChange={(e) => setHistorialPageSize(Number(e.target.value) || 25)}
+                    aria-label="Filas por página en Historial"
+                    className="px-2 py-1 rounded-lg bg-zinc-900 border border-zinc-800 text-white font-mono text-xs focus:outline-none focus:border-red-500 cursor-pointer"
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                  <span className="font-mono text-[11px] text-zinc-500 ml-1">
+                    ({historialPagination.startIndex}-{historialPagination.endIndex} de {historialPagination.totalItems})
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={historialPagination.page <= 1}
+                    onClick={() => setHistorialPage((prev) => Math.max(1, prev - 1))}
+                    className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-800 text-zinc-200 font-semibold inline-flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Anterior</span>
+                  </button>
+                  <span className="px-2.5 py-1 rounded-lg bg-zinc-900/70 border border-white/[0.06] font-mono text-[11px] text-zinc-300">
+                    Página <strong className="text-white">{historialPagination.page}</strong> de{' '}
+                    <strong className="text-white">{historialPagination.totalPages}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={historialPagination.page >= historialPagination.totalPages}
+                    onClick={() =>
+                      setHistorialPage((prev) =>
+                        Math.min(historialPagination.totalPages, prev + 1)
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-800 text-zinc-200 font-semibold inline-flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <span>Siguiente</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3491,7 +4545,7 @@ export const FieldPromotoraView: React.FC = () => {
       {/* ========================================================================= */}
       {/* MODAL: ENVIAR NUEVA SOLICITUD FDV DIRECTO A SUPABASE (BLINDADO E ÍNTEGRO) */}
       {/* ========================================================================= */}
-      {isSimulateSellerAppOpen && (
+      {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && isSimulateSellerAppOpen && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-[#09090B] border-2 border-[#DC2626] rounded-3xl max-w-2xl w-full p-6 shadow-2xl my-auto">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-900">
@@ -3795,6 +4849,11 @@ export const FieldPromotoraView: React.FC = () => {
                   <span className="px-2 py-0.5 rounded-md bg-emerald-950/70 text-emerald-300 border border-emerald-700/40 text-[10px] font-mono">
                     ✓ Vista en Trade Marketing
                   </span>
+                  {isTastingHistoricalItem(selectedTastingDetail) && (
+                    <span className="px-2.5 py-0.5 rounded-md bg-amber-950/70 text-amber-300 border border-amber-500/40 text-[10px] font-mono font-bold">
+                      🔒 Registro Histórico (Cerrado)
+                    </span>
+                  )}
                 </div>
                 <h3 className="text-base sm:text-lg font-extrabold text-[#FFFFFF] mt-2">
                   {selectedTastingDetail.storeName}
@@ -3919,7 +4978,8 @@ export const FieldPromotoraView: React.FC = () => {
                     </strong>
                   </span>
                 </div>
-                {selectedTastingDetail.status !== 'COMPLETADO' ? (
+                {selectedTastingDetail.status !== 'COMPLETADO' &&
+                !isReadOnlyHistoricalItem(selectedTastingDetail) ? (
                   (() => {
                     const modalSelectResolved = resolvePromotoraSelectValue(
                       selectedTastingDetail.responsibleName
@@ -3955,10 +5015,15 @@ export const FieldPromotoraView: React.FC = () => {
                   })()
                 ) : (
                   <p className="text-[11px] text-zinc-300 pt-1">
-                    Asignación actual:{' '}
+                    Asignación registrada:{' '}
                     <strong className="text-[#FFFFFF]">
                       {selectedTastingDetail.responsibleName}
                     </strong>
+                    {isReadOnlyHistoricalItem(selectedTastingDetail) && (
+                      <span className="ml-2 text-[10px] font-mono text-amber-300">
+                        (🔒 Solo lectura)
+                      </span>
+                    )}
                   </p>
                 )}
               </div>
@@ -3991,41 +5056,52 @@ export const FieldPromotoraView: React.FC = () => {
               </span>
 
               <div className="flex items-center gap-2">
-                {selectedTastingDetail.status === 'PENDIENTE' && (
+                {isReadOnlyHistoricalItem(selectedTastingDetail) ? (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-950 border border-amber-500/35 text-amber-300 text-xs font-mono">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>Registro Histórico (Cerrado) · Solo Lectura</span>
+                  </span>
+                ) : (
                   <>
-                    <button
-                      type="button"
-                      disabled={processingTastingId === selectedTastingDetail.id}
-                      onClick={() => handleRejectTastingRequest(selectedTastingDetail.id, 'RECHAZADA')}
-                      className="px-3.5 py-2 rounded-xl bg-[#18181B] hover:bg-zinc-800 disabled:opacity-50 text-zinc-300 hover:text-white border border-white/10 text-xs font-bold transition cursor-pointer"
-                    >
-                      Rechazar
-                    </button>
-                    <button
-                      type="button"
-                      disabled={processingTastingId === selectedTastingDetail.id}
-                      onClick={() => handleApproveTastingRequest(selectedTastingDetail)}
-                      className="px-4 py-2 rounded-xl bg-[#DC2626] hover:bg-red-500 disabled:opacity-50 text-[#FFFFFF] text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-md cursor-pointer"
-                    >
-                      {processingTastingId === selectedTastingDetail.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5" />
-                      )}
-                      <span>Aprobar y Sincronizar Cronograma</span>
-                    </button>
+                    {selectedTastingDetail.status === 'PENDIENTE' && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={processingTastingId === selectedTastingDetail.id}
+                          onClick={() =>
+                            handleRejectTastingRequest(selectedTastingDetail.id, 'NO_AUTORIZADA')
+                          }
+                          className="px-3.5 py-2 rounded-xl bg-[#18181B] hover:bg-rose-950/70 disabled:opacity-50 text-zinc-300 hover:text-rose-200 border border-white/10 hover:border-rose-700/70 text-xs font-bold transition cursor-pointer"
+                        >
+                          No Autorizar
+                        </button>
+                        <button
+                          type="button"
+                          disabled={processingTastingId === selectedTastingDetail.id}
+                          onClick={() => handleApproveTastingRequest(selectedTastingDetail)}
+                          className="px-4 py-2 rounded-xl bg-[#DC2626] hover:bg-red-500 disabled:opacity-50 text-[#FFFFFF] text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-md cursor-pointer"
+                        >
+                          {processingTastingId === selectedTastingDetail.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          <span>Autorizar y Sincronizar</span>
+                        </button>
+                      </>
+                    )}
+                    {(selectedTastingDetail.status === 'PROGRAMADO' ||
+                      selectedTastingDetail.status === 'EN_CURSO') && (
+                      <button
+                        type="button"
+                        disabled={processingTastingId === selectedTastingDetail.id}
+                        onClick={() => handleRejectTastingRequest(selectedTastingDetail.id, 'CANCELADA')}
+                        className="px-3.5 py-2 rounded-xl bg-red-950/60 hover:bg-red-900/80 disabled:opacity-50 text-red-300 hover:text-white border border-red-700/50 text-xs font-bold transition cursor-pointer"
+                      >
+                        Cancelar y Retirar del Cronograma
+                      </button>
+                    )}
                   </>
-                )}
-                {(selectedTastingDetail.status === 'PROGRAMADO' ||
-                  selectedTastingDetail.status === 'EN_CURSO') && (
-                  <button
-                    type="button"
-                    disabled={processingTastingId === selectedTastingDetail.id}
-                    onClick={() => handleRejectTastingRequest(selectedTastingDetail.id, 'CANCELADA')}
-                    className="px-3.5 py-2 rounded-xl bg-red-950/60 hover:bg-red-900/80 disabled:opacity-50 text-red-300 hover:text-white border border-red-700/50 text-xs font-bold transition cursor-pointer"
-                  >
-                    Cancelar y Retirar del Cronograma
-                  </button>
                 )}
                 <button
                   type="button"
@@ -4391,80 +5467,21 @@ export const FieldPromotoraView: React.FC = () => {
             </div>
           </div>
 
-          {/* 4 TARJETAS DE MÉTRICAS KPI REALES DE SUPABASE (PARA ASISTENCIA EN PDV) */}
-          {activeReportTab === 'asistencia' && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-900 shadow-lg">
-                <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider block mb-1">
-                  MARCAJES VERIFICADOS
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-black text-white font-mono">{visitsHistory.length}</span>
-                  <span className="text-xs text-emerald-400 font-semibold">en período</span>
-                </div>
+          {/* BARRA DE FILTRO Y LÍMITE DE VISUALIZACIÓN (SOLO PARA SUB-TAB INVENTARIO; ASISTENCIA USA SU PROPIA BARRA CONDICIONAL) */}
+          {activeReportTab === 'inventario' && (
+            <div className="flex flex-wrap items-center justify-between gap-4 p-3 rounded-2xl bg-zinc-950 border border-zinc-900">
+              <div className="relative flex-1 min-w-[240px] max-w-md">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Buscar promotora (ej. Camila Morales), tienda, producto o fecha..."
+                  value={reportSearchQuery}
+                  onChange={(e) => setReportSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600 font-medium"
+                />
               </div>
 
-              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-900 shadow-lg">
-                <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider block mb-1">
-                  INGRESOS REGISTRADOS
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-black text-emerald-400 font-mono">{totalIngresosCount}</span>
-                  <span className="text-xs text-zinc-400 font-medium">inicios de turno</span>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-900 shadow-lg">
-                <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider block mb-1">
-                  GEOLOCALIZACIÓN GPS
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-black text-emerald-400 font-mono">100%</span>
-                  <span className="text-xs text-zinc-400 font-medium">satelital validado</span>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-900 shadow-lg">
-                <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider block mb-1">
-                  PAUSAS DE ALMUERZO
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-black text-amber-400 font-mono">{totalPausasAlmuerzoCount}</span>
-                  <span className="text-xs text-zinc-400 font-medium">recesos y retornos</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* BARRA DE FILTRO Y LÍMITE DE VISUALIZACIÓN */}
-          <div className="flex flex-wrap items-center justify-between gap-4 p-3 rounded-2xl bg-zinc-950 border border-zinc-900">
-            <div className="relative flex-1 min-w-[240px] max-w-md">
-              <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Buscar promotora (ej. Camila Morales), tienda, producto o fecha..."
-                value={reportSearchQuery}
-                onChange={(e) => setReportSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600 font-medium"
-              />
-            </div>
-
-            <div className="flex items-center gap-3">
-              {activeReportTab === 'asistencia' ? (
-                <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
-                  <span>Promotoras en pantalla:</span>
-                  <select
-                    value={attendanceCardLimit}
-                    onChange={(e) => setAttendanceCardLimit(Number(e.target.value))}
-                    className="px-2.5 py-1 rounded-lg bg-black border border-zinc-800 text-white text-xs font-mono"
-                  >
-                    <option value={15}>15 jornadas</option>
-                    <option value={35}>35 jornadas</option>
-                    <option value={80}>80 jornadas</option>
-                    <option value={500}>Todas ({attendanceRecords.length})</option>
-                  </select>
-                </div>
-              ) : (
+              <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
                   <span>Mostrar:</span>
                   <select
@@ -4474,32 +5491,18 @@ export const FieldPromotoraView: React.FC = () => {
                   >
                     <option value={150}>150 filas</option>
                     <option value={400}>400 filas</option>
-                    <option value={2000}>
-                      Todos ({inventorySampling.length})
-                    </option>
+                    <option value={2000}>Todos ({inventorySampling.length})</option>
                   </select>
                 </div>
-              )}
-              <div className="text-[11px] text-zinc-400 font-mono hidden sm:flex items-center gap-1.5">
-                {isLoadingBatchPhotos ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 text-red-500 animate-spin" />
-                    <span>Sincronizando fotos...</span>
-                  </>
-                ) : (
-                  <>
-                    <Database className="w-3.5 h-3.5 text-red-500" />
-                    <span>
-                      Base de datos Supabase conectada •{' '}
-                      {activeReportTab === 'inventario'
-                        ? `${inventorySampling.length} balances`
-                        : `${attendanceRecords.length} jornadas`}
-                    </span>
-                  </>
-                )}
+                <div className="text-[11px] text-zinc-400 font-mono hidden sm:flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5 text-red-500" />
+                  <span>
+                    Base de datos Supabase conectada • {inventorySampling.length} balances
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* ========================================================================= */}
           {/* TAB: INVENTARIO Y DEGUSTACIÓN (SINCRONIZADO 100% CON TABLA `inventory`) */}
@@ -4922,312 +5925,19 @@ export const FieldPromotoraView: React.FC = () => {
           )}
 
           {/* ========================================================================= */}
-          {/* TAB 4: ASISTENCIA EN PDV (SECUENCIA DE 4 FOTOS POR PROMOTORA Y JORNADA) */}
+          {/* TAB 4: ASISTENCIA CONDICIONAL POR PERFIL (FIJA: 2 FOTOS | EVENTUAL: 4 FOTOS) */}
           {/* ========================================================================= */}
           {activeReportTab === 'asistencia' && (
-            <div className="space-y-6">
-              {attendanceGroupedByDay.length === 0 ? (
-                <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-10 text-center text-zinc-400 text-xs">
-                  No se encontraron registros de asistencia que coincidan con la búsqueda actual.
-                </div>
-              ) : (
-                attendanceGroupedByDay.map((dayGroup) => (
-                  <div key={dayGroup.date} className="space-y-4">
-                    {/* CABECERA DE DÍA (EJ: LUNES, 26 DE OCTUBRE DE 2026 | 26/10/2026) */}
-                    <div className="bg-slate-950/90 border border-slate-800/90 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-lg">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-red-950/60 border border-red-500/40 flex items-center justify-center text-red-500">
-                          <Calendar className="w-4 h-4" />
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2.5">
-                          <span className="text-xs sm:text-sm font-black text-white uppercase tracking-wide">
-                            {dayGroup.dateLongEs}
-                          </span>
-                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-bold">
-                            {dayGroup.dateSlash}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 font-mono text-[11px]">
-                        <span className="px-2.5 py-1 rounded-lg bg-red-950/70 border border-red-800/80 text-red-300 font-bold">
-                          {dayGroup.records.length} promotora(s)
-                        </span>
-                        <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-bold">
-                          {dayGroup.totalMarcajes} marcaje(s)
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* TARJETAS POR PROMOTORA DENTRO DEL DÍA */}
-                    <div className="space-y-5">
-                      {dayGroup.records.map((att) => {
-                        const isComplete = Boolean(att.salidaEvent);
-                        const slots: Array<{
-                          slotNumber: number;
-                          title: string;
-                          subtitle: string;
-                          legendLabel: string;
-                          emptyText: string;
-                          badgeColorClass: string;
-                          legendBadgeClass: string;
-                          event?: AttendanceSlotEvent;
-                        }> = [
-                          {
-                            slotNumber: 1,
-                            title: '1. FOTO DE INGRESO',
-                            subtitle: 'Apertura de jornada en PDV',
-                            legendLabel: 'INGRESO',
-                            emptyText: 'Pendiente / Sin registro de ingreso',
-                            badgeColorClass: 'bg-emerald-950/90 text-emerald-400 border-emerald-700/80',
-                            legendBadgeClass: 'bg-emerald-600 text-white border-emerald-400',
-                            event: att.ingresoEvent,
-                          },
-                          {
-                            slotNumber: 2,
-                            title: '2. SALIDA A ALMORZAR',
-                            subtitle: 'Cuando aplique',
-                            legendLabel: 'SALIDA A ALMORZAR',
-                            emptyText: 'Pendiente / Sin registro de salida a almorzar',
-                            badgeColorClass: 'bg-amber-950/90 text-amber-400 border-amber-700/80',
-                            legendBadgeClass: 'bg-amber-600 text-white border-amber-400',
-                            event: att.salidaAlmorzarEvent,
-                          },
-                          {
-                            slotNumber: 3,
-                            title: '3. LLEGADA DE ALMORZAR',
-                            subtitle: 'Cuando aplique',
-                            legendLabel: 'LLEGADA DE ALMORZAR',
-                            emptyText: 'Pendiente / Sin registro de llegada de almorzar',
-                            badgeColorClass: 'bg-sky-950/90 text-sky-400 border-sky-700/80',
-                            legendBadgeClass: 'bg-sky-600 text-white border-sky-400',
-                            event: att.llegadaAlmorzarEvent,
-                          },
-                          {
-                            slotNumber: 4,
-                            title: '4. SALIDA',
-                            subtitle: 'Cierre de guardia en PDV',
-                            legendLabel: 'SALIDA',
-                            emptyText: 'Pendiente / Sin registro de salida',
-                            badgeColorClass: 'bg-purple-950/90 text-purple-300 border-purple-700/80',
-                            legendBadgeClass: 'bg-purple-600 text-white border-purple-400',
-                            event: att.salidaEvent,
-                          },
-                        ];
-
-                        return (
-                          <div
-                            key={att.id}
-                            className="bg-slate-950/95 border border-slate-800/90 rounded-2xl overflow-hidden shadow-2xl"
-                          >
-                            {/* CABECERA DE LA PROMOTORA */}
-                            <div className="px-5 py-4 border-b border-slate-800/80 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-gradient-to-r from-slate-950 via-slate-900/90 to-slate-950">
-                              <div className="flex items-start sm:items-center gap-3.5">
-                                <div className="w-11 h-11 rounded-full bg-red-600 text-white font-black text-sm flex items-center justify-center border-2 border-red-400/80 shadow-lg shadow-red-950/70 shrink-0">
-                                  {att.initials}
-                                </div>
-                                <div className="space-y-1">
-                                  <div className="flex flex-wrap items-center gap-2.5">
-                                    <h5 className="text-sm sm:text-base font-black text-white uppercase tracking-tight">
-                                      {att.promotora}
-                                    </h5>
-                                    <span
-                                      className={`px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider border ${
-                                        isComplete
-                                          ? 'bg-emerald-950/80 text-emerald-400 border-emerald-700/70'
-                                          : 'bg-amber-950/80 text-amber-400 border-amber-700/70'
-                                      }`}
-                                    >
-                                      {isComplete ? 'JORNADA COMPLETADA' : 'EN GUARDIA / MARCAJE PARCIAL'}
-                                    </span>
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                                    <StoreIcon className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                                    <span className="font-semibold text-slate-200">{att.storeName}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
-                                <div className="text-slate-400">
-                                  <span>Fecha: </span>
-                                  <strong className="text-white">{att.dateSlash}</strong>
-                                </div>
-                                <a
-                                  href={att.mapsUrl || '#'}
-                                  target={att.mapsUrl ? '_blank' : undefined}
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-400 border border-emerald-800/80 font-mono text-[11px] font-bold transition"
-                                  title="Abrir ubicación GPS en Google Maps"
-                                >
-                                  <MapPin className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                  <span>
-                                    {att.zone} ({att.gpsAccuracy})
-                                  </span>
-                                </a>
-                              </div>
-                            </div>
-
-                            {/* SECUENCIA DE 4 COLUMNAS DE FOTOS (INGRESO, SALIDA A ALMORZAR, LLEGADA DE ALMORZAR, SALIDA) */}
-                            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                              {slots.map((slot) => {
-                                const ev = slot.event;
-                                const isSlotHidden = ev ? Boolean(hiddenSlotIds[ev.checkinId]) : false;
-                                const hasActiveEvent = Boolean(ev && !isSlotHidden);
-                                const loadedPhoto = ev ? checkinPhotosMap[ev.checkinId] : undefined;
-
-                                return (
-                                  <div
-                                    key={slot.slotNumber}
-                                    className="bg-slate-900/75 border border-slate-800/90 rounded-xl p-3 flex flex-col justify-between space-y-2.5 shadow-inner"
-                                  >
-                                    {/* TÍTULO DEL SLOT Y BADGE DE HORA */}
-                                    <div className="flex items-start justify-between gap-2">
-                                      <div>
-                                        <span className="text-[11px] font-black text-white uppercase tracking-wide block">
-                                          {slot.title}
-                                        </span>
-                                        <span className="text-[10px] text-slate-400 block">{slot.subtitle}</span>
-                                      </div>
-
-                                      {hasActiveEvent && ev ? (
-                                        <span
-                                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-black border shrink-0 ${slot.badgeColorClass}`}
-                                        >
-                                          {ev.timeFormatted}
-                                        </span>
-                                      ) : (
-                                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-950 text-slate-500 border border-slate-800 shrink-0">
-                                          Sin registro
-                                        </span>
-                                      )}
-                                    </div>
-
-                                    {/* CUERPO VISUAL DE LA TARJETA (IMAGEN + LEYENDA DE UBICACIÓN, HORA, LUGAR Y TIPO DE MARCAJE) */}
-                                    {hasActiveEvent && ev ? (
-                                      <div className="relative group rounded-xl overflow-hidden bg-black border border-slate-800 h-60 flex items-center justify-center">
-                                        {loadedPhoto ? (
-                                          <img
-                                            src={loadedPhoto}
-                                            alt={`${att.promotora} - ${slot.legendLabel}`}
-                                            onClick={() => handleOpenSlotPhotoModal(ev, att.promotora)}
-                                            className="w-full h-full object-cover cursor-pointer group-hover:scale-[1.02] transition-transform duration-300"
-                                          />
-                                        ) : (
-                                          <div className="flex flex-col items-center justify-center gap-2 p-4 text-center">
-                                            <Loader2 className="w-6 h-6 text-red-500 animate-spin" />
-                                            <span className="text-[11px] text-slate-300 font-mono">
-                                              Cargando foto de {slot.legendLabel.toLowerCase()}...
-                                            </span>
-                                            <button
-                                              type="button"
-                                              onClick={() => handleReloadSingleSlotPhoto(ev.checkinId)}
-                                              className="mt-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-red-600 text-[10px] text-slate-200 font-bold border border-slate-700 transition"
-                                            >
-                                              Sincronizar ahora
-                                            </button>
-                                          </div>
-                                        )}
-
-                                        {/* BOTONES DE ACCIÓN EN ESQUINA SUPERIOR DERECHA */}
-                                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10">
-                                          <button
-                                            type="button"
-                                            onClick={() => handleReloadSingleSlotPhoto(ev.checkinId)}
-                                            title="Recargar / Sincronizar foto desde Supabase"
-                                            className="w-7 h-7 rounded-lg bg-slate-950/85 hover:bg-red-600 text-white border border-slate-700/80 flex items-center justify-center shadow-lg transition"
-                                          >
-                                            <Camera className="w-3.5 h-3.5" />
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => handleOpenSlotPhotoModal(ev, att.promotora)}
-                                            title="Ampliar fotografía con detalle completo"
-                                            className="w-7 h-7 rounded-lg bg-slate-950/85 hover:bg-red-600 text-white border border-slate-700/80 flex items-center justify-center shadow-lg transition"
-                                          >
-                                            <Maximize2 className="w-3.5 h-3.5" />
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              setHiddenSlotIds((prev) => ({
-                                                ...prev,
-                                                [ev.checkinId]: true,
-                                              }))
-                                            }
-                                            title="Ocultar vista previa de este marcaje"
-                                            className="w-7 h-7 rounded-lg bg-red-950/90 hover:bg-red-600 text-red-200 hover:text-white border border-red-700/70 flex items-center justify-center shadow-lg transition"
-                                          >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                          </button>
-                                        </div>
-
-                                        {/* LEYENDA INFERIOR SUPERPUESTA: TIPO DE MARCAJE, LUGAR, HORA Y UBICACIÓN GPS */}
-                                        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/85 to-transparent p-2.5 pt-6 text-left pointer-events-none">
-                                          <div className="flex items-center gap-1.5 mb-1">
-                                            <span
-                                              className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider border shadow-sm ${slot.legendBadgeClass}`}
-                                            >
-                                              {slot.legendLabel}
-                                            </span>
-                                            <span className="text-[10px] font-black text-white uppercase tracking-tight truncate">
-                                              CODIZULCA ASISTENCIA - [{slot.legendLabel}]
-                                            </span>
-                                          </div>
-                                          <p className="text-[10px] font-bold text-slate-200 truncate">
-                                            {ev.storeName} • {ev.dateFormatted} {ev.fullTimeFormatted}
-                                          </p>
-                                          <p className="text-[10px] font-mono text-emerald-400 font-semibold truncate">
-                                            GPS:{' '}
-                                            {ev.lat !== undefined && ev.lng !== undefined
-                                              ? `${ev.lat.toFixed(6)}, ${ev.lng.toFixed(6)} (±${ev.accuracy}m)`
-                                              : att.zone}
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      /* ESTADO PENDIENTE / SIN REGISTRO */
-                                      <div className="rounded-xl bg-slate-950/90 border border-slate-800/80 h-60 flex flex-col items-center justify-center p-4 text-center space-y-2.5">
-                                        <div className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
-                                          <Clock className="w-5 h-5" />
-                                        </div>
-                                        <p className="text-[11px] text-slate-400 font-medium max-w-[180px]">
-                                          {slot.emptyText}
-                                        </p>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            if (ev) {
-                                              setHiddenSlotIds((prev) => ({
-                                                ...prev,
-                                                [ev.checkinId]: false,
-                                              }));
-                                              handleReloadSingleSlotPhoto(ev.checkinId);
-                                            } else {
-                                              showToast(
-                                                `Consultando marcaje de ${slot.legendLabel} para ${att.promotora} en Supabase...`
-                                              );
-                                            }
-                                          }}
-                                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-[11px] font-bold transition shadow"
-                                        >
-                                          <Camera className="w-3.5 h-3.5 text-red-500" />
-                                          <span>Cargar / Sincronizar Foto</span>
-                                        </button>
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+            <AttendanceEvidenceSubTab
+              staffMembers={staffList}
+              asistenciaJornadas={module1Bundle?.asistenciaJornadas || []}
+              asistenciaEvidencias={module1Bundle?.asistenciaEvidencias || []}
+              legacyAttendanceRecords={attendanceRecords}
+              searchQuery={reportSearchQuery}
+              onSearchQueryChange={setReportSearchQuery}
+              onRefreshData={refreshSupabaseData}
+              onNotifyToast={showToast}
+            />
           )}
         </div>
       )}
@@ -6110,22 +6820,29 @@ export const FieldPromotoraView: React.FC = () => {
                 )}
               </div>
 
-              {/* Botones inferiores: Copiar Enlace App + Abrir App */}
-              <div className="flex items-center gap-2 pt-0.5">
+              {/* Botones inferiores: Enviar Link por WhatsApp + Abrir /portal */}
+              <div className="flex items-center gap-1.5 pt-0.5">
                 <button
                   type="button"
-                  onClick={() => handleCopyStaffAppLink(member)}
-                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer ${copyBtnClass}`}
+                  onClick={() =>
+                    handleSendWhatsAppPortalLink({
+                      promotoraName: member.name,
+                      promotoraEmail: member.email,
+                      phone: member.phone,
+                    })
+                  }
+                  className="flex-1 py-2 px-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 hover:text-white border border-emerald-500/40 transition cursor-pointer"
+                  title={`Enviar link de /portal por WhatsApp a ${member.name} (${member.phone || 'seleccionar contacto'})`}
                 >
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>Copiar Enlace App</span>
+                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">Enviar Link por WhatsApp</span>
                 </button>
                 <a
                   href={buildStaffAppLink(member)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={`p-2 rounded-xl transition flex items-center justify-center ${copyBtnClass}`}
-                  title={`Abrir enlace App de ${member.name}`}
+                  className={`p-2 rounded-xl transition flex items-center justify-center shrink-0 ${copyBtnClass}`}
+                  title="Abrir /portal en nueva pestaña"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
@@ -6390,9 +7107,18 @@ export const FieldPromotoraView: React.FC = () => {
                       </div>
 
                       <div>
-                        <label className="block text-zinc-300 font-bold mb-1">Contraseña App</label>
+                        <label className="block text-zinc-300 font-bold mb-1">
+                          Contraseña Portal Auth
+                        </label>
                         <input
-                          type="text"
+                          type="password"
+                          autoComplete="new-password"
+                          minLength={8}
+                          placeholder={
+                            staffFormModal.id
+                              ? 'Dejar vacío para conservar actual'
+                              : 'Mínimo 8 caracteres'
+                          }
                           value={staffFormModal.password}
                           onChange={(e) =>
                             setStaffFormModal((prev) => ({ ...prev, password: e.target.value }))
@@ -6445,51 +7171,55 @@ export const FieldPromotoraView: React.FC = () => {
       })()}
 
       {/* Dashboard 360° Interactivo al Seleccionar Cualquier Tarjeta de Métrica */}
-      <Metric360DashboardModal
-        isOpen={selectedMetric360 !== null}
-        metricId={selectedMetric360}
-        onSelectMetric={(id) => setSelectedMetric360(id)}
-        onClose={() => setSelectedMetric360(null)}
-        switcherItems={fieldMetric360SwitcherItems}
-        visits={visits}
-        tastingItems={tastingSchedule}
-        module1Bundle={module1Bundle}
-        liveClock={liveClock}
-        onApplyTableFilter={({ metricId, productFilter, timeLens }) => {
-          if (metricId === 'personal_activo') {
-            setActiveSubTab('personal');
-            return;
-          }
-          setActiveSubTab('degustaciones');
-          if (productFilter) {
-            setTastingProductFilter(productFilter);
-          }
-          if (timeLens === 'SEMANA_ACTUAL') {
-            setTastingDayFilter('SEMANA_ACTUAL');
-          } else if (timeLens === 'MES_ACTUAL') {
-            setTastingDayFilter(liveClock.yearMonth);
-          } else {
-            setTastingDayFilter('TODOS');
-          }
-        }}
-      />
+      {FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS && (
+        <Metric360DashboardModal
+          isOpen={selectedMetric360 !== null}
+          metricId={selectedMetric360}
+          onSelectMetric={(id) => setSelectedMetric360(id)}
+          onClose={() => setSelectedMetric360(null)}
+          switcherItems={fieldMetric360SwitcherItems}
+          visits={visits}
+          tastingItems={tastingSchedule}
+          module1Bundle={module1Bundle}
+          liveClock={liveClock}
+          onApplyTableFilter={({ metricId, productFilter, timeLens }) => {
+            if (metricId === 'personal_activo') {
+              setActiveSubTab('personal');
+              return;
+            }
+            setActiveSubTab('degustaciones');
+            if (productFilter) {
+              setTastingProductFilter(productFilter);
+            }
+            if (timeLens === 'SEMANA_ACTUAL') {
+              setTastingDayFilter('SEMANA_ACTUAL');
+            } else if (timeLens === 'MES_ACTUAL') {
+              setTastingDayFilter(liveClock.yearMonth);
+            } else {
+              setTastingDayFilter('TODOS');
+            }
+          }}
+        />
+      )}
 
       {/* Motor de Lectura Multiformato (Excel / CSV / PDF) y Volcado a Módulo 2 */}
-      <MultiFormatTastingUploadModal
-        isOpen={isMultiFormatUploadOpen}
-        onClose={() => setIsMultiFormatUploadOpen(false)}
-        stores={stores}
-        syncedStoreItems={syncedStoreItemsForUpload}
-        staffMembers={module1Bundle?.staffMembers || []}
-        cargadoPor={currentUser?.name || 'Coordinación Trade Marketing'}
-        cargadoPorRol={currentRole || 'jefe_trade'}
-        onBatchDumpedSuccess={async (res) => {
-          showToast(
-            `✅ Lote volcado a Módulo 2: ${res.total_insertadas} degustación(es) en PENDIENTE_APROBACION (${res.total_duplicadas} duplicadas omitidas).`
-          );
-          await refreshSupabaseData();
-        }}
-      />
+      {FEATURE_FLAGS.ENABLE_MODULO1_CARGAR_ARCHIVO && (
+        <MultiFormatTastingUploadModal
+          isOpen={isMultiFormatUploadOpen}
+          onClose={() => setIsMultiFormatUploadOpen(false)}
+          stores={stores}
+          syncedStoreItems={syncedStoreItemsForUpload}
+          staffMembers={module1Bundle?.staffMembers || []}
+          cargadoPor={currentUser?.name || 'Coordinación Trade Marketing'}
+          cargadoPorRol={currentRole || 'jefe_trade'}
+          onBatchDumpedSuccess={async (res) => {
+            showToast(
+              `✅ Lote volcado a Módulo 2: ${res.total_insertadas} degustación(es) en PENDIENTE_APROBACION (${res.total_duplicadas} duplicadas omitidas).`
+            );
+            await refreshSupabaseData();
+          }}
+        />
+      )}
 
       {/* Bloque oficial de firmas para soporte impreso / PDF */}
       <PrintSignatureBlock />

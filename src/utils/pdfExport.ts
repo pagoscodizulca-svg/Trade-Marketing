@@ -210,7 +210,11 @@ export const exportTastingSchedulePdf = async (
     `${item.activityTitle}\n• ${item.productName}`,
     item.responsibleName,
     `${item.storeName}\n${item.zone}`,
-    item.status,
+    item.status === 'NO_AUTORIZADA'
+      ? 'NO AUTORIZADA'
+      : item.status === 'PROGRAMADO'
+        ? 'AUTORIZADA'
+        : item.status,
     item.acceptancePercent !== undefined ? `${item.acceptancePercent}%` : '-',
     item.sellerApplicant || 'Coordinación Trade',
   ]);
@@ -1091,6 +1095,12 @@ export {
   resolveTargetReportMonth,
   buildMonthlyTastingReportData,
 } from './monthlyTastingReportPdf';
+
+export {
+  exportPendingTastingAuthorizationPdf,
+  buildPendingAuthorizationReportModel,
+  renderPendingAuthorizationPdfDocument,
+} from './pendingAuthorizationPdf';
 
 // ---------------------------------------------------------------------------------
 // 8. FORMATO CORPORATIVO OFICIAL: "SOLICITUD DE PRODUCTOS" (MP-07-XXXX)

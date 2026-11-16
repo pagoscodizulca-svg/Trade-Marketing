@@ -1,0 +1,55 @@
+{
+  "executedAt": "2026-11-16T15:54:19.581Z",
+  "mockEndpoint": "http://127.0.0.1:58405",
+  "totalMockRequestsHandled": 6,
+  "summaryReport": [
+    {
+      "id": "SYNC-01",
+      "flow": "FDV Render <-> Supabase surveys + Retry Resiliencia",
+      "outcome": "APROBADO",
+      "detail": "Reconciliación determinista sin duplicados y recuperación ante 2 errores HTTP 503 consecutivos."
+    },
+    {
+      "id": "SYNC-02",
+      "flow": "Carga Multiformato -> Cronograma RPC (Idempotencia SHA-256)",
+      "outcome": "CON_ADVERTENCIAS",
+      "detail": "Idempotencia SHA-256 intra-archivo y en reintentos OK; advertencia en SQL 20261114 por índice antiguo idx_cronograma_deg_idempotency_active no eliminado."
+    },
+    {
+      "id": "SYNC-04",
+      "flow": "Evidencias Fotográficas de Asistencia (Storage + BD)",
+      "outcome": "APROBADO",
+      "detail": "Anti-IDOR 403 y unicidad de fila OK. En carrera simultánea se detectó 0 objeto(s) huérfano(s) en Storage por TOCTOU previo al upsert."
+    },
+    {
+      "id": "SYNC-05",
+      "flow": "Sincronización Maestra ERP (Vendedores y Clientes por Lotes)",
+      "outcome": "CON_ADVERTENCIAS",
+      "detail": "Deduplicación y enlace FK OK; normalizarRifFiscal no unifica guion verificador y es_admin_trade() excluye gerente_admin en SQL."
+    },
+    {
+      "id": "SYNC-06",
+      "flow": "Solicitudes de Productos a Contraloría (MP-07-XXXX)",
+      "outcome": "FALLIDO",
+      "detail": "Split-Brain crítico confirmado: ante colisión 23505, isDedicatedTableMissing() coincide con /solicitudes_contraloria/i, degrada el modo a surveys_envelope y duplica el correlativo MP-07-0073 entre dos tablas distintas (+ RLS abierto a anon)."
+    },
+    {
+      "id": "SYNC-07",
+      "flow": "Cierre Semanal Automático (Cron + RPC + Fallback SDK)",
+      "outcome": "CON_ADVERTENCIAS",
+      "detail": "Comparación timingSafeEqual e idempotencia OK; pero migración 20261113 desprograma pg_cron buscando un procedimiento inexistente y el rate limiter precede a requireCronSecretAuth."
+    },
+    {
+      "id": "SYNC-08",
+      "flow": "Persistencia de Sesión Auth vs cleanSync Boot Migration",
+      "outcome": "FALLIDO",
+      "detail": "Confirmado: cleanSync.ts elimina codizulca.supabase.auth.v1 y hasStoredSupabaseAuthToken() devuelve siempre false."
+    },
+    {
+      "id": "SYNC-09",
+      "flow": "Chofer PWA Offline Outbox + Resolución LWW",
+      "outcome": "CON_ADVERTENCIAS",
+      "detail": "Compactación Outbox y parche idempotente OK; RLS de entregas_degustacion está totalmente abierto a anon (DELETE incluido) y depende del reloj del dispositivo."
+    }
+  ]
+}

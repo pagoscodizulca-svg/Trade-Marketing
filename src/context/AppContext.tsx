@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   User,
   UserRole,
@@ -9,7 +9,6 @@ import {
   InventoryReconciliation,
   AuditLogEntry,
   DiscrepancyAlert,
-  OfflineQueueItem,
   FiscalReceipt,
   ShiftType,
   DegustacionNotificationItem,
@@ -19,6 +18,8 @@ import {
   useDegustacionesNotifications,
   UseDegustacionesNotificationsResult,
 } from '../hooks/useDegustacionesNotifications';
+import { useCronogramaRealtimeSync } from '../hooks/useCronogramaRealtimeSync';
+import { FEATURE_FLAGS } from '../config/featureFlags';
 import {
   useSolicitudesContraloria,
   UseSolicitudesContraloriaResult,
@@ -38,6 +39,13 @@ import {
   normalizeProductionShift,
   ProductionSuppliesResult,
 } from '../utils/productionSuppliesCalculator';
+import {
+  getCaracasTodayYmd,
+  getCaracasWeekCycleBounds,
+  getMsUntilNextCaracasMidnight,
+  MAX_SAFE_TIMEOUT_MS,
+} from '../utils/caracasWeekCycle';
+import { isStrictAdminRole } from '../services/degustacionesWeeklyCycleService';
 
 export type SyncState = 'sincronizando' | 'sincronizado' | 'tiempo_real' | 'error';
 
@@ -58,6 +66,7 @@ export interface ClearVisitsCriteria {
 
 export interface UpsertVisitFromTastingParams {
   solicitudId: string;
+  cronogramaId?: string;
   degustacionId?: string;
   date: string;
   dayLabel?: string;
@@ -70,6 +79,7 @@ export interface UpsertVisitFromTastingParams {
   requestedQty: number | string;
   targetSamples?: number;
   sellerName: string;
+  promotoraId?: string;
   promotoraName?: string;
   mapsUrl?: string;
   notes?: string;
@@ -86,6 +96,10 @@ interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
+  /** Verdadero únicamente para usuarios con rol estricto de Administrador (`admin` / `gerente_admin`) */
+  isStrictAdmin: boolean;
+  /** Lunes `YYYY-MM-DD` de inicio de la semana ISO en curso evaluada en `America/Caracas` */
+  caracasWeekStartYmd: string;
   users: User[];
   stores: Store[];
   visits: ScheduledVisit[];
@@ -103,6 +117,8 @@ interface AppContextType {
 
   /** Estado global de sincronización (módulos 1-4 + notificaciones + solicitudes) */
   syncStatus: SyncStatus;
+  /** Verdadero cuando el canal Realtime de `cronograma_degustaciones` está suscrito en vivo */
+  isCronogramaRealtimeConnected: boolean;
   /** Sincroniza manualmente TODAS las fuentes (Supabase, degustaciones y solicitudes de contraloría) */
   refreshAll: () => Promise<void>;
 
@@ -292,16 +308,42 @@ function sanitizeVisitsAgainstActiveStaff(
   return result;
 }
 
-export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const AppProvider: React.FC<{
+  children: React.ReactNode;
+  verifiedProfile?: {
+    userId: string;
+    email: string;
+    displayName: string;
+    appRole?: string | null;
+    legacyRole: UserRole;
+  } | null;
+}> = ({ children, verifiedProfile = null }) => {
   // Todas las listas arrancan VACÍAS y solo se llenan con datos sincronizados (Supabase) o registrados por el usuario en la sesión.
   const [users, setUsers] = useState<User[]>([]);
-  const [currentRole, setCurrentRole] = useState<UserRole>('promotora');
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [currentRole, setCurrentRole] = useState<UserRole>(
+    verifiedProfile?.legacyRole || 'jefe_trade'
+  );
+  const [caracasWeekStartYmd, setCaracasWeekStartYmd] = useState<string>(
+    () => getCaracasWeekCycleBounds().inicioSemanaActualYmd
+  );
+  const lastFocusRevalidationMsRef = useRef<number>(Date.now());
+  const isStrictAdmin =
+    isStrictAdminRole(verifiedProfile?.appRole) || isStrictAdminRole(currentRole);
+  const [currentUser, setCurrentUser] = useState<User | null>(
+    verifiedProfile
+      ? {
+          id: verifiedProfile.userId,
+          name: verifiedProfile.displayName,
+          email: verifiedProfile.email,
+          role: verifiedProfile.legacyRole,
+        }
+      : null
+  );
 
   const [stores, setStores] = useState<Store[]>([]);
   const [visits, setVisits] = useState<ScheduledVisit[]>([]);
   const [requests, setRequests] = useState<ControllerRequest[]>([]);
-  const [tastingReports, setTastingReports] = useState<TastingExecutionReport[]>([]);
+  const [tastingReports] = useState<TastingExecutionReport[]>([]);
   const [reconciliation, setReconciliation] = useState<InventoryReconciliation>(EMPTY_RECONCILIATION);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [discrepancyAlerts, setDiscrepancyAlerts] = useState<DiscrepancyAlert[]>([]);
@@ -432,6 +474,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               id: current.id,
               solicitudId: current.solicitudId || sv.solicitudId || sv.id,
               degustacionId: current.degustacionId || sv.degustacionId,
+              enHistorial: Boolean(sv.enHistorial ?? current.enHistorial ?? false),
+              archivadoEn: sv.archivadoEn ?? current.archivadoEn ?? null,
+              motivoArchivo: sv.motivoArchivo ?? current.motivoArchivo ?? null,
               operationalSupplies: current.operationalSupplies || sv.operationalSupplies,
             };
           } else {
@@ -458,11 +503,106 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
   });
 
+  // Suscripción Realtime directa a `cronograma_degustaciones` y `rutas_promotoras` (Módulo 1 <-> Módulo 2 <-> /portal)
+  const cronogramaRealtime = useCronogramaRealtimeSync({
+    onRealtimeChange: () => {
+      void refreshSupabaseData();
+    },
+  });
+
+  // Revalidación automática en sesión activa en `America/Caracas` (`UTC-4`):
+  // - Al cruzar medianoche Caracas (`00:00:00.000` diario) para trasladar solicitudes vencidas a Historial (`No Autorizada`).
+  // - Y al recuperar foco/visibilidad de la ventana.
   useEffect(() => {
+    let rolloverTimerId: number | undefined;
+    let lastCaracasDayYmd = getCaracasTodayYmd();
+
+    const triggerActiveSessionRolloverSync = (forceRefresh: boolean) => {
+      const bounds = getCaracasWeekCycleBounds();
+      const currentDayYmd = bounds.todayCaracasYmd;
+      let periodChanged = false;
+
+      if (currentDayYmd !== lastCaracasDayYmd) {
+        lastCaracasDayYmd = currentDayYmd;
+        periodChanged = true;
+      }
+
+      setCaracasWeekStartYmd((prev) => {
+        if (prev !== bounds.inicioSemanaActualYmd) {
+          periodChanged = true;
+          return bounds.inicioSemanaActualYmd;
+        }
+        return prev;
+      });
+
+      const nowMs = Date.now();
+      const cooldownElapsed = nowMs - lastFocusRevalidationMsRef.current >= 20_000;
+      if (periodChanged || forceRefresh || cooldownElapsed) {
+        lastFocusRevalidationMsRef.current = nowMs;
+        void refreshSupabaseData();
+        void degustacionNotifications.reloadNotifications();
+      }
+    };
+
+    const scheduleNextCaracasRollover = () => {
+      if (rolloverTimerId !== undefined) {
+        window.clearTimeout(rolloverTimerId);
+      }
+      const bounds = getCaracasWeekCycleBounds();
+      setCaracasWeekStartYmd((prev) =>
+        prev !== bounds.inicioSemanaActualYmd ? bounds.inicioSemanaActualYmd : prev
+      );
+      const msUntilNextBoundary = FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE
+        ? bounds.msUntilNextRollover
+        : getMsUntilNextCaracasMidnight();
+      const waitMs = Math.min(MAX_SAFE_TIMEOUT_MS, Math.max(100, msUntilNextBoundary + 50));
+      rolloverTimerId = window.setTimeout(() => {
+        triggerActiveSessionRolloverSync(true);
+        scheduleNextCaracasRollover();
+      }, waitMs);
+    };
+
+    scheduleNextCaracasRollover();
+
+    const handleWindowFocus = () => {
+      triggerActiveSessionRolloverSync(false);
+      scheduleNextCaracasRollover();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        triggerActiveSessionRolloverSync(false);
+        scheduleNextCaracasRollover();
+      }
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      if (rolloverTimerId !== undefined) {
+        window.clearTimeout(rolloverTimerId);
+      }
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refreshSupabaseData, degustacionNotifications.reloadNotifications]);
+
+  useEffect(() => {
+    if (verifiedProfile) {
+      setCurrentRole(verifiedProfile.legacyRole);
+      setCurrentUser({
+        id: verifiedProfile.userId,
+        name: verifiedProfile.displayName,
+        email: verifiedProfile.email,
+        role: verifiedProfile.legacyRole,
+      });
+      return;
+    }
     // Sin usuarios sincronizados no hay usuario actual (no se inventa ninguno).
     const user = users.find((u) => u.role === currentRole) || users[0] || null;
     setCurrentUser(user);
-  }, [currentRole, users]);
+  }, [currentRole, users, verifiedProfile]);
 
   const addAuditLog = (
     entityType: AuditLogEntry['entityType'],
@@ -1272,6 +1412,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const upsertedVisit: ScheduledVisit = {
       id: existingVisit?.id || solicitudId,
+      cronogramaId: params.cronogramaId || existingVisit?.cronogramaId,
       solicitudId,
       degustacionId: degustacionId || existingVisit?.degustacionId,
       date: effectiveDate,
@@ -1283,7 +1424,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       productFocus: supplies.productFocus,
       fillProductSelection: supplies.fillProductSelection,
       fillQuantityInput: supplies.fillQuantityInput,
-      promotoraId: matchedUser?.id || existingVisit?.promotoraId || 'usr_prom_sync',
+      promotoraId: params.promotoraId || matchedUser?.id || existingVisit?.promotoraId || '',
       promotoraName: assignedPromotora,
       sellerName: cleanSellerName,
       plannedUnits: supplies.plannedUnits,
@@ -1451,7 +1592,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ? 'sincronizando'
     : syncErrorMessage
       ? 'error'
-      : degustacionNotifications.isRealtimeConnected
+      : degustacionNotifications.isRealtimeConnected || cronogramaRealtime.isRealtimeConnected
         ? 'tiempo_real'
         : 'sincronizado';
   const syncStatus: SyncStatus = {
@@ -1474,6 +1615,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         currentUser,
         currentRole,
         setCurrentRole,
+        isStrictAdmin,
+        caracasWeekStartYmd,
         users,
         stores,
         visits,
@@ -1487,6 +1630,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         supabaseError,
         refreshSupabaseData,
         syncStatus,
+        isCronogramaRealtimeConnected: cronogramaRealtime.isRealtimeConnected,
         refreshAll,
         degustacionNotifications,
         focusedTastingId,

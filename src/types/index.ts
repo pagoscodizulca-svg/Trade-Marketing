@@ -42,6 +42,8 @@ export interface OperationalSupplies {
 
 export interface ScheduledVisit {
   id: string;
+  /** ID único de la fila sincronizada en public.cronograma_degustaciones */
+  cronogramaId?: string;
   /** ID único de la solicitud de degustación de origen en Supabase (surveys.id) para sincronización idempotente Módulo 1 -> Módulo 2 */
   solicitudId?: string;
   /** Código correlativo canónico de la solicitud FDV (ej. deg-...) */
@@ -80,6 +82,9 @@ export interface ScheduledVisit {
   assistedSalesUnits?: number;
   notes?: string;
   status: 'PENDIENTE' | 'EN_CURSO' | 'COMPLETADA' | 'AUSENTE' | 'FUERA_GEOFENCE';
+  enHistorial?: boolean;
+  archivadoEn?: string | null;
+  motivoArchivo?: string | null;
   checkInTime?: string;
   checkOutTime?: string;
   checkInLat?: number;

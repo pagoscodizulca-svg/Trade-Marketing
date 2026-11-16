@@ -10,6 +10,20 @@ import {
   extractDegustacionesFromPdfBuffer,
   PdfExtractionError,
 } from './src/server/pdfDegustacionesExtractor';
+import {
+  createRateLimiter,
+  handleProvisionStaffAuth,
+  requireAttendanceActorAuth,
+  requireCoordinatorOrAdminAuth,
+} from './src/server/supabaseAdminAuth';
+import {
+  handleBatchAttendanceSignedUrls,
+  handleUploadAttendanceEvidence,
+} from './src/server/attendanceEvidencesHandler';
+import {
+  handleWeeklyTastingCutoffCron,
+  requireCronSecretAuth,
+} from './src/server/weeklyTastingCronHandler';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -139,10 +153,22 @@ app.get('/api/health', async (_req: Request, res: Response) => {
 });
 
 // ============================================================================
-// 1.B. MOTOR DE EXTRACCIÓN ESTRUCTURADA DE PDF CON IA (MÓDULO 1 -> FASE 2)
+// 1.B. MOTOR DE EXTRACCIÓN ESTRUCTURADA DE PDF CON IA (PROTEGIDO POR JWT + RATE LIMIT)
 // ============================================================================
+const pdfExtractRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 12,
+});
+
+const adminAuthRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 30,
+});
+
 app.post(
   '/api/degustaciones/extract-pdf',
+  requireCoordinatorOrAdminAuth,
+  pdfExtractRateLimiter,
   express.raw({
     type: ['application/pdf', 'application/x-pdf', 'application/octet-stream'],
     limit: '15mb',
@@ -167,6 +193,62 @@ app.post(
       });
     }
   }
+);
+
+// ============================================================================
+// 1.C. APROVISIONAMIENTO ADMINISTRATIVO DE CUENTAS SUPABASE AUTH (SOLO SERVIDOR)
+// ============================================================================
+app.post(
+  '/api/admin/staff-auth',
+  requireCoordinatorOrAdminAuth,
+  adminAuthRateLimiter,
+  handleProvisionStaffAuth
+);
+
+// ============================================================================
+// 1.D. TAREA PROGRAMADA DE CIERRE DOMINICAL DE DEGUSTACIONES (SOLO CRON SECRET)
+// ============================================================================
+const weeklyCronRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 6,
+});
+
+app.post(
+  '/api/cron/degustaciones-cierre-semanal',
+  weeklyCronRateLimiter,
+  requireCronSecretAuth,
+  handleWeeklyTastingCutoffCron
+);
+
+// ============================================================================
+// 1.E. EVIDENCIAS FOTOGRÁFICAS CONDICIONALES DE ASISTENCIA (STORAGE PRIVADO + ZOD + MAGIC BYTES)
+// ============================================================================
+const attendanceUploadRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 40,
+});
+
+const attendanceSignedUrlRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+app.post(
+  '/api/asistencia/evidencias',
+  requireAttendanceActorAuth,
+  attendanceUploadRateLimiter,
+  express.raw({
+    type: ['image/webp', 'image/jpeg', 'image/png', 'application/octet-stream', '*/*'],
+    limit: '6mb',
+  }),
+  handleUploadAttendanceEvidence
+);
+
+app.post(
+  '/api/asistencia/evidencias/signed-urls',
+  requireAttendanceActorAuth,
+  attendanceSignedUrlRateLimiter,
+  handleBatchAttendanceSignedUrls
 );
 
 // ============================================================================

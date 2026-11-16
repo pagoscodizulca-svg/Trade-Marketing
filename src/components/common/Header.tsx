@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   FileText,
   Calendar,
@@ -54,7 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
   ];
 
   return (
-    <aside className="w-full md:w-64 shrink-0 bg-[#09090b]/95 border-b md:border-b-0 md:border-r border-white/[0.07] flex flex-col justify-between md:min-h-screen md:sticky md:top-0 z-40 backdrop-blur-xl no-print">
+    <aside className="w-full md:w-64 shrink-0 bg-[#09090b]/95 border-b md:border-b-0 md:border-r border-white/[0.07] flex flex-col justify-between md:min-h-screen md:sticky md:top-0 z-30 backdrop-blur-xl no-print">
       <div>
         {/* Línea fina superior en rojo corporativo */}
         <div className="h-[2px] w-full bg-gradient-to-r from-red-700 via-red-500 to-transparent" />
@@ -101,8 +102,10 @@ export const Header: React.FC<HeaderProps> = ({
                 <button
                   key={item.id}
                   type="button"
+                  title={`${item.label} — ${item.subtitle}`}
+                  aria-label={`${item.label} — ${item.subtitle}`}
                   onClick={() => setActiveTab(item.id)}
-                  className={`group relative w-full px-3 py-2.5 rounded-xl text-left flex items-center gap-3 transition-all cursor-pointer ${
+                  className={`group relative w-full px-3 py-2.5 rounded-xl text-left flex items-center gap-2.5 transition-all cursor-pointer ${
                     isActive
                       ? 'bg-gradient-to-r from-red-600 to-red-700 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_4px_14px_-2px_rgba(220,38,38,0.45)] border border-red-500/40'
                       : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06]'
@@ -119,9 +122,9 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-start justify-between gap-1.5">
                       <span
-                        className={`text-xs block truncate ${
+                        className={`text-xs block leading-snug line-clamp-2 break-words ${
                           isActive ? 'font-bold text-white' : 'font-semibold text-zinc-200 group-hover:text-white'
                         }`}
                       >
@@ -196,12 +199,17 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Global Export PDF / Print Modal */}
-      <GlobalExportPdfModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        activeTab={activeTab}
-      />
+      {/* Global Export PDF / Print Modal (Portal en document.body para escapar de backdrop-blur del aside) */}
+      {typeof document !== 'undefined' &&
+        isExportModalOpen &&
+        createPortal(
+          <GlobalExportPdfModal
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            activeTab={activeTab}
+          />,
+          document.body
+        )}
     </aside>
   );
 };

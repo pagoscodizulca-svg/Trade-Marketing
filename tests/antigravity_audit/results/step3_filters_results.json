@@ -1,0 +1,60 @@
+{
+  "executedAt": "2026-11-16T15:54:17.064Z",
+  "totalCases": 6,
+  "filterAuditMatrix": [
+    {
+      "filterId": "FLT-01",
+      "module": "Módulo 1 · Historial Paginado (Zod + escapeIlikePattern)",
+      "layer": "Backend/PostgREST",
+      "edgeCasesTested": "Vacíos, 2026-02-30, Desde > Hasta, page=0/-3/50000, pageSize=101, nulos ASCII, ñ/acentos, %/_",
+      "securityValidated": true,
+      "status": "APROBADO",
+      "finding": "Esquema Zod rechaza rangos invertidos, fechas imposibles y desbordamientos de página; escapa % y _."
+    },
+    {
+      "filterId": "FLT-02",
+      "module": "Módulo 1 · queryServerPaginatedHistorialSurveys (Combinación Múltiple)",
+      "layer": "Backend/PostgREST",
+      "edgeCasesTested": "Combinación simultánea statusFilter + shiftFilter + productFilter sobre página 1",
+      "securityValidated": true,
+      "status": "FALLIDO",
+      "finding": "degustacionesWeeklyCycleService.ts:298-405 ignora statusFilter y shiftFilter en servidor, desalineando conteo y páginas."
+    },
+    {
+      "filterId": "FLT-03",
+      "module": "Data Maestra · obtenerClientesMaestros / obtenerVendedoresMaestros",
+      "layer": "Backend/PostgREST",
+      "edgeCasesTested": "Letra Ñ, comas en razón social (\", C.A.\"), paréntesis y delimitadores de operador .or()",
+      "securityValidated": true,
+      "status": "CON_ADVERTENCIAS",
+      "finding": "Neutraliza inyección de cláusulas .or() al eliminar comas/paréntesis, pero genera falsos negativos (0 resultados) al buscar razones sociales reales con \", C.A.\"."
+    },
+    {
+      "filterId": "FLT-04",
+      "module": "Motor Común de Fechas (excelDateNormalizer + excelDateParser)",
+      "layer": "UI/Memoria",
+      "edgeCasesTested": "Años bisiestos (29/02/2024 vs 29/02/2026), 31/04, formatos DD/MM/YYYY vs ISO, rangos invertidos",
+      "securityValidated": true,
+      "status": "CON_ADVERTENCIAS",
+      "finding": "Validación UTC pura exacta; divergencia UX cuando desde > hasta (UI auto-invierte límites silenciosamente mientras Zod backend lanza error)."
+    },
+    {
+      "filterId": "FLT-05",
+      "module": "Sanitizadores Globales (Excel/CSV/Asistencia/Portal/DOM React)",
+      "layer": "Parser/Sanitizador",
+      "edgeCasesTested": "Prefijos =/+/-/@, __proto__/constructor, caracteres de control, etiquetas HTML, cero dangerouslySetInnerHTML",
+      "securityValidated": true,
+      "status": "APROBADO",
+      "finding": "Neutralización determinista de Formula Injection, Prototype Pollution y renderizado 100% escapado en nodos de texto React."
+    },
+    {
+      "filterId": "FLT-06",
+      "module": "Módulo 2 · ScheduleMatrixView (Rango de Fechas + Buscador + Filtro Producto)",
+      "layer": "UI/Memoria",
+      "edgeCasesTested": "Cambio reactivo de matrixDateFrom/matrixDateTo, búsqueda con/sin tildes (\"María\" vs \"maria\"), productos secundarios",
+      "securityValidated": true,
+      "status": "FALLIDO",
+      "finding": "ScheduleMatrixView.tsx:231-240 omite matrixDateFrom/matrixDateTo en useMemo (stale cache), restringe filteredVisits:514 a 3 productos fijos y no normaliza acentos NFD en búsqueda libre."
+    }
+  ]
+}

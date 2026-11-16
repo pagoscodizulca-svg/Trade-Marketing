@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useCallback, useState } from 'react';
-import { Calendar } from 'lucide-react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Calendar, LogOut, MapPin } from 'lucide-react';
+import { TradeAuthGate } from './components/auth/TradeAuthGate';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header, MainNavTab } from './components/common/Header';
 import {
   DegustacionesNotificationBell,
   DegustacionesRealtimeToastStack,
 } from './components/common/DegustacionesNotificationBell';
+import type { VerifiedAuthProfile } from './services/authService';
 import { DegustacionNotificationItem } from './types';
 import { SyncStatusBadge } from './components/common/SyncStatusBadge';
 import { useLiveVenezuelaClock } from './utils/weekCalendar';
@@ -20,8 +22,24 @@ const ContraloriaView = lazy(() => import('./components/contraloria/ContraloriaV
 const ScheduleMatrixView = lazy(() => import('./components/schedule/ScheduleMatrixView').then((m) => ({ default: m.ScheduleMatrixView })));
 const FieldPromotoraView = lazy(() => import('./components/field/FieldPromotoraView').then((m) => ({ default: m.FieldPromotoraView })));
 const ExecutiveDashboard = lazy(() => import('./components/dashboard/ExecutiveDashboard').then((m) => ({ default: m.ExecutiveDashboard })));
+const PromotoraRutaPortalView = lazy(() =>
+  import('./components/portal/PromotoraRutaPortalView').then((m) => ({
+    default: m.PromotoraRutaPortalView,
+  }))
+);
 
-const MainAppContent: React.FC = () => {
+function isPromotoraPortalPath(pathname?: string): boolean {
+  const rawPath =
+    pathname ?? (typeof window !== 'undefined' ? window.location.pathname : '');
+  const cleanPath = rawPath.replace(/\/+$/, '').toLowerCase();
+  return cleanPath === '/portal' || cleanPath.startsWith('/portal/');
+}
+
+const MainAppContent: React.FC<{
+  authProfile: VerifiedAuthProfile;
+  isLocalDevWorkstation: boolean;
+  onSignOut: () => Promise<void>;
+}> = ({ authProfile, isLocalDevWorkstation, onSignOut }) => {
   const [activeTab, setActiveTab] = useState<MainNavTab>('promotoras');
   const liveClock = useLiveVenezuelaClock();
   const {
@@ -61,7 +79,7 @@ const MainAppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-white flex flex-col md:flex-row font-sans selection:bg-red-600 selection:text-white relative">
+    <div className="min-h-screen bg-[#09090b] text-white flex flex-col md:flex-row font-sans selection:bg-red-600 selection:text-white relative overflow-x-hidden">
       
       {/* Panel Lateral Izquierdo con los 4 Módulos en Vertical (Negro, Rojo y Blanco) */}
       <Header
@@ -69,10 +87,10 @@ const MainAppContent: React.FC = () => {
         setActiveTab={setActiveTab}
       />
 
-      {/* Área Principal de Contenido (Lado Derecho) */}
-      <div className="flex-1 min-w-0 flex flex-col justify-between relative z-10">
+      {/* Área Principal de Contenido (Lado Derecho — sin stacking context sellado) */}
+      <div className="flex-1 min-w-0 flex flex-col justify-between relative">
         {/* Encabezado Superior del Sistema con Logo Oficial de Codizulca */}
-        <div className="bg-zinc-950/85 border-b border-white/[0.07] backdrop-blur-xl sticky top-0 z-30 no-print">
+        <div className="bg-zinc-950/85 border-b border-white/[0.07] backdrop-blur-xl sticky top-0 z-20 no-print">
           <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3.5 min-w-0">
               <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shadow-[0_2px_12px_rgba(220,38,38,0.25)] border border-white/90 shrink-0">
@@ -128,6 +146,42 @@ const MainAppContent: React.FC = () => {
                 onMarkAsRead={degustacionNotifications.markAsRead}
                 onMarkAllAsRead={degustacionNotifications.markAllAsRead}
               />
+
+              <a
+                href="/portal"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Abrir Portal de Promotoras (/portal)"
+                className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-bold text-zinc-200 transition"
+              >
+                <MapPin className="w-3.5 h-3.5 text-red-400" />
+                <span>/portal</span>
+              </a>
+
+              {isLocalDevWorkstation && (
+                <button
+                  type="button"
+                  onClick={() => void onSignOut()}
+                  title="Cambiar a sesión autenticada con Supabase Auth (JWT)"
+                  className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[11px] font-bold text-amber-200 transition cursor-pointer"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  <span>Modo Local · Autenticar</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void onSignOut()}
+                title={
+                  isLocalDevWorkstation
+                    ? 'Volver al inicio de sesión corporativo'
+                    : `Cerrar sesión (${authProfile.email})`
+                }
+                className="p-2 rounded-xl bg-zinc-900 hover:bg-red-950/60 border border-white/10 hover:border-red-700 text-zinc-300 hover:text-red-300 transition cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>
@@ -193,9 +247,43 @@ const MainAppContent: React.FC = () => {
 };
 
 export default function App() {
+  const [isPortalRoute, setIsPortalRoute] = useState<boolean>(() => isPromotoraPortalPath());
+
+  useEffect(() => {
+    const handleRouteChange = () => {
+      setIsPortalRoute(isPromotoraPortalPath());
+    };
+    window.addEventListener('popstate', handleRouteChange);
+    return () => {
+      window.removeEventListener('popstate', handleRouteChange);
+    };
+  }, []);
+
+  if (isPortalRoute) {
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center text-sm font-mono">
+            Cargando Portal de Promotoras (/portal)...
+          </div>
+        }
+      >
+        <PromotoraRutaPortalView />
+      </Suspense>
+    );
+  }
+
   return (
-    <AppProvider>
-      <MainAppContent />
-    </AppProvider>
+    <TradeAuthGate>
+      {({ profile, isLocalDevWorkstation, onSignOut }) => (
+        <AppProvider verifiedProfile={profile}>
+          <MainAppContent
+            authProfile={profile}
+            isLocalDevWorkstation={isLocalDevWorkstation}
+            onSignOut={onSignOut}
+          />
+        </AppProvider>
+      )}
+    </TradeAuthGate>
   );
 }

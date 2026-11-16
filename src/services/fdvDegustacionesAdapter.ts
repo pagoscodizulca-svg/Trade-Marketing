@@ -54,11 +54,13 @@ export interface FdvLifecycleInput {
   todayYmd: string;
   aprobadoYmd?: string;
   manuallyArchived?: boolean;
+  enHistorial?: boolean;
 }
 
 export type CanonicalFdvEstado =
   | 'SOLICITADA'
   | 'APROBADA'
+  | 'NO_AUTORIZADA'
   | 'EN_CURSO'
   | 'COMPLETADA'
   | 'RECHAZADA'
@@ -66,9 +68,11 @@ export type CanonicalFdvEstado =
 
 export interface FdvLifecycleResolution {
   canonicalEstado: CanonicalFdvEstado;
-  uiStatus: 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO';
+  uiStatus: 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO' | 'NO_AUTORIZADA';
   isArchived: boolean;
+  enHistorial: boolean;
   isRejectedOrCancelled: boolean;
+  isNotAuthorized: boolean;
   isOverduePending: boolean;
   isEligibleForModule2: boolean;
 }
@@ -78,6 +82,7 @@ export interface FdvLifecycleResolution {
 // ============================================================================
 
 let surveysLeidoTradeColumnSupported: boolean | null = null;
+let surveysArchiveColumnsSupported: boolean | null = null;
 let cronogramaTableSupported: boolean | null = null;
 
 export function getSurveysLeidoTradeSupport(): boolean | null {
@@ -86,6 +91,14 @@ export function getSurveysLeidoTradeSupport(): boolean | null {
 
 export function setSurveysLeidoTradeSupport(supported: boolean): void {
   surveysLeidoTradeColumnSupported = supported;
+}
+
+export function getSurveysArchiveColumnsSupport(): boolean | null {
+  return surveysArchiveColumnsSupported;
+}
+
+export function setSurveysArchiveColumnsSupport(supported: boolean): void {
+  surveysArchiveColumnsSupported = supported;
 }
 
 export function getCronogramaTableSupport(): boolean | null {
@@ -98,18 +111,21 @@ export function setCronogramaTableSupport(supported: boolean): void {
 
 export function resetFdvSchemaCapabilitiesCache(): void {
   surveysLeidoTradeColumnSupported = null;
+  surveysArchiveColumnsSupported = null;
   cronogramaTableSupported = null;
 }
 
 export function isMissingColumnPostgrestError(errorOrMessage: unknown): boolean {
   if (!errorOrMessage) return false;
+  const pattern =
+    /leido_trade|visto_en_trade_at|en_historial|archivado_en|motivo_archivo|PGRST204|42703/i;
   if (typeof errorOrMessage === 'string') {
-    return /leido_trade|visto_en_trade_at|PGRST204|42703/i.test(errorOrMessage);
+    return pattern.test(errorOrMessage);
   }
   if (typeof errorOrMessage === 'object') {
     const err = errorOrMessage as { code?: string; message?: string; details?: string; hint?: string };
     const combined = `${err.code || ''} ${err.message || ''} ${err.details || ''} ${err.hint || ''}`;
-    return /leido_trade|visto_en_trade_at|PGRST204|42703/i.test(combined);
+    return pattern.test(combined);
   }
   return false;
 }
@@ -287,24 +303,29 @@ export function resolveFdvRequestLifecycle(input: FdvLifecycleInput): FdvLifecyc
   const aprobadoYmd = sanitizeFdvText(input.aprobadoYmd, 20);
   const isBeforeToday = Boolean(ymd && todayYmd && ymd < todayYmd);
   const manuallyArchived = Boolean(input.manuallyArchived);
+  const hasExplicitHistorialFlag = typeof input.enHistorial === 'boolean';
+  const explicitEnHistorial = Boolean(input.enHistorial) || manuallyArchived;
 
-  if (estadoToken === 'RECHAZADA') {
-    return {
-      canonicalEstado: 'RECHAZADA',
-      uiStatus: 'COMPLETADO',
-      isArchived: true,
-      isRejectedOrCancelled: true,
-      isOverduePending: false,
-      isEligibleForModule2: false,
-    };
-  }
+  const normalizedEstadoToken = estadoToken.replace(/\s+/g, '_');
 
-  if (estadoToken === 'CANCELADA') {
+  if (
+    normalizedEstadoToken === 'NO_AUTORIZADA' ||
+    normalizedEstadoToken === 'NO_AUTORIZADO' ||
+    normalizedEstadoToken === 'RECHAZADA' ||
+    normalizedEstadoToken === 'CANCELADA'
+  ) {
     return {
-      canonicalEstado: 'CANCELADA',
-      uiStatus: 'COMPLETADO',
+      canonicalEstado:
+        normalizedEstadoToken === 'RECHAZADA'
+          ? 'RECHAZADA'
+          : normalizedEstadoToken === 'CANCELADA'
+            ? 'CANCELADA'
+            : 'NO_AUTORIZADA',
+      uiStatus: 'NO_AUTORIZADA',
       isArchived: true,
+      enHistorial: true,
       isRejectedOrCancelled: true,
+      isNotAuthorized: true,
       isOverduePending: false,
       isEligibleForModule2: false,
     };
@@ -312,66 +333,104 @@ export function resolveFdvRequestLifecycle(input: FdvLifecycleInput): FdvLifecyc
 
   if (input.isFromSellerApp) {
     if (
-      estadoToken === 'COMPLETADA' ||
-      estadoToken === 'REALIZADA' ||
-      estadoToken === 'EJECUTADA'
+      normalizedEstadoToken === 'COMPLETADA' ||
+      normalizedEstadoToken === 'REALIZADA' ||
+      normalizedEstadoToken === 'EJECUTADA'
     ) {
+      const archived = hasExplicitHistorialFlag
+        ? explicitEnHistorial
+        : manuallyArchived || isBeforeToday;
       return {
         canonicalEstado: 'COMPLETADA',
         uiStatus: 'COMPLETADO',
-        isArchived: manuallyArchived || isBeforeToday,
+        isArchived: archived,
+        enHistorial: archived,
         isRejectedOrCancelled: false,
+        isNotAuthorized: false,
         isOverduePending: false,
         isEligibleForModule2: true,
       };
     }
 
-    if (estadoToken === 'EN_CURSO') {
+    if (normalizedEstadoToken === 'EN_CURSO') {
+      const archived = hasExplicitHistorialFlag
+        ? explicitEnHistorial
+        : manuallyArchived || isBeforeToday;
       return {
         canonicalEstado: 'EN_CURSO',
         uiStatus: 'EN_CURSO',
-        isArchived: manuallyArchived,
+        isArchived: archived,
+        enHistorial: archived,
         isRejectedOrCancelled: false,
+        isNotAuthorized: false,
         isOverduePending: false,
         isEligibleForModule2: true,
       };
     }
 
     if (
-      estadoToken === 'APROBADA' ||
-      estadoToken === 'ACEPTADA' ||
-      estadoToken === 'PROGRAMADA' ||
-      estadoToken === 'CONFIRMADA'
+      normalizedEstadoToken === 'APROBADA' ||
+      normalizedEstadoToken === 'AUTORIZADA' ||
+      normalizedEstadoToken === 'ACEPTADA' ||
+      normalizedEstadoToken === 'PROGRAMADA' ||
+      normalizedEstadoToken === 'CONFIRMADA'
     ) {
       const wasApprovedTodayOrLater = Boolean(aprobadoYmd && todayYmd && aprobadoYmd >= todayYmd);
+      const archived = hasExplicitHistorialFlag
+        ? explicitEnHistorial
+        : manuallyArchived || (isBeforeToday && !wasApprovedTodayOrLater);
       return {
         canonicalEstado: 'APROBADA',
         uiStatus: 'PROGRAMADO',
-        isArchived: manuallyArchived || (isBeforeToday && !wasApprovedTodayOrLater),
+        isArchived: archived,
+        enHistorial: archived,
         isRejectedOrCancelled: false,
+        isNotAuthorized: false,
         isOverduePending: false,
         isEligibleForModule2: true,
       };
     }
 
-    // Estado por defecto de una solicitud FDV ('SOLICITADA' / 'PENDIENTE' / vacío):
-    // Permanece SIEMPRE como PENDIENTE y visible en Cronograma Actual hasta decisión explícita de Trade Marketing.
+    // Regla Crítica (`America/Caracas`, UTC-4):
+    // Si pasó la fecha programada (`ymd < todayYmd`) sin haber sido autorizada,
+    // pasa automáticamente a la Pestaña de Historial con estado explícito `NO_AUTORIZADA`.
+    if (isBeforeToday) {
+      return {
+        canonicalEstado: 'NO_AUTORIZADA',
+        uiStatus: 'NO_AUTORIZADA',
+        isArchived: true,
+        enHistorial: true,
+        isRejectedOrCancelled: false,
+        isNotAuthorized: true,
+        isOverduePending: true,
+        isEligibleForModule2: false,
+      };
+    }
+
+    const archived = hasExplicitHistorialFlag ? explicitEnHistorial : manuallyArchived;
     return {
       canonicalEstado: 'SOLICITADA',
       uiStatus: 'PENDIENTE',
-      isArchived: manuallyArchived,
+      isArchived: archived,
+      enHistorial: archived,
       isRejectedOrCancelled: false,
-      isOverduePending: isBeforeToday,
+      isNotAuthorized: false,
+      isOverduePending: false,
       isEligibleForModule2: false,
     };
   }
 
   // Registros históricos de promotoras en campo (!isFromSellerApp)
+  const archived = hasExplicitHistorialFlag
+    ? explicitEnHistorial
+    : manuallyArchived || isBeforeToday;
   return {
     canonicalEstado: 'COMPLETADA',
     uiStatus: 'COMPLETADO',
-    isArchived: manuallyArchived || isBeforeToday,
+    isArchived: archived,
+    enHistorial: archived,
     isRejectedOrCancelled: false,
+    isNotAuthorized: false,
     isOverduePending: false,
     isEligibleForModule2: true,
   };
@@ -570,8 +629,10 @@ function scoreDegustacionSurveyRow(row: RawSupabaseSurvey, comments: Record<stri
     estadoUpper === 'EJECUTADA' ||
     estadoUpper === 'RECHAZADA' ||
     estadoUpper === 'CANCELADA';
+  const isArchivedInDb = row.en_historial === true || comments.en_historial === true;
   return (
     (!isVirtualFdvRenderSurveyId(row.id) ? 8 : 0) +
+    (isArchivedInDb ? 6 : 0) +
     (row.leido_trade === true || comments.leido_trade === true ? 4 : 0) +
     (hasDecision ? 4 : 0) +
     (comments.aprobadoEnTradeAt || comments.revertidoEnTradeAt ? 2 : 0) +
@@ -620,7 +681,7 @@ export function mergeSupabaseAndRenderDegustacionRows(
       continue;
     }
 
-    // Enriquecer metadatos faltantes en la fila de Supabase sin sobrescribir decisiones de Trade Marketing
+    // Enriquecer metadatos faltantes en la fila de Supabase sin sobrescribir decisiones ni archivado de Trade Marketing
     const ec = existing.comments;
     const existingEstado = sanitizeFdvText(ec.estado || ec.status, 40).toUpperCase();
     const renderEstado = sanitizeFdvText(rc.estado || rc.status, 40).toUpperCase();
@@ -628,6 +689,15 @@ export function mergeSupabaseAndRenderDegustacionRows(
     const shouldAdoptRenderRealizada =
       (existingEstado === '' || existingEstado === 'SOLICITADA' || existingEstado === 'APROBADA') &&
       renderEstado === 'REALIZADA';
+
+    const preservedEnHistorial =
+      existing.row.en_historial === true || ec.en_historial === true
+        ? true
+        : typeof existing.row.en_historial === 'boolean'
+          ? existing.row.en_historial
+          : typeof ec.en_historial === 'boolean'
+            ? ec.en_historial
+            : undefined;
 
     const enrichedComments: Record<string, any> = {
       ...rc,
@@ -641,6 +711,9 @@ export function mergeSupabaseAndRenderDegustacionRows(
       notasTradeMarketing: ec.notasTradeMarketing || rc.notasTradeMarketing || '',
       resultado: shouldAdoptRenderResultado ? rc.resultado : ec.resultado ?? null,
       estado: shouldAdoptRenderRealizada ? 'REALIZADA' : ec.estado || rc.estado || 'SOLICITADA',
+      ...(preservedEnHistorial !== undefined ? { en_historial: preservedEnHistorial } : {}),
+      ...(ec.archivado_en ? { archivado_en: ec.archivado_en } : {}),
+      ...(ec.motivo_archivo ? { motivo_archivo: ec.motivo_archivo } : {}),
     };
 
     byCanonicalKey.set(key, {
@@ -662,6 +735,8 @@ export function mergeSupabaseAndRenderDegustacionRows(
 // CONSULTAS PARAMETRIZADAS VÍA SDK OFICIAL `@supabase/supabase-js` + RENDER HTTPS
 // ============================================================================
 
+const SURVEYS_COLUMNS_WITH_ARCHIVE =
+  'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at,en_historial,archivado_en,motivo_archivo';
 const SURVEYS_COLUMNS_WITH_READ =
   'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at';
 const SURVEYS_COLUMNS_BASE =
@@ -684,16 +759,64 @@ export async function fetchDegustacionSurveysViaSdk(
   for (let page = 0; page < 5; page++) {
     const from = page * pageSize;
     const to = from + pageSize - 1;
+    const useArchiveCols =
+      surveysArchiveColumnsSupported !== false && surveysLeidoTradeColumnSupported !== false;
     const useReadCols = surveysLeidoTradeColumnSupported !== false;
+
+    const selectedCols = useArchiveCols
+      ? SURVEYS_COLUMNS_WITH_ARCHIVE
+      : useReadCols
+        ? SURVEYS_COLUMNS_WITH_READ
+        : SURVEYS_COLUMNS_BASE;
 
     const { data, error } = await client
       .from('surveys')
-      .select(useReadCols ? SURVEYS_COLUMNS_WITH_READ : SURVEYS_COLUMNS_BASE)
+      .select(selectedCols)
       .eq('type', 'Degustacion')
       .order('created_at', { ascending: false })
       .range(from, to);
 
     if (error) {
+      if (useArchiveCols && isMissingColumnPostgrestError(error)) {
+        surveysArchiveColumnsSupported = false;
+        const retryRead = await client
+          .from('surveys')
+          .select(SURVEYS_COLUMNS_WITH_READ)
+          .eq('type', 'Degustacion')
+          .order('created_at', { ascending: false })
+          .range(from, to);
+
+        if (!retryRead.error) {
+          if (surveysLeidoTradeColumnSupported === null) {
+            surveysLeidoTradeColumnSupported = true;
+          }
+          const rows = (retryRead.data || []) as unknown as RawSupabaseSurvey[];
+          collected.push(...rows);
+          if (rows.length < pageSize) break;
+          continue;
+        }
+
+        if (isMissingColumnPostgrestError(retryRead.error)) {
+          surveysLeidoTradeColumnSupported = false;
+          const retryBase = await client
+            .from('surveys')
+            .select(SURVEYS_COLUMNS_BASE)
+            .eq('type', 'Degustacion')
+            .order('created_at', { ascending: false })
+            .range(from, to);
+
+          if (retryBase.error) {
+            throw new Error(`Supabase SDK surveys(Degustacion) failed: ${retryBase.error.message}`);
+          }
+          const rows = (retryBase.data || []) as unknown as RawSupabaseSurvey[];
+          collected.push(...rows);
+          if (rows.length < pageSize) break;
+          continue;
+        }
+
+        throw new Error(`Supabase SDK surveys(Degustacion) failed: ${retryRead.error.message}`);
+      }
+
       if (useReadCols && isMissingColumnPostgrestError(error)) {
         surveysLeidoTradeColumnSupported = false;
         const retry = await client
@@ -714,7 +837,10 @@ export async function fetchDegustacionSurveysViaSdk(
       throw new Error(`Supabase SDK surveys(Degustacion) failed: ${error.message}`);
     }
 
-    if (useReadCols && surveysLeidoTradeColumnSupported === null) {
+    if (useArchiveCols && surveysArchiveColumnsSupported === null) {
+      surveysArchiveColumnsSupported = true;
+      surveysLeidoTradeColumnSupported = true;
+    } else if (useReadCols && surveysLeidoTradeColumnSupported === null) {
       surveysLeidoTradeColumnSupported = true;
     }
 
@@ -727,7 +853,8 @@ export async function fetchDegustacionSurveysViaSdk(
 }
 
 export async function fetchNonDegustacionSurveysViaSdk(
-  clientOverride?: SupabaseClient | null
+  clientOverride?: SupabaseClient | null,
+  options?: { includeConsumerSurveys?: boolean }
 ): Promise<RawSupabaseSurvey[]> {
   if (!clientOverride) {
     assertSupabaseConfigured();
@@ -737,10 +864,14 @@ export async function fetchNonDegustacionSurveysViaSdk(
     throw new Error('Cliente oficial de Supabase no disponible.');
   }
 
-  const { data, error } = await client
-    .from('surveys')
-    .select(SURVEYS_COLUMNS_BASE)
-    .neq('type', 'Degustacion')
+  let baseQuery = client.from('surveys').select(SURVEYS_COLUMNS_BASE);
+  if (options?.includeConsumerSurveys === false) {
+    baseQuery = baseQuery.eq('type', 'Merchandising');
+  } else {
+    baseQuery = baseQuery.neq('type', 'Degustacion');
+  }
+
+  const { data, error } = await baseQuery
     .order('date', { ascending: false })
     .limit(1000);
 

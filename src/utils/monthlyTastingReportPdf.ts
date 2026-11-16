@@ -370,9 +370,16 @@ function extractNormalizedDegustacion(item: TastingScheduleItem, todayYmd: strin
       .trim() ||
     'SIN VENDEDOR ASIGNADO';
 
-  const rawEstado = String(c.estado || c.status || '').trim().toUpperCase();
+  const rawEstado = String(c.estado || c.status || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '_');
   const isCancelled =
-    rawEstado === 'RECHAZADA' || rawEstado === 'CANCELADA' || rawEstado === 'CANCELLED';
+    rawEstado === 'NO_AUTORIZADA' ||
+    rawEstado === 'RECHAZADA' ||
+    rawEstado === 'CANCELADA' ||
+    rawEstado === 'CANCELLED' ||
+    item.status === 'NO_AUTORIZADA';
   const itemDateYmd = String(c.date || item.date || '').slice(0, 10);
   const isBeforeToday = /^\d{4}-\d{2}-\d{2}$/.test(itemDateYmd) && itemDateYmd < todayYmd;
   const isArchived = Boolean(item.isArchived) || isBeforeToday || item.status === 'COMPLETADO' || isCancelled;

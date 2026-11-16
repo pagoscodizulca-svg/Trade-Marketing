@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { normalizeExcelDate } from './excelDateNormalizer';
+import {
+  extractCaracasWallClockParts,
+  MAX_SAFE_TIMEOUT_MS,
+  resolveCaracasLocalMidnightUtcMs,
+  resolveTastingEventCaracasYmd,
+} from './caracasWeekCycle';
 
 // ============================================================================
 // MOTOR AUTOMÁTICO DE FECHAS Y SEMANAS EN TIEMPO REAL (VENEZUELA UTC-4)
@@ -106,10 +111,9 @@ export interface LiveVenezuelaClock {
   currentWeek: RollingWeekWindow;
 }
 
-/** Obtiene la fecha YYYY-MM-DD actual en hora oficial de Venezuela (UTC-4). */
+/** Obtiene la fecha YYYY-MM-DD actual en zona horaria IANA oficial `America/Caracas` (UTC-4). */
 export function getLiveVenezuelaYmd(now: Date = new Date()): string {
-  const ve = new Date(now.getTime() - 4 * 60 * 60 * 1000);
-  return ve.toISOString().slice(0, 10);
+  return extractCaracasWallClockParts(now).ymd;
 }
 
 /** Calcula el número de semana ISO-8601 (Lunes a Domingo, 1..53) y su año ISO. */
@@ -137,7 +141,7 @@ export function getDynamicWeekNumberInMonth(
 ): number {
   const safeDay = Math.max(1, Math.min(31, Math.floor(day)));
   if (typeof year === 'number' && typeof monthIndex === 'number' && year > 1990) {
-    const firstDowSun0 = new Date(year, monthIndex, 1).getDay();
+    const firstDowSun0 = new Date(Date.UTC(year, monthIndex, 1, 12, 0, 0)).getUTCDay();
     const firstDowMon0 = (firstDowSun0 + 6) % 7; // Lunes=0 .. Domingo=6
     const firstSunday = 7 - firstDowMon0; // Día 1..7 del primer domingo del mes
     if (safeDay <= firstSunday) return 1;
@@ -155,11 +159,11 @@ export function getDynamicWeekNumberInMonth(
  * actualizando automáticamente los rangos de días cuando cambia el mes o el año.
  */
 export function getMonthCalendarWeeks(year: number, monthIndex: number): MonthCalendarWeekDef[] {
-  const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+  const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0, 12, 0, 0)).getUTCDate();
   const mm = String(monthIndex + 1).padStart(2, '0');
   const mShort = MONTH_NAMES_SHORT_ES[monthIndex] || 'Mes';
 
-  const firstDowSun0 = new Date(year, monthIndex, 1).getDay();
+  const firstDowSun0 = new Date(Date.UTC(year, monthIndex, 1, 12, 0, 0)).getUTCDay();
   const firstDowMon0 = (firstDowSun0 + 6) % 7; // Lunes=0 .. Domingo=6
   const firstSunday = Math.min(lastDay, 7 - firstDowMon0);
 
@@ -298,8 +302,8 @@ export function buildLiveVenezuelaClock(todayYmd: string): LiveVenezuelaClock {
   const dd = String(day).padStart(2, '0');
   const yearMonth = `${year}-${mm}`;
 
-  const prevMonthDate = new Date(year, monthIndex - 1, 1);
-  const prevYearMonth = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+  const prevMonthDate = new Date(Date.UTC(year, monthIndex - 1, 1, 12, 0, 0));
+  const prevYearMonth = `${prevMonthDate.getUTCFullYear()}-${String(prevMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
 
   const { isoWeekNumber, isoWeekYear } = getIsoWeekInfo(todayYmd);
   const monthWeekNumber = getDynamicWeekNumberInMonth(day, year, monthIndex);
@@ -327,17 +331,43 @@ export function buildLiveVenezuelaClock(todayYmd: string): LiveVenezuelaClock {
 }
 
 /**
- * Hook Reactivo de Calendario Automático (America/Caracas UTC-4).
- * Revisa el reloj cada 30 segundos y al enfocar la ventana; si cambia el día o inicia una nueva semana,
- * actualiza automáticamente todas las fechas, semanas activas y períodos sin recargar la página.
+ * Hook Reactivo de Calendario Automático (`America/Caracas` UTC-4).
+ * Programa un temporizador exacto al próximo cambio de día/semana en `America/Caracas`
+ * (`Lunes 00:00:00.000` para corte semanal ISO), además de revisar cada 30 segundos y al
+ * enfocar/mostrar la pestaña, garantizando transición automática sin recargar la página.
  */
 export function useLiveVenezuelaClock(): LiveVenezuelaClock {
   const [todayYmd, setTodayYmd] = useState<string>(() => getLiveVenezuelaYmd());
 
   useEffect(() => {
+    let midnightTimeoutId: number | undefined;
+
+    const scheduleNextCaracasMidnightTick = () => {
+      if (midnightTimeoutId !== undefined) {
+        window.clearTimeout(midnightTimeoutId);
+      }
+      const currentYmd = getLiveVenezuelaYmd();
+      const [y, m, d] = currentYmd.split('-').map(Number);
+      const nextDayUtc = new Date(Date.UTC(y, m - 1, d + 1));
+      const nextYmd = `${nextDayUtc.getUTCFullYear()}-${String(
+        nextDayUtc.getUTCMonth() + 1
+      ).padStart(2, '0')}-${String(nextDayUtc.getUTCDate()).padStart(2, '0')}`;
+      const nextMidnightUtcMs = resolveCaracasLocalMidnightUtcMs(nextYmd);
+      const waitMs = Math.min(
+        MAX_SAFE_TIMEOUT_MS,
+        Math.max(50, nextMidnightUtcMs - Date.now() + 30)
+      );
+      midnightTimeoutId = window.setTimeout(() => {
+        const refreshed = getLiveVenezuelaYmd();
+        setTodayYmd((prev) => (prev !== refreshed ? refreshed : prev));
+        scheduleNextCaracasMidnightTick();
+      }, waitMs);
+    };
+
     const syncDateIfChanged = () => {
       const latest = getLiveVenezuelaYmd();
       setTodayYmd((prev) => (prev !== latest ? latest : prev));
+      scheduleNextCaracasMidnightTick();
     };
 
     syncDateIfChanged();
@@ -352,6 +382,9 @@ export function useLiveVenezuelaClock(): LiveVenezuelaClock {
     document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
+      if (midnightTimeoutId !== undefined) {
+        window.clearTimeout(midnightTimeoutId);
+      }
       window.clearInterval(intervalId);
       window.removeEventListener('focus', syncDateIfChanged);
       document.removeEventListener('visibilitychange', handleVisibility);
@@ -361,7 +394,11 @@ export function useLiveVenezuelaClock(): LiveVenezuelaClock {
   return useMemo(() => buildLiveVenezuelaClock(todayYmd), [todayYmd]);
 }
 
-/** Normaliza cualquier fecha de registro (Excel serial, letras ES/EN, dd-mm-aaaa, dd/mm/aaaa o ISO) a YYYY-MM-DD. */
+/**
+ * Normaliza cualquier fecha de registro (Excel serial, letras ES/EN, dd-mm-aaaa, dd/mm/aaaa o ISO) a YYYY-MM-DD
+ * evaluando explícitamente la zona oficial `America/Caracas` (UTC-4) mediante `Intl.DateTimeFormat`
+ * en timestamps reales con hora/offset y preservando fechas calendario puras sin restar 1 día.
+ */
 export function normalizeAnyDateToYmd(raw?: unknown): string | null {
-  return normalizeExcelDate(raw).fechaIso;
+  return resolveTastingEventCaracasYmd(raw);
 }

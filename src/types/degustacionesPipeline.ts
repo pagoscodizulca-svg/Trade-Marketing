@@ -16,6 +16,7 @@ export type MetodoExtraccionArchivo = 'TABULAR_DETERMINISTA' | 'IA_ESTRUCTURADA'
 export type EstadoCronogramaDegustacion =
   | 'PENDIENTE_APROBACION'
   | 'APROBADA'
+  | 'NO_AUTORIZADA'
   | 'RECHAZADA'
   | 'CANCELADA'
   | 'EN_CURSO'
@@ -137,6 +138,9 @@ export interface CronogramaDegustacionRecord {
   rechazado_por: string | null;
   fecha_rechazo: string | null;
   motivo_rechazo: string | null;
+  en_historial?: boolean;
+  archivado_en?: string | null;
+  motivo_archivo?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -180,4 +184,18 @@ export interface ResultadoVolcadoLoteCronograma {
   total_insertadas: number;
   total_duplicadas: number;
   ids_insertados: string[];
+}
+
+/**
+ * Respuesta atómica de la RPC `public.asignar_degustacion_aceptada_a_ruta`.
+ */
+export interface ResultadoAsignacionRutaDegustacion {
+  ok: boolean;
+  cronograma_id: string;
+  ruta_id: string | null;
+  promotora_id: string;
+  promotora_nombre: string;
+  promotora_email?: string;
+  estado_ruta: EstadoRutaPromotora | null;
+  ruta: RutaPromotoraRecord | null;
 }
