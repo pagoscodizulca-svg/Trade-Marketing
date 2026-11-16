@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Copy,
   Edit3,
   Eye,
   EyeOff,
@@ -17,6 +18,7 @@ import {
   Shield,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   UserCheck,
   UserPlus,
   UserX,
@@ -27,9 +29,12 @@ import { useApp } from '../../context/AppContext';
 import {
   MANAGED_USER_ROLES,
   MANAGED_USER_ROLE_LABELS,
+  MIN_SUPABASE_PASSWORD_LENGTH,
   createManagedUser,
+  generateSecureInitialPassword,
   listManagedUsers,
   listUserManagementAudit,
+  normalizeManagedUserEmail,
   updateManagedUserAccess,
   type ManagedUserProfile,
   type ManagedUserRole,
@@ -186,6 +191,7 @@ export const UserManagementView: React.FC = () => {
   const [createMustChangePassword, setCreateMustChangePassword] = useState<boolean>(false);
   const [createSubmitting, setCreateSubmitting] = useState<boolean>(false);
   const [createModalError, setCreateModalError] = useState<string | null>(null);
+  const [copiedCredentials, setCopiedCredentials] = useState<boolean>(false);
 
   const loadAllData = useCallback(async (isSilentRefresh = false) => {
     if (isSilentRefresh) {
@@ -413,18 +419,93 @@ export const UserManagementView: React.FC = () => {
     setCreateRole('vendedor');
     setCreateMustChangePassword(false);
     setCreateModalError(null);
+    setCopiedCredentials(false);
+  };
+
+  const handleGenerateSecurePassword = () => {
+    const generated = generateSecureInitialPassword(12);
+    setCreatePassword(generated);
+    setShowCreatePassword(true);
+    setCreateModalError(null);
+    setCopiedCredentials(false);
+  };
+
+  const handleCopyCredentials = async () => {
+    const normalizedEmail = normalizeManagedUserEmail(createEmail);
+    setCreateEmail(normalizedEmail);
+
+    if (!normalizedEmail) {
+      setCreateModalError('Ingresa primero el correo electrónico antes de copiar los accesos.');
+      return;
+    }
+    if (createPassword.trim().length === 0 || createPassword.length < MIN_SUPABASE_PASSWORD_LENGTH) {
+      setCreateModalError(
+        `Ingresa o genera una contraseña de al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres antes de copiar.`
+      );
+      return;
+    }
+
+    setCreateModalError(null);
+    const shareText = [
+      'CODIZULCA C.A. — Accesos Corporativos',
+      `Correo: ${normalizedEmail}`,
+      `Contraseña inicial: ${createPassword}`,
+    ].join('\n');
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareText);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = shareText;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+
+    setCopiedCredentials(true);
+    window.setTimeout(() => setCopiedCredentials(false), 2600);
   };
 
   const handleCreateUserSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (createSubmitting) return;
     setCreateModalError(null);
+
+    const normalizedEmail = normalizeManagedUserEmail(createEmail);
+    setCreateEmail(normalizedEmail);
+
+    if (createFullName.trim().length < 2) {
+      setCreateModalError('El nombre completo es obligatorio (mínimo 2 caracteres).');
+      return;
+    }
+    if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedEmail)) {
+      setCreateModalError('Ingresa un correo electrónico corporativo válido.');
+      return;
+    }
+    if (createPassword.trim().length === 0 || createPassword.length < MIN_SUPABASE_PASSWORD_LENGTH) {
+      setCreateModalError(
+        `La contraseña inicial es demasiado corta: debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`
+      );
+      return;
+    }
+
     setCreateSubmitting(true);
 
     try {
       const created = await createManagedUser({
         fullName: createFullName,
-        email: createEmail,
+        email: normalizedEmail,
         password: createPassword,
         role: createRole,
         mustChangePassword: createMustChangePassword,
@@ -484,6 +565,7 @@ export const UserManagementView: React.FC = () => {
 
           <button
             type="button"
+            data-testid="btn-new-user"
             onClick={() => {
               resetCreateModal();
               setIsCreateModalOpen(true);
@@ -491,7 +573,7 @@ export const UserManagementView: React.FC = () => {
             className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
           >
             <UserPlus className="w-3.5 h-3.5" />
-            <span>Nuevo Usuario</span>
+            <span>+ Nuevo Usuario</span>
           </button>
         </div>
       </div>
@@ -1102,21 +1184,29 @@ export const UserManagementView: React.FC = () => {
               </div>
 
               {createModalError && (
-                <div className="rounded-xl bg-red-950/50 border border-red-500/35 px-3.5 py-2.5 text-xs text-red-200 flex items-center gap-2">
+                <div
+                  role="alert"
+                  data-testid="create-user-error"
+                  className="rounded-xl bg-red-950/50 border border-red-500/35 px-3.5 py-2.5 text-xs text-red-200 flex items-center gap-2"
+                >
                   <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
                   <span>{createModalError}</span>
                 </div>
               )}
 
-              <form onSubmit={handleCreateUserSubmit} className="space-y-3.5">
+              <form onSubmit={handleCreateUserSubmit} noValidate className="space-y-3.5">
+                {/* 1. Nombre completo */}
                 <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  <label
+                    htmlFor="create-user-fullname"
+                    className="block text-xs font-bold text-zinc-300 mb-1"
+                  >
                     Nombre completo
                   </label>
                   <input
+                    id="create-user-fullname"
                     type="text"
                     required
-                    minLength={2}
                     maxLength={160}
                     value={createFullName}
                     onChange={(e) => setCreateFullName(e.target.value)}
@@ -1125,35 +1215,78 @@ export const UserManagementView: React.FC = () => {
                   />
                 </div>
 
+                {/* 2. Correo electrónico (siempre normalizado .trim().toLowerCase()) */}
                 <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  <label
+                    htmlFor="create-user-email"
+                    className="block text-xs font-bold text-zinc-300 mb-1"
+                  >
                     Correo electrónico
                   </label>
                   <input
+                    id="create-user-email"
                     type="email"
                     required
                     value={createEmail}
-                    onChange={(e) => setCreateEmail(e.target.value)}
+                    onChange={(e) => {
+                      setCreateEmail(e.target.value);
+                      setCopiedCredentials(false);
+                    }}
+                    onBlur={() => setCreateEmail((prev) => normalizeManagedUserEmail(prev))}
                     placeholder="usuario@codizulca.com"
                     className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono focus:outline-none focus:border-red-500"
                   />
                 </div>
 
+                {/* 3. Rol inicial (por defecto 'vendedor') */}
                 <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Contraseña inicial
+                  <label
+                    htmlFor="create-user-role"
+                    className="block text-xs font-bold text-zinc-300 mb-1"
+                  >
+                    Rol inicial
                   </label>
+                  <select
+                    id="create-user-role"
+                    value={createRole}
+                    onChange={(e) => setCreateRole(e.target.value as ManagedUserRole)}
+                    className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
+                  >
+                    <option value="vendedor">Vendedor (vendedor)</option>
+                    <option value="coordinacion">Coordinación (coordinacion)</option>
+                    <option value="super_admin">Administrador General (super_admin)</option>
+                  </select>
+                </div>
+
+                {/* 4. Contraseña inicial (>= 6 caracteres + Generar clave segura + Copiar accesos) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="create-user-password"
+                      className="block text-xs font-bold text-zinc-300"
+                    >
+                      Contraseña inicial
+                    </label>
+                    <span className="text-[10px] font-mono text-zinc-500">
+                      Mínimo {MIN_SUPABASE_PASSWORD_LENGTH} caracteres
+                    </span>
+                  </div>
+
                   <div className="relative">
                     <KeyRound className="w-3.5 h-3.5 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
+                      id="create-user-password"
                       type={showCreatePassword ? 'text' : 'password'}
                       required
-                      minLength={8}
+                      minLength={MIN_SUPABASE_PASSWORD_LENGTH}
                       autoComplete="new-password"
                       value={createPassword}
-                      onChange={(e) => setCreatePassword(e.target.value)}
-                      placeholder="Mínimo 8 caracteres"
-                      className="w-full pl-9 pr-9 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500"
+                      onChange={(e) => {
+                        setCreatePassword(e.target.value);
+                        setCopiedCredentials(false);
+                      }}
+                      placeholder={`Mínimo ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres`}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono focus:outline-none focus:border-red-500"
                     />
                     <button
                       type="button"
@@ -1170,28 +1303,54 @@ export const UserManagementView: React.FC = () => {
                       )}
                     </button>
                   </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      data-testid="btn-generate-password"
+                      onClick={handleGenerateSecurePassword}
+                      className="flex-1 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-[11px] font-semibold text-zinc-200 inline-flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-red-400" />
+                      <span>Generar clave segura</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid="btn-copy-credentials"
+                      onClick={() => void handleCopyCredentials()}
+                      className={`flex-1 px-3 py-1.5 rounded-lg border text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        copiedCredentials
+                          ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-200'
+                          : 'bg-zinc-900 hover:bg-zinc-800 border-white/10 text-zinc-200'
+                      }`}
+                    >
+                      {copiedCredentials ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>¡Accesos copiados!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5 text-zinc-400" />
+                          <span>Copiar accesos</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">Rol</label>
-                  <select
-                    value={createRole}
-                    onChange={(e) => setCreateRole(e.target.value as ManagedUserRole)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
-                  >
-                    <option value="vendedor">Vendedor (vendedor)</option>
-                    <option value="coordinacion">Coordinación (coordinacion)</option>
-                    <option value="super_admin">Administrador General (super_admin)</option>
-                  </select>
-                </div>
-
-                <label className="flex items-center justify-between gap-3 rounded-xl bg-black/60 border border-white/[0.07] px-3.5 py-2.5 cursor-pointer">
-                  <span className="text-xs text-zinc-300">Pedir cambio de clave al iniciar</span>
+                {/* 5. Casilla opcional (desmarcada false por defecto) */}
+                <label className="flex items-start justify-between gap-3 rounded-xl bg-black/60 border border-white/[0.07] px-3.5 py-2.5 cursor-pointer">
+                  <span className="text-xs text-zinc-300 leading-snug">
+                    Solicitar cambio de contraseña en el primer inicio de sesión
+                  </span>
                   <input
+                    id="create-user-must-change-password"
                     type="checkbox"
                     checked={createMustChangePassword}
                     onChange={(e) => setCreateMustChangePassword(e.target.checked)}
-                    className="h-4 w-4 accent-red-600 cursor-pointer"
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-red-600 cursor-pointer"
                   />
                 </label>
 
@@ -1206,6 +1365,7 @@ export const UserManagementView: React.FC = () => {
                   </button>
                   <button
                     type="submit"
+                    data-testid="btn-submit-create-user"
                     disabled={createSubmitting}
                     className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
@@ -1221,3 +1381,5 @@ export const UserManagementView: React.FC = () => {
     </div>
   );
 };
+
+export const UserManagementPage = UserManagementView;

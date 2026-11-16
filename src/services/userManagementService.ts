@@ -9,7 +9,9 @@ import {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const MIN_PASSWORD_LENGTH = 8;
+
+export const MIN_SUPABASE_PASSWORD_LENGTH = 6;
+export const ISOLATED_SIGNUP_STORAGE_KEY = 'codizulca-isolated-signup';
 
 export type ManagedUserRole = 'super_admin' | 'coordinacion' | 'vendedor';
 
@@ -95,6 +97,55 @@ export function normalizeManagedUserEmail(rawEmail: string): string {
   return String(rawEmail ?? '').trim().toLowerCase();
 }
 
+function getCryptoRandomInt(maxExclusive: number): number {
+  if (maxExclusive <= 1) return 0;
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj?.getRandomValues) {
+    const maxUnbiased = Math.floor(0x100000000 / maxExclusive) * maxExclusive;
+    const buf = new Uint32Array(1);
+    let value = 0;
+    do {
+      cryptoObj.getRandomValues(buf);
+      value = buf[0] ?? 0;
+    } while (value >= maxUnbiased);
+    return value % maxExclusive;
+  }
+  return Math.floor(Math.random() * maxExclusive);
+}
+
+/**
+ * Genera una contraseña inicial criptográficamente aleatoria compatible con Supabase Auth
+ * (mínimo 6 caracteres; por defecto 12 caracteres sin glifos ambiguos como 0/O o l/1).
+ */
+export function generateSecureInitialPassword(length = 12): string {
+  const safeLength = Math.max(MIN_SUPABASE_PASSWORD_LENGTH, Math.min(Math.trunc(length) || 12, 32));
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%&*+-=';
+  const all = upper + lower + digits + symbols;
+
+  const chars: string[] = [
+    upper[getCryptoRandomInt(upper.length)]!,
+    lower[getCryptoRandomInt(lower.length)]!,
+    digits[getCryptoRandomInt(digits.length)]!,
+    symbols[getCryptoRandomInt(symbols.length)]!,
+  ];
+
+  while (chars.length < safeLength) {
+    chars.push(all[getCryptoRandomInt(all.length)]!);
+  }
+
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = getCryptoRandomInt(i + 1);
+    const tmp = chars[i]!;
+    chars[i] = chars[j]!;
+    chars[j] = tmp;
+  }
+
+  return chars.join('');
+}
+
 function validateFullName(rawFullName: string): string {
   const clean = String(rawFullName ?? '').trim().replace(/\s+/g, ' ');
   if (clean.length < 2 || clean.length > 160) {
@@ -163,8 +214,9 @@ function mapAuditRow(row: RawAuditRow): UserManagementAuditEntry {
 
 function formatSupabaseRpcError(error: { message?: string; code?: string } | null, fallback: string): string {
   const msg = String(error?.message ?? '').trim();
+  const code = String(error?.code ?? '').trim().toLowerCase();
   if (!msg) return fallback;
-  if (/acceso denegado/i.test(msg) || error?.code === '42501') {
+  if (/acceso denegado/i.test(msg) || code === '42501') {
     return 'Acceso denegado: esta acción es exclusiva del Administrador General activo.';
   }
   if (/anti auto-bloqueo/i.test(msg)) {
@@ -173,31 +225,49 @@ function formatSupabaseRpcError(error: { message?: string; code?: string } | nul
   if (/al menos un usuario super_admin activo|cero usuarios super_admin/i.test(msg)) {
     return 'Operación bloqueada: el sistema debe conservar al menos un Administrador General activo.';
   }
-  if (/already registered|user already exists/i.test(msg)) {
-    return 'Ya existe un usuario registrado con ese correo electrónico.';
+  if (
+    /already registered|user already exists|already been registered/i.test(msg) ||
+    code === 'user_already_exists' ||
+    code === 'email_exists'
+  ) {
+    return 'Este correo electrónico ya está registrado en el sistema.';
+  }
+  if (
+    /at least 6 characters|password is too short|weak_password|password should be at least/i.test(
+      msg
+    ) ||
+    code === 'weak_password'
+  ) {
+    return `La contraseña inicial es demasiado corta: debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`;
+  }
+  if (/invalid email|unable to validate email/i.test(msg)) {
+    return 'Ingresa un correo electrónico corporativo válido.';
+  }
+  if (/rate limit|too many requests/i.test(msg) || code === 'over_email_send_rate_limit') {
+    return 'Se alcanzó el límite temporal de solicitudes en Supabase Auth. Espera unos segundos e inténtalo nuevamente.';
   }
   return msg;
 }
 
 /**
- * Crea un cliente público efímero estrictamente en memoria (sin persistencia en localStorage
- * ni auto-refresh) usando únicamente la llave pública validada por `assertSupabaseConfigured()`.
- * Garantiza que `auth.signUp()` no reemplace la sesión activa del `super_admin`.
+ * Instancia un cliente aislado estrictamente en memoria con las variables públicas estándar
+ * (`persistSession: false`, `autoRefreshToken: false`, `detectSessionInUrl: false`,
+ * `storageKey: 'codizulca-isolated-signup'`) para que `auth.signUp()` jamás cierre ni
+ * reemplace la sesión activa del `super_admin`.
  */
-function createEphemeralPublicSignupClient(): SupabaseClient {
+function createIsolatedSignupClient(): SupabaseClient {
   assertSupabaseConfigured();
-  const ephemeralKey = `codizulca.ephemeral.signup.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
 
   return createClient(SUPABASE_PROJECT_URL, SUPABASE_ANON_KEY, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
       detectSessionInUrl: false,
-      storageKey: ephemeralKey,
+      storageKey: ISOLATED_SIGNUP_STORAGE_KEY,
       storage: {
         getItem: () => null,
         setItem: () => {
-          // Intencionalmente vacío: evita persistir cualquier token del nuevo usuario
+          // Almacenamiento aislado en memoria: nunca escribe en localStorage
         },
         removeItem: () => {
           // Intencionalmente vacío
@@ -279,11 +349,11 @@ export async function listManagedUsers(): Promise<ManagedUserProfile[]> {
 }
 
 /**
- * Crea un usuario activo y confirmado de inmediato sin requerir verificación por correo
- * ni usar llaves administrativas secretas en frontend:
- *  1. Registra la identidad en `auth.users` con un cliente público efímero sin almacenamiento.
- *  2. Sella `email_confirmed_at`, crea/actualiza `public.profiles` y audita el alta mediante
- *     la RPC `public.admin_finalize_created_user` autenticada con la sesión del `super_admin`.
+ * Crea un usuario activo y confirmado de inmediato en dos pasos seguros:
+ *  - Paso A: Registra únicamente `{ email, password }` en Auth mediante `isolatedClient`
+ *    (sin confiar en `user_metadata` ni tocar la sesión activa del `super_admin`).
+ *  - Paso B: Invoca `public.admin_finalize_created_user` con el cliente principal autenticado
+ *    para fijar nombre, rol real, confirmación inmediata y `must_change_password`.
  */
 export async function createManagedUser(
   input: CreateManagedUserInput
@@ -296,23 +366,19 @@ export async function createManagedUser(
   const password = String(input.password ?? '');
   const mustChangePassword = input.mustChangePassword === true;
 
-  if (password.trim().length < MIN_PASSWORD_LENGTH) {
+  if (password.trim().length === 0 || password.length < MIN_SUPABASE_PASSWORD_LENGTH) {
     throw new Error(
-      `La contraseña inicial debe tener al menos ${MIN_PASSWORD_LENGTH} caracteres.`
+      `La contraseña inicial es demasiado corta: debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`
     );
   }
 
-  const ephemeralClient = createEphemeralPublicSignupClient();
+  const isolatedClient = createIsolatedSignupClient();
 
   try {
-    const { data: signUpData, error: signUpError } = await ephemeralClient.auth.signUp({
+    // Paso A: Registro aislado en Auth sin user_metadata privilegiado
+    const { data: signUpData, error: signUpError } = await isolatedClient.auth.signUp({
       email,
       password,
-      options: {
-        data: {
-          full_name: fullName,
-        },
-      },
     });
 
     if (signUpError) {
@@ -329,9 +395,10 @@ export async function createManagedUser(
     // Cuando la confirmación de correo está activa en Supabase, un email ya existente
     // retorna identities=[] sin error explícito para prevenir enumeración pública.
     if (Array.isArray(createdUser.identities) && createdUser.identities.length === 0) {
-      throw new Error('Ya existe un usuario registrado con ese correo electrónico.');
+      throw new Error('Este correo electrónico ya está registrado en el sistema.');
     }
 
+    // Paso B: Cliente principal autenticado como super_admin finaliza perfil, rol y confirmación
     const adminClient = getSupabaseClient();
     const { data: rpcRows, error: rpcError } = await adminClient.rpc(
       'admin_finalize_created_user',
@@ -359,8 +426,8 @@ export async function createManagedUser(
 
     return mapProfileRow(row);
   } finally {
-    await ephemeralClient.auth.signOut({ scope: 'local' }).catch(() => {
-      // Limpieza local silenciosa de la instancia efímera en memoria
+    await isolatedClient.auth.signOut({ scope: 'local' }).catch(() => {
+      // Limpieza local silenciosa de la instancia aislada en memoria
     });
   }
 }
@@ -455,9 +522,9 @@ export async function listUserManagementAudit(
 export async function completeOwnPasswordChange(newPassword: string): Promise<void> {
   assertSupabaseConfigured();
   const cleanPassword = String(newPassword ?? '');
-  if (cleanPassword.trim().length < MIN_PASSWORD_LENGTH) {
+  if (cleanPassword.trim().length === 0 || cleanPassword.length < MIN_SUPABASE_PASSWORD_LENGTH) {
     throw new Error(
-      `La nueva contraseña debe tener al menos ${MIN_PASSWORD_LENGTH} caracteres.`
+      `La nueva contraseña debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`
     );
   }
 

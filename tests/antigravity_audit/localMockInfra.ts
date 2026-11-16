@@ -849,6 +849,14 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
       const bodyBuf = await readBodyBuffer(req);
       const body = JSON.parse(bodyBuf.toString('utf8') || '{}') as Record<string, any>;
       const email = String(body.email || '').trim().toLowerCase();
+      const rawPwd = String(body.password || '');
+      if (rawPwd.trim().length === 0 || rawPwd.length < 6) {
+        sendJson(res, 422, {
+          code: 'weak_password',
+          message: 'Password should be at least 6 characters.',
+        });
+        return;
+      }
       const duplicate = Array.from(authUsersById.values()).some(
         (u) => u.email.toLowerCase() === email
       ) || (tables.profiles || []).some((p) => String(p.email || '').toLowerCase() === email);
