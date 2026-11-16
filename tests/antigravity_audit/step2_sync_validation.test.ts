@@ -179,7 +179,12 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
         assignedStore: 'SUPERMERCADO FIORELLA (NORTE)',
         address: 'MARACAIBO NORTE',
         phone: '04141234567',
-        photoBase64: '',
+        password: '',
+        shift: 'MAÑANA',
+        tastingCompleted: 0,
+        salesAssisted: 0,
+        activationsCount: 0,
+        totalUnits: 0,
       },
     ]);
 
@@ -486,6 +491,8 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
     mock.faultInjection.artificialDelayMs = 18; // Simula RTT realista de red (18ms) para traslape concurrente
 
     const payload = {
+      fechaSolicitud: '16/11/2026',
+      fechaIso: '2026-11-16',
       dirigidoA: 'CONTRALORÍA',
       paraSerUtilizado: 'OPERATIVO DEGUSTACIÓN CONCURRENTE',
       observacion: 'PRUEBA DE CONDICIÓN DE CARRERA',

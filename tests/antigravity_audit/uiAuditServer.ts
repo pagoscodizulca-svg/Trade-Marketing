@@ -63,19 +63,9 @@ async function startIsolatedUiAuditServer() {
   process.env.SUPABASE_SERVICE_ROLE_KEY = MOCK_SERVICE_ROLE_KEY;
   process.env.CRON_SECRET = MOCK_CRON_SECRET;
 
-  // Create isolated Vite envDir so root .env.local is NEVER read by Vite
-  const isolatedEnvDir = path.resolve('tests/antigravity_audit/env_isolated');
-  fs.mkdirSync(isolatedEnvDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(isolatedEnvDir, '.env'),
-    [
-      `VITE_SUPABASE_URL=${mock.baseUrl}`,
-      `VITE_SUPABASE_ANON_KEY=${MOCK_PUBLIC_ANON_KEY}`,
-      `VITE_SUPABASE_MASTER_URL=`,
-      `VITE_SUPABASE_MASTER_ANON_KEY=`,
-    ].join('\n'),
-    'utf8'
-  );
+  // Use an empty directory as Vite envDir + inline `define` so ZERO .env* files are read or written
+  const isolatedEmptyDir = path.resolve('tests/antigravity_audit/vite_empty_root');
+  fs.mkdirSync(isolatedEmptyDir, { recursive: true });
 
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -138,7 +128,13 @@ async function startIsolatedUiAuditServer() {
 </script>`;
 
   const vite = await createViteServer({
-    envDir: isolatedEnvDir,
+    envDir: isolatedEmptyDir,
+    define: {
+      'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(mock.baseUrl),
+      'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(MOCK_PUBLIC_ANON_KEY),
+      'import.meta.env.VITE_SUPABASE_MASTER_URL': JSON.stringify(''),
+      'import.meta.env.VITE_SUPABASE_MASTER_ANON_KEY': JSON.stringify(''),
+    },
     server: { middlewareMode: true },
     appType: 'spa',
     plugins: [

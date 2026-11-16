@@ -5,6 +5,7 @@
 
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { Calendar, LogOut, MapPin } from 'lucide-react';
+import { RoleGuard } from './components/auth/RoleGuard';
 import { TradeAuthGate } from './components/auth/TradeAuthGate';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header, MainNavTab } from './components/common/Header';
@@ -27,6 +28,11 @@ const PromotoraRutaPortalView = lazy(() =>
     default: m.PromotoraRutaPortalView,
   }))
 );
+const UserManagementView = lazy(() =>
+  import('./components/users/UserManagementView').then((m) => ({
+    default: m.UserManagementView,
+  }))
+);
 
 function isPromotoraPortalPath(pathname?: string): boolean {
   const rawPath =
@@ -35,12 +41,48 @@ function isPromotoraPortalPath(pathname?: string): boolean {
   return cleanPath === '/portal' || cleanPath.startsWith('/portal/');
 }
 
+function isUserManagementPath(pathname?: string): boolean {
+  const rawPath =
+    pathname ?? (typeof window !== 'undefined' ? window.location.pathname : '');
+  const cleanPath = rawPath.replace(/\/+$/, '').toLowerCase();
+  return cleanPath === '/admin/usuarios' || cleanPath === '/usuarios';
+}
+
 const MainAppContent: React.FC<{
   authProfile: VerifiedAuthProfile;
   isLocalDevWorkstation: boolean;
   onSignOut: () => Promise<void>;
 }> = ({ authProfile, isLocalDevWorkstation, onSignOut }) => {
-  const [activeTab, setActiveTab] = useState<MainNavTab>('promotoras');
+  const [activeTab, setActiveTabState] = useState<MainNavTab>(() =>
+    isUserManagementPath() ? 'gestion_usuarios' : 'promotoras'
+  );
+
+  const setActiveTab = useCallback((nextTab: MainNavTab) => {
+    setActiveTabState(nextTab);
+    if (typeof window !== 'undefined') {
+      const currentPath = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+      if (nextTab === 'gestion_usuarios' && currentPath !== '/admin/usuarios') {
+        window.history.pushState({}, '', '/admin/usuarios');
+      } else if (
+        nextTab !== 'gestion_usuarios' &&
+        (currentPath === '/admin/usuarios' || currentPath === '/usuarios')
+      ) {
+        window.history.pushState({}, '', '/');
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const syncTabFromUrl = () => {
+      if (isUserManagementPath()) {
+        setActiveTabState('gestion_usuarios');
+      } else {
+        setActiveTabState((prev) => (prev === 'gestion_usuarios' ? 'promotoras' : prev));
+      }
+    };
+    window.addEventListener('popstate', syncTabFromUrl);
+    return () => window.removeEventListener('popstate', syncTabFromUrl);
+  }, []);
   const liveClock = useLiveVenezuelaClock();
   const {
     degustacionNotifications,
@@ -76,6 +118,7 @@ const MainAppContent: React.FC<{
     llenado_cronograma: { title: 'Módulo 2 · Cronograma y Matriz de Productos', badge: 'Llenado por Lote' },
     contraloria: { title: 'Módulo 3 · Contraloría y Auditoría Interna', badge: 'Conciliación & Paz y Salvo' },
     kpis_trazabilidad: { title: 'Módulo 4 · KPIs y Trazabilidad Ejecutiva', badge: 'Torre de Control' },
+    gestion_usuarios: { title: 'Seguridad IAM · Gestión de Usuarios Corporativos', badge: 'Super Admin' },
   };
 
   return (
@@ -213,6 +256,17 @@ const MainAppContent: React.FC<{
 
             {/* Modulo 4: KPI y Trazabilidad */}
             {activeTab === 'kpis_trazabilidad' && <ExecutiveDashboard />}
+
+            {/* Módulo IAM Exclusivo Super Admin: Gestión de Usuarios */}
+            {activeTab === 'gestion_usuarios' && (
+              <RoleGuard
+                allowedRoles={['super_admin']}
+                variant="route"
+                onReturnHome={() => setActiveTab('promotoras')}
+              >
+                <UserManagementView />
+              </RoleGuard>
+            )}
           </Suspense>
         </main>
 

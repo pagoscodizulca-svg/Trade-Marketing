@@ -646,6 +646,76 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
       },
     ];
     tables.entregas_degustacion = [];
+    tables.profiles = [
+      {
+        id: MOCK_ACTORS.admin.id,
+        email: 'admin@codizulca.com',
+        full_name: 'Administrador General Codizulca',
+        role: 'super_admin',
+        is_active: true,
+        must_change_password: false,
+        created_at: '2026-11-01T08:00:00.000Z',
+        updated_at: '2026-11-16T10:00:00.000Z',
+      },
+      {
+        id: MOCK_ACTORS.coordinadora.id,
+        email: MOCK_ACTORS.coordinadora.email,
+        full_name: 'Coordinadora Trade Local',
+        role: 'coordinacion',
+        is_active: true,
+        must_change_password: false,
+        created_at: '2026-11-02T09:00:00.000Z',
+        updated_at: '2026-11-16T10:00:00.000Z',
+      },
+      {
+        id: '55555555-5555-4555-8555-555555555555',
+        email: 'carlos.pena@codizulca.local',
+        full_name: 'Carlos Peña',
+        role: 'vendedor',
+        is_active: true,
+        must_change_password: true,
+        created_at: '2026-11-05T11:30:00.000Z',
+        updated_at: '2026-11-15T14:20:00.000Z',
+      },
+      {
+        id: '66666666-6666-4666-8666-666666666666',
+        email: 'luis.morales@codizulca.local',
+        full_name: 'Luis Morales',
+        role: 'vendedor',
+        is_active: false,
+        must_change_password: false,
+        created_at: '2026-11-06T10:15:00.000Z',
+        updated_at: '2026-11-14T16:45:00.000Z',
+      },
+    ];
+    tables.user_management_audit = [
+      {
+        id: '99990001-0000-4000-8000-000000000001',
+        actor_id: MOCK_ACTORS.admin.id,
+        target_user_id: '66666666-6666-4666-8666-666666666666',
+        target_email: 'luis.morales@codizulca.local',
+        action: 'USER_SUSPENDED',
+        details: {
+          previous: { role: 'vendedor', is_active: true },
+          next: { role: 'vendedor', is_active: false },
+        },
+        created_at: '2026-11-14T16:45:00.000Z',
+      },
+      {
+        id: '99990002-0000-4000-8000-000000000002',
+        actor_id: MOCK_ACTORS.admin.id,
+        target_user_id: '55555555-5555-4555-8555-555555555555',
+        target_email: 'carlos.pena@codizulca.local',
+        action: 'USER_CREATED',
+        details: {
+          full_name: 'Carlos Peña',
+          role: 'vendedor',
+          is_active: true,
+          must_change_password: true,
+        },
+        created_at: '2026-11-05T11:30:00.000Z',
+      },
+    ];
   }
 
   resetSeedData();
@@ -775,6 +845,51 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
       return;
     }
 
+    if (pathname === '/auth/v1/signup' && req.method === 'POST') {
+      const bodyBuf = await readBodyBuffer(req);
+      const body = JSON.parse(bodyBuf.toString('utf8') || '{}') as Record<string, any>;
+      const email = String(body.email || '').trim().toLowerCase();
+      const duplicate = Array.from(authUsersById.values()).some(
+        (u) => u.email.toLowerCase() === email
+      ) || (tables.profiles || []).some((p) => String(p.email || '').toLowerCase() === email);
+
+      if (duplicate) {
+        sendJson(res, 400, { message: 'User already registered' });
+        return;
+      }
+
+      const newId = crypto.randomUUID();
+      const token = buildMockJwt({
+        sub: newId,
+        email,
+        role: 'authenticated',
+        app_metadata: {},
+        exp: 2100000000,
+      });
+      const newActor: MockAuthActor = {
+        id: newId,
+        email,
+        password: String(body.password || crypto.randomUUID()),
+        app_metadata: {},
+        token,
+      };
+      authUsersById.set(newId, newActor);
+      authUsersByToken.set(token, newActor);
+      sendJson(res, 200, {
+        user: {
+          id: newId,
+          aud: 'authenticated',
+          role: 'authenticated',
+          email,
+          identities: [{ id: newId, provider: 'email' }],
+          app_metadata: {},
+          user_metadata: body.data || {},
+        },
+        session: null,
+      });
+      return;
+    }
+
     if (pathname.startsWith('/auth/v1/admin/users')) {
       const bodyBuf = await readBodyBuffer(req);
       const body = JSON.parse(bodyBuf.toString('utf8') || '{}') as Record<string, any>;
@@ -894,6 +1009,142 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
       }
       const bodyBuf = await readBodyBuffer(req);
       const args = JSON.parse(bodyBuf.toString('utf8') || '{}') as Record<string, any>;
+
+      const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+      const callerActor = authUsersByToken.get(callerToken);
+      const callerProfile = callerActor
+        ? (tables.profiles || []).find((p) => p.id === callerActor.id)
+        : null;
+      const isCallerSuperAdmin =
+        Boolean(callerProfile) &&
+        callerProfile!.role === 'super_admin' &&
+        callerProfile!.is_active === true;
+
+      if (rpcName === 'is_active_super_admin') {
+        sendJson(res, 200, isCallerSuperAdmin);
+        return;
+      }
+
+      if (rpcName === 'admin_list_profiles') {
+        if (!isCallerSuperAdmin) {
+          sendJson(res, 403, { code: '42501', message: 'Acceso denegado: se requiere un perfil super_admin activo.' });
+          return;
+        }
+        const rank = (r: string) => (r === 'super_admin' ? 1 : r === 'coordinacion' ? 2 : 3);
+        const sorted = [...(tables.profiles || [])].sort((a, b) => {
+          const dr = rank(String(a.role)) - rank(String(b.role));
+          if (dr !== 0) return dr;
+          return String(a.full_name || '').localeCompare(String(b.full_name || ''), 'es');
+        });
+        sendJson(res, 200, sorted);
+        return;
+      }
+
+      if (rpcName === 'admin_update_user_access') {
+        if (!isCallerSuperAdmin || !callerActor) {
+          sendJson(res, 403, { code: '42501', message: 'Acceso denegado: se requiere un perfil super_admin activo.' });
+          return;
+        }
+        const targetId = String(args.p_target_user_id || '');
+        const fullName = String(args.p_full_name || '').trim();
+        const role = String(args.p_role || '').trim().toLowerCase();
+        const isActive = Boolean(args.p_is_active);
+        const mustChange = args.p_must_change_password;
+
+        if (targetId === callerActor.id && (!isActive || role !== 'super_admin')) {
+          sendJson(res, 400, {
+            code: 'P0001',
+            message: 'Operación bloqueada (anti auto-bloqueo): no puedes suspender ni degradar tu propia cuenta de super_admin.',
+          });
+          return;
+        }
+
+        const idx = (tables.profiles || []).findIndex((p) => p.id === targetId);
+        if (idx < 0) {
+          sendJson(res, 404, { code: 'P0002', message: 'No existe el perfil solicitado.' });
+          return;
+        }
+        const prev: Record<string, any> = { ...(tables.profiles[idx] || {}) };
+        const nextRow: Record<string, any> = {
+          ...prev,
+          full_name: fullName,
+          role,
+          is_active: isActive,
+          must_change_password:
+            typeof mustChange === 'boolean' ? mustChange : Boolean(prev.must_change_password),
+          updated_at: new Date().toISOString(),
+        };
+        tables.profiles[idx] = nextRow;
+
+        const action =
+          prev.is_active && !nextRow.is_active
+            ? 'USER_SUSPENDED'
+            : !prev.is_active && nextRow.is_active
+              ? 'USER_REACTIVATED'
+              : prev.role !== nextRow.role
+                ? 'USER_ROLE_CHANGED'
+                : 'USER_ACCESS_UPDATED';
+
+        tables.user_management_audit.unshift({
+          id: crypto.randomUUID(),
+          actor_id: callerActor.id,
+          target_user_id: nextRow.id,
+          target_email: nextRow.email,
+          action,
+          details: { previous: prev, next: nextRow },
+          created_at: new Date().toISOString(),
+        });
+
+        sendJson(res, 200, [nextRow]);
+        return;
+      }
+
+      if (rpcName === 'admin_finalize_created_user') {
+        if (!isCallerSuperAdmin || !callerActor) {
+          sendJson(res, 403, { code: '42501', message: 'Acceso denegado: se requiere un perfil super_admin activo.' });
+          return;
+        }
+        const targetId = String(args.p_target_user_id || '');
+        const targetActor = authUsersById.get(targetId);
+        if (!targetActor) {
+          sendJson(res, 404, { code: 'P0002', message: 'El usuario objetivo no existe en auth.users.' });
+          return;
+        }
+        const nowIso = new Date().toISOString();
+        const createdProfile = {
+          id: targetId,
+          email: targetActor.email,
+          full_name: String(args.p_full_name || '').trim(),
+          role: String(args.p_role || 'vendedor').trim().toLowerCase(),
+          is_active: true,
+          must_change_password: Boolean(args.p_must_change_password),
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+        targetActor.app_metadata = {
+          role: createdProfile.role,
+          app_role: createdProfile.role,
+          display_name: createdProfile.full_name,
+          is_active: true,
+        };
+        tables.profiles.push(createdProfile);
+        tables.user_management_audit.unshift({
+          id: crypto.randomUUID(),
+          actor_id: callerActor.id,
+          target_user_id: createdProfile.id,
+          target_email: createdProfile.email,
+          action: 'USER_CREATED',
+          details: {
+            full_name: createdProfile.full_name,
+            role: createdProfile.role,
+            is_active: true,
+            must_change_password: createdProfile.must_change_password,
+          },
+          created_at: nowIso,
+        });
+        sendJson(res, 200, [createdProfile]);
+        return;
+      }
 
       if (rpcName === 'rpc_sincronizar_vendedores') {
         const regs = Array.isArray(args.p_registros) ? args.p_registros : [];

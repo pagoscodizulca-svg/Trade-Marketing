@@ -1,6 +1,7 @@
 import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
 import type { UserRole } from '../types';
 import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+import { isManagedUserRole, type ManagedUserRole } from './userManagementService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -16,6 +17,7 @@ export interface VerifiedAuthProfile {
   email: string;
   displayName: string;
   appRole: CanonicalAppRole | null;
+  iamRole: ManagedUserRole | null;
   rawAppRole: string;
   legacyRole: UserRole;
   staffId: string | null;
@@ -48,7 +50,7 @@ export function hasStoredSupabaseAuthToken(): boolean {
     const storage = window.localStorage;
     for (let i = 0; i < storage.length; i += 1) {
       const key = storage.key(i);
-      if (key && /^sb-.*-auth-token$/i.test(key)) {
+      if (key && (key === 'codizulca.supabase.auth.v1' || /^sb-.*-auth-token$/i.test(key))) {
         const val = storage.getItem(key);
         if (val && val.trim().length > 2) {
           return true;
@@ -85,6 +87,7 @@ export function normalizeCanonicalAppRole(rawRole: unknown): CanonicalAppRole | 
   const clean = String(rawRole ?? '').trim().toLowerCase();
   if (!clean) return null;
   if (
+    clean === 'super_admin' ||
     clean === 'admin' ||
     clean === 'gerencia' ||
     clean === 'gerente_admin' ||
@@ -93,6 +96,7 @@ export function normalizeCanonicalAppRole(rawRole: unknown): CanonicalAppRole | 
     return 'admin';
   }
   if (
+    clean === 'coordinacion' ||
     clean === 'coordinadora' ||
     clean === 'coordinadora_trade' ||
     clean === 'jefe_trade' ||
@@ -118,6 +122,35 @@ function mapToLegacyUserRole(rawRole: string, canonical: CanonicalAppRole | null
   return 'promotora';
 }
 
+function resolveFallbackIamRole(
+  rawAppRole: string,
+  normalizedEmail: string
+): ManagedUserRole | null {
+  const clean = String(rawAppRole ?? '').trim().toLowerCase();
+  if (isManagedUserRole(clean)) {
+    return clean;
+  }
+  if (clean === 'superadmin') {
+    return 'super_admin';
+  }
+  if (clean === 'admin' && normalizedEmail === 'admin@codizulca.com') {
+    return 'super_admin';
+  }
+  if (
+    clean === 'coordinadora' ||
+    clean === 'coordinadora_trade' ||
+    clean === 'jefe_trade' ||
+    clean === 'supervisor' ||
+    clean === 'analista_contraloria'
+  ) {
+    return 'coordinacion';
+  }
+  if (clean === 'fdv' || clean === 'fuerza_ventas') {
+    return 'vendedor';
+  }
+  return null;
+}
+
 /**
  * Extrae el perfil verificado EXCLUSIVAMENTE desde `app_metadata` (`raw_app_meta_data` firmado en servidor).
  * REGLA DE SEGURIDAD: Jamás lee roles ni `staff_id` desde `user_metadata` (editable por el cliente).
@@ -137,6 +170,7 @@ export function extractVerifiedProfileFromAuthUser(
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
 
   const email = normalizePortalEmail(user.email || '');
+  const iamRole = resolveFallbackIamRole(rawAppRole, email);
   const safeNameFromMeta = String(appMeta.display_name ?? '').trim();
   const displayName =
     safeNameFromMeta ||
@@ -147,6 +181,7 @@ export function extractVerifiedProfileFromAuthUser(
     email,
     displayName,
     appRole,
+    iamRole,
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
@@ -248,6 +283,38 @@ export async function resolveVerifiedProfileWithStaffFallback(
 
   const normalizedEmail = normalizePortalEmail(base.email);
 
+  try {
+    const client = getSupabaseClient();
+    const { data: iamProfile, error: iamError } = await client
+      .from('profiles')
+      .select('role, full_name, is_active')
+      .eq('id', base.userId)
+      .maybeSingle();
+
+    if (!iamError && iamProfile) {
+      if (iamProfile.is_active === false) {
+        return null;
+      }
+      const rawIamRole = String(iamProfile.role ?? '').trim().toLowerCase();
+      const iamCanonical = normalizeCanonicalAppRole(rawIamRole);
+      if (iamCanonical) {
+        const iamFullName = String(iamProfile.full_name ?? '').trim();
+        return {
+          ...base,
+          email: normalizedEmail,
+          displayName: iamFullName || base.displayName,
+          appRole: iamCanonical,
+          iamRole: resolveFallbackIamRole(rawIamRole, normalizedEmail),
+          rawAppRole: rawIamRole,
+          legacyRole: mapToLegacyUserRole(rawIamRole, iamCanonical),
+          isCoordinatorOrAdmin: iamCanonical === 'coordinadora' || iamCanonical === 'admin',
+        };
+      }
+    }
+  } catch {
+    // Si public.profiles aún no está disponible, continúa con verificación JWT/staff
+  }
+
   if (base.isCoordinatorOrAdmin || base.appRole === 'fdv') {
     return { ...base, email: normalizedEmail };
   }
@@ -312,6 +379,7 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
       ...base,
       email: activeStaff.email || normalizedEmail,
       appRole: 'promotora',
+      iamRole: null,
       rawAppRole: 'promotora',
       legacyRole: 'promotora',
       staffId: activeStaff.staffId,

@@ -217,6 +217,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
       email: 'estacion.local@codizulca.local',
       displayName: 'Modo Edición Local (Admin)',
       appRole: 'admin',
+      iamRole: null,
       rawAppRole: 'admin',
       legacyRole: 'gerente_admin',
       staffId: null,

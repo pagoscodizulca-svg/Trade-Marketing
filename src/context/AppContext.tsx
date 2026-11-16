@@ -96,6 +96,8 @@ interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
+  /** Rol IAM verificado en public.profiles ('super_admin' | 'coordinacion' | 'vendedor' | null) */
+  verifiedIamRole: 'super_admin' | 'coordinacion' | 'vendedor' | null;
   /** Verdadero únicamente para usuarios con rol estricto de Administrador (`admin` / `gerente_admin`) */
   isStrictAdmin: boolean;
   /** Lunes `YYYY-MM-DD` de inicio de la semana ISO en curso evaluada en `America/Caracas` */
@@ -315,6 +317,7 @@ export const AppProvider: React.FC<{
     email: string;
     displayName: string;
     appRole?: string | null;
+    iamRole?: 'super_admin' | 'coordinacion' | 'vendedor' | null;
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -1615,6 +1618,7 @@ export const AppProvider: React.FC<{
         currentUser,
         currentRole,
         setCurrentRole,
+        verifiedIamRole: verifiedProfile?.iamRole ?? null,
         isStrictAdmin,
         caracasWeekStartYmd,
         users,
