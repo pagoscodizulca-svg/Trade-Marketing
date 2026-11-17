@@ -118,7 +118,9 @@ function getConfiguredSignedUrlTtlSeconds(): number {
 
 function normalizeActorDbRole(appRole: string): 'promotora' | 'coordinadora' | 'admin' {
   const clean = String(appRole || '').trim().toLowerCase();
-  if (clean === 'admin' || clean === 'gerente_admin') return 'admin';
+  if (clean === 'super_admin' || clean === 'superadmin' || clean === 'admin' || clean === 'gerente_admin') {
+    return 'admin';
+  }
   if (isCoordinatorOrAdminRole(clean)) return 'coordinadora';
   return 'promotora';
 }

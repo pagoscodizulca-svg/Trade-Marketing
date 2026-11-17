@@ -1,10 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
-  Check,
-  Copy,
-  HelpCircle,
   Laptop,
   Loader2,
   Lock,
@@ -32,8 +29,6 @@ interface TradeAuthGateProps {
     onSignOut: () => Promise<void>;
   }) => React.ReactNode;
 }
-
-const SAFE_EMAIL_FOR_SQL_REGEX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
 
 function isLocalLoopbackHost(): boolean {
   if (typeof window === 'undefined') return false;
@@ -66,8 +61,6 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
   const [password, setPassword] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [showSetupGuide, setShowSetupGuide] = useState<boolean>(false);
-  const [copiedSql, setCopiedSql] = useState<boolean>(false);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -125,40 +118,20 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     };
   }, [canUseLocalWorkstation]);
 
-  const bootstrapSqlSnippet = useMemo(() => {
-    const cleanEmail = identifier.trim().toLowerCase();
-    const targetEmail = SAFE_EMAIL_FOR_SQL_REGEX.test(cleanEmail)
-      ? cleanEmail
-      : 'coordinacion@codizulca.com';
-    return [
-      `UPDATE auth.users`,
-      `SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),`,
-      `    raw_app_meta_data = COALESCE(raw_app_meta_data, '{}'::jsonb) || jsonb_build_object(`,
-      `      'app_role', 'admin',`,
-      `      'display_name', 'Coordinación Trade Marketing'`,
-      `    )`,
-      `WHERE lower(email) = '${targetEmail}';`,
-    ].join('\n');
-  }, [identifier]);
-
-  const handleCopyBootstrapSql = async () => {
-    try {
-      await navigator.clipboard.writeText(bootstrapSqlSnippet);
-      setCopiedSql(true);
-      setTimeout(() => setCopiedSql(false), 2500);
-    } catch {
-      // Sin acceso a portapapeles
-    }
-  };
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
     setErrorMsg(null);
+
+    const normalizedIdentifier = identifier.trim().toLowerCase();
+    setIdentifier(normalizedIdentifier);
     setSubmitting(true);
 
     try {
-      const { profile: authenticated } = await signInWithSupabaseCredentials(identifier, password);
+      const { profile: authenticated } = await signInWithSupabaseCredentials(
+        normalizedIdentifier,
+        password
+      );
       setPassword('');
       if (authenticated.appRole === 'promotora') {
         window.location.replace('/portal');
@@ -271,6 +244,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
                 required
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
+                onBlur={() => setIdentifier((prev) => prev.trim().toLowerCase())}
                 placeholder="coordinacion@codizulca.com"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-sm text-white focus:outline-none focus:border-red-500"
               />
@@ -333,57 +307,6 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
               </button>
             </div>
           )}
-
-          <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => setShowSetupGuide((prev) => !prev)}
-              className="w-full flex items-center justify-between text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition cursor-pointer"
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <HelpCircle className="w-3.5 h-3.5 text-red-400" />
-                <span>¿Primera vez? Activa tu usuario Coordinación/Admin en Supabase</span>
-              </span>
-              <span>{showSetupGuide ? 'Ocultar' : 'Ver pasos'}</span>
-            </button>
-
-            {showSetupGuide && (
-              <div className="rounded-xl bg-black/80 border border-white/10 p-3 space-y-2 text-[11px] text-zinc-300">
-                <ol className="list-decimal list-inside space-y-1 text-zinc-400">
-                  <li>
-                    En Supabase Dashboard abre <strong>Authentication → Users → Add user</strong> y
-                    crea tu correo y contraseña (marcando <em>Auto Confirm User</em>).
-                  </li>
-                  <li>
-                    Ejecuta en <strong>SQL Editor</strong> este comando para asignarle el rol
-                    firmado en <code className="text-red-300">app_metadata</code>:
-                  </li>
-                </ol>
-                <div className="relative">
-                  <pre className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[10px] font-mono text-emerald-300 overflow-x-auto leading-relaxed">
-                    {bootstrapSqlSnippet}
-                  </pre>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyBootstrapSql()}
-                    className="absolute top-1.5 right-1.5 px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-[10px] font-bold text-zinc-200 inline-flex items-center gap-1 cursor-pointer"
-                  >
-                    {copiedSql ? (
-                      <>
-                        <Check className="w-3 h-3 text-emerald-400" />
-                        <span>Copiado</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3 h-3" />
-                        <span>Copiar SQL</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
 
           <div className="pt-3 border-t border-white/10 flex items-center justify-between text-xs">
             <span className="text-zinc-400">¿Personal de campo / promotora?</span>

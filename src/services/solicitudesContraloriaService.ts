@@ -5,7 +5,12 @@ import {
   SolicitudProductoRowItem,
   SolicitudProductoValidItem,
 } from '../types';
-import { SUPABASE_ANON_KEY, SUPABASE_REST_URL, assertSupabaseConfigured } from './supabaseClient';
+import {
+  SUPABASE_ANON_KEY,
+  SUPABASE_REST_URL,
+  assertSupabaseConfigured,
+  getCachedAccessToken,
+} from './supabaseClient';
 
 export const SOLICITUD_SURVEY_TYPE = 'SolicitudContraloria';
 export const SOLICITUD_CONTRALORIA_LOCAL_EVENT = 'codizulca:solicitud-contraloria-event';
@@ -53,12 +58,15 @@ interface RawSurveyEnvelopeRow {
   created_at?: string | null;
 }
 
-const supabaseHeaders = (extra?: Record<string, string>): Record<string, string> => ({
-  apikey: SUPABASE_ANON_KEY,
-  Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-  'Content-Type': 'application/json',
-  ...extra,
-});
+const supabaseHeaders = (extra?: Record<string, string>): Record<string, string> => {
+  const activeJwt = getCachedAccessToken();
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${activeJwt || SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+};
 
 async function fetchWithRetry(
   url: string,

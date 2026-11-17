@@ -4,14 +4,48 @@ import type { NextFunction, Request, Response } from 'express';
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ALLOWED_COORDINATOR_ROLES = new Set([
+  'super_admin',
+  'superadmin',
+  'coordinacion',
   'coordinadora',
   'coordinadora_trade',
   'jefe_trade',
   'supervisor',
+  'analista_contraloria',
   'gerente_admin',
   'gerencia',
   'admin',
 ]);
+
+async function resolveEffectiveServerAppRole(
+  userId: string,
+  accessToken: string,
+  jwtAppRole: string
+): Promise<{ role: string; isActive: boolean }> {
+  const lookup = getAdminSupabaseClient() || createUserScopedSupabaseClient(accessToken);
+  if (lookup && UUID_REGEX.test(userId)) {
+    try {
+      const { data, error } = await lookup
+        .from('profiles')
+        .select('role, is_active')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (!error && data) {
+        if (data.is_active === false) {
+          return { role: '', isActive: false };
+        }
+        const profileRole = String(data.role ?? '').trim().toLowerCase();
+        if (profileRole) {
+          return { role: profileRole, isActive: true };
+        }
+      }
+    } catch {
+      // Fallback al rol firmado en app_metadata cuando public.profiles aún no existe
+    }
+  }
+  return { role: jwtAppRole, isActive: true };
+}
 
 export interface AuthenticatedServerUser {
   id: string;
@@ -199,11 +233,13 @@ export async function requireCoordinatorOrAdminAuth(
     }
 
     const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
-    const appRole = String(appMeta.app_role ?? appMeta.role ?? '')
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
       .trim()
       .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(data.user.id, token, jwtAppRole);
+    const appRole = effective.role;
 
-    if (!ALLOWED_COORDINATOR_ROLES.has(appRole)) {
+    if (!effective.isActive || !ALLOWED_COORDINATOR_ROLES.has(appRole)) {
       res.status(403).json({
         error: 'Acceso denegado: este recurso requiere perfil Coordinadora o Admin.',
         code: 'FORBIDDEN_ROLE',
@@ -276,9 +312,19 @@ export async function requireAttendanceActorAuth(
     }
 
     const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
-    const appRole = String(appMeta.app_role ?? appMeta.role ?? '')
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
       .trim()
       .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(data.user.id, token, jwtAppRole);
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
 
     if (isCoordinatorOrAdminRole(appRole)) {
       req.authUser = {
@@ -425,7 +471,13 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
     return;
   }
 
-  if (requestedRole === 'admin' && req.authUser?.appRole !== 'admin' && req.authUser?.appRole !== 'gerente_admin') {
+  const callerIsStrictAdmin =
+    req.authUser?.appRole === 'super_admin' ||
+    req.authUser?.appRole === 'superadmin' ||
+    req.authUser?.appRole === 'admin' ||
+    req.authUser?.appRole === 'gerente_admin';
+
+  if (requestedRole === 'admin' && !callerIsStrictAdmin) {
     res.status(403).json({
       error: 'Solo un administrador puede otorgar el rol admin.',
       code: 'ADMIN_REQUIRED',

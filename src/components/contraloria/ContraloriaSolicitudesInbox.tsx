@@ -32,7 +32,8 @@ export const ContraloriaSolicitudesInbox: React.FC<
   const auditorDisplayName = useMemo(() => {
     if (
       currentUser?.role === 'analista_contraloria' ||
-      currentUser?.role === 'gerente_admin'
+      currentUser?.role === 'gerente_admin' ||
+      currentUser?.role === 'jefe_trade'
     ) {
       return currentUser.name;
     }

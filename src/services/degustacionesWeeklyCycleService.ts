@@ -534,7 +534,12 @@ export function paginateSanitizedHistorialCollection<
  */
 export function isStrictAdminRole(role?: string | null): boolean {
   const clean = String(role || '').trim().toLowerCase();
-  return clean === 'admin' || clean === 'gerente_admin' || clean === 'superadmin';
+  return (
+    clean === 'super_admin' ||
+    clean === 'admin' ||
+    clean === 'gerente_admin' ||
+    clean === 'superadmin'
+  );
 }
 
 export function assertCanMutateTastingByWeekCycle(params: {

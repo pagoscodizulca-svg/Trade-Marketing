@@ -301,6 +301,24 @@ CREATE SCHEMA IF NOT EXISTS private;
 REVOKE ALL ON SCHEMA private FROM PUBLIC, anon;
 GRANT USAGE ON SCHEMA private TO authenticated;
 
+CREATE OR REPLACE FUNCTION private.current_app_role()
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+  SELECT lower(
+    pg_catalog.btrim(
+      COALESCE(
+        (SELECT auth.jwt()) -> 'app_metadata' ->> 'app_role',
+        (SELECT auth.jwt()) -> 'app_metadata' ->> 'role',
+        ''
+      )
+    )
+  );
+$$;
+
 CREATE OR REPLACE FUNCTION private.is_strict_admin()
 RETURNS BOOLEAN
 LANGUAGE sql

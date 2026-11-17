@@ -331,7 +331,9 @@ export const AppProvider: React.FC<{
   );
   const lastFocusRevalidationMsRef = useRef<number>(Date.now());
   const isStrictAdmin =
-    isStrictAdminRole(verifiedProfile?.appRole) || isStrictAdminRole(currentRole);
+    verifiedProfile?.iamRole === 'super_admin' ||
+    isStrictAdminRole(verifiedProfile?.appRole) ||
+    isStrictAdminRole(currentRole);
   const [currentUser, setCurrentUser] = useState<User | null>(
     verifiedProfile
       ? {
