@@ -1,0 +1,36 @@
+# =============================================================================
+# CODIZULCA C.A. — Configuración Declarativa Supabase CLI (Trade Marketing)
+# Seguridad por defecto: registro público deshabilitado (alta exclusiva vía
+# backend administrativo con service_role) y longitud mínima de clave = 8.
+# =============================================================================
+
+project_id = "codizulca-trade-marketing"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 17
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000/portal"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+# CRÍTICO (SEC-02): Registro público cerrado. Solo POST /api/admin/corporate-users
+# y POST /api/admin/staff-auth pueden aprovisionar identidades en auth.users.
+enable_signup = false
+enable_anonymous_sign_ins = false
+minimum_password_length = 8
+
+[auth.email]
+enable_signup = false
+double_confirm_changes = true
+enable_confirmations = true

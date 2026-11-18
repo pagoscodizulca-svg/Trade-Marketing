@@ -148,8 +148,14 @@ function getRoleBadgeStyle(role: ManagedUserRole): string {
   if (role === 'super_admin') {
     return 'bg-red-500/15 text-red-200 border-red-500/35';
   }
+  if (role === 'contraloria') {
+    return 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35';
+  }
   if (role === 'coordinacion') {
     return 'bg-amber-500/15 text-amber-200 border-amber-500/30';
+  }
+  if (role === 'supervisor') {
+    return 'bg-blue-500/15 text-blue-200 border-blue-500/30';
   }
   return 'bg-zinc-800/90 text-zinc-200 border-white/10';
 }
@@ -230,13 +236,17 @@ export const UserManagementView: React.FC = () => {
 
   const summaryCounts = useMemo(() => {
     let superAdmins = 0;
+    let contraloria = 0;
     let coordinacion = 0;
+    let supervisores = 0;
     let vendedores = 0;
     let suspended = 0;
 
     for (const u of users) {
       if (u.role === 'super_admin') superAdmins += 1;
+      else if (u.role === 'contraloria') contraloria += 1;
       else if (u.role === 'coordinacion') coordinacion += 1;
+      else if (u.role === 'supervisor') supervisores += 1;
       else if (u.role === 'vendedor') vendedores += 1;
 
       if (!u.isActive) suspended += 1;
@@ -245,7 +255,9 @@ export const UserManagementView: React.FC = () => {
     return {
       total: users.length,
       superAdmins,
+      contraloria,
       coordinacion,
+      supervisores,
       vendedores,
       suspended,
     };
@@ -620,7 +632,7 @@ export const UserManagementView: React.FC = () => {
       )}
 
       {/* 1. Tarjetas Compactas de Resumen */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="rounded-xl bg-zinc-950/90 border border-white/[0.07] px-4 py-3 flex items-center justify-between">
           <div>
             <p className="text-[11px] font-semibold text-zinc-400">Total</p>
@@ -645,11 +657,23 @@ export const UserManagementView: React.FC = () => {
           </div>
         </div>
 
+        <div className="rounded-xl bg-zinc-950/90 border border-cyan-500/20 px-4 py-3 flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-semibold text-cyan-300/90">Contraloría</p>
+            <p className="text-xl font-extrabold text-white font-mono mt-0.5">
+              {summaryCounts.contraloria}
+            </p>
+          </div>
+          <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/25 flex items-center justify-center">
+            <ShieldCheck className="w-4 h-4 text-cyan-300" />
+          </div>
+        </div>
+
         <div className="rounded-xl bg-zinc-950/90 border border-amber-500/20 px-4 py-3 flex items-center justify-between">
           <div>
-            <p className="text-[11px] font-semibold text-amber-300/90">Coordinación</p>
+            <p className="text-[11px] font-semibold text-amber-300/90">Coordinación / Sup.</p>
             <p className="text-xl font-extrabold text-white font-mono mt-0.5">
-              {summaryCounts.coordinacion}
+              {summaryCounts.coordinacion + summaryCounts.supervisores}
             </p>
           </div>
           <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/25 flex items-center justify-center">
@@ -669,7 +693,7 @@ export const UserManagementView: React.FC = () => {
           </div>
         </div>
 
-        <div className="rounded-xl bg-zinc-950/90 border border-white/[0.07] px-4 py-3 flex items-center justify-between col-span-2 sm:col-span-1">
+        <div className="rounded-xl bg-zinc-950/90 border border-white/[0.07] px-4 py-3 flex items-center justify-between">
           <div>
             <p className="text-[11px] font-semibold text-zinc-400">Suspendidos</p>
             <p className="text-xl font-extrabold text-white font-mono mt-0.5">
@@ -704,9 +728,11 @@ export const UserManagementView: React.FC = () => {
             className="px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-red-500 cursor-pointer"
           >
             <option value="ALL">Todos los roles</option>
-            <option value="super_admin">Admin General (super_admin)</option>
-            <option value="coordinacion">Coordinación (coordinacion)</option>
-            <option value="vendedor">Vendedor (vendedor)</option>
+            {MANAGED_USER_ROLES.map((roleOpt) => (
+              <option key={roleOpt} value={roleOpt}>
+                {MANAGED_USER_ROLE_LABELS[roleOpt]} ({roleOpt})
+              </option>
+            ))}
           </select>
 
           <select
@@ -1252,9 +1278,11 @@ export const UserManagementView: React.FC = () => {
                     onChange={(e) => setCreateRole(e.target.value as ManagedUserRole)}
                     className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
                   >
-                    <option value="vendedor">Vendedor (vendedor)</option>
-                    <option value="coordinacion">Coordinación (coordinacion)</option>
-                    <option value="super_admin">Administrador General (super_admin)</option>
+                    {MANAGED_USER_ROLES.map((roleOpt) => (
+                      <option key={roleOpt} value={roleOpt}>
+                        {MANAGED_USER_ROLE_LABELS[roleOpt]} ({roleOpt})
+                      </option>
+                    ))}
                   </select>
                 </div>
 

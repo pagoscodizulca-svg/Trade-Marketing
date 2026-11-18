@@ -61,10 +61,23 @@ export function assertPublicKeyIsNotSecret(key: string, envName = 'VITE_SUPABASE
   }
 }
 
+const PLACEHOLDER_PUBLISHABLE_KEY = 'PEGA_AQUI_TU_SB_PUBLISHABLE_KEY';
+
+function readPublicKeyEnv(primaryKey: string, legacyKey: string): string {
+  const primary = readEnvString(primaryKey);
+  if (primary && primary !== PLACEHOLDER_PUBLISHABLE_KEY) return primary;
+  const legacy = readEnvString(legacyKey);
+  if (legacy && legacy !== PLACEHOLDER_PUBLISHABLE_KEY) return legacy;
+  return '';
+}
+
 const rawEnvUrl = readEnvString('VITE_SUPABASE_URL');
 export const SUPABASE_PROJECT_URL = normalizeProjectBaseUrl(rawEnvUrl);
 export const SUPABASE_REST_URL = SUPABASE_PROJECT_URL ? `${SUPABASE_PROJECT_URL}/rest/v1` : '';
-export const SUPABASE_ANON_KEY = readEnvString('VITE_SUPABASE_ANON_KEY');
+export const SUPABASE_ANON_KEY = readPublicKeyEnv(
+  'VITE_SUPABASE_PUBLISHABLE_KEY',
+  'VITE_SUPABASE_ANON_KEY'
+);
 
 const rawMasterEnvUrl = readEnvString('VITE_SUPABASE_MASTER_URL');
 const rawMasterAnonKey = readEnvString('VITE_SUPABASE_MASTER_ANON_KEY');
@@ -78,7 +91,7 @@ export const isMasterDataSupabaseConfigured = Boolean(
 );
 
 export const SUPABASE_NOT_CONFIGURED_MESSAGE =
-  'Sin conexión configurada: defina VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY.';
+  'Sin conexión configurada: defina VITE_SUPABASE_URL y VITE_SUPABASE_PUBLISHABLE_KEY en .env.local.';
 
 export function assertSupabaseConfigured(): void {
   if (!isSupabaseConfigured) {

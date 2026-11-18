@@ -2,6 +2,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { NextFunction, Request, Response } from 'express';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const MIN_CORPORATE_PASSWORD_LENGTH = 8;
 
 const ALLOWED_COORDINATOR_ROLES = new Set([
   'super_admin',
@@ -11,10 +13,24 @@ const ALLOWED_COORDINATOR_ROLES = new Set([
   'coordinadora_trade',
   'jefe_trade',
   'supervisor',
-  'analista_contraloria',
   'gerente_admin',
   'gerencia',
   'admin',
+]);
+
+const ALLOWED_TORRE_VIEWER_ROLES = new Set([
+  ...ALLOWED_COORDINATOR_ROLES,
+  'contraloria',
+  'analista_contraloria',
+  'contralor',
+]);
+
+export const CORPORATE_MANAGED_ROLES = new Set([
+  'super_admin',
+  'coordinacion',
+  'contraloria',
+  'supervisor',
+  'vendedor',
 ]);
 
 async function resolveEffectiveServerAppRole(
@@ -85,16 +101,20 @@ export function getSupabaseServiceRoleKey(): string {
 }
 
 let verifierClient: SupabaseClient | null = null;
+let verifierClientCacheKey = '';
 let adminClient: SupabaseClient | null = null;
+let adminClientCacheKey = '';
 
 export function getVerifierSupabaseClient(): SupabaseClient | null {
   const url = getSupabaseProjectUrl();
   const anonKey = getSupabaseAnonKey();
   if (!url || !anonKey) return null;
-  if (!verifierClient) {
+  const cacheKey = `${url}::${anonKey}`;
+  if (!verifierClient || verifierClientCacheKey !== cacheKey) {
     verifierClient = createClient(url, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+    verifierClientCacheKey = cacheKey;
   }
   return verifierClient;
 }
@@ -103,10 +123,12 @@ export function getAdminSupabaseClient(): SupabaseClient | null {
   const url = getSupabaseProjectUrl();
   const serviceKey = getSupabaseServiceRoleKey();
   if (!url || !serviceKey) return null;
-  if (!adminClient) {
+  const cacheKey = `${url}::${serviceKey}`;
+  if (!adminClient || adminClientCacheKey !== cacheKey) {
     adminClient = createClient(url, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+    adminClientCacheKey = cacheKey;
   }
   return adminClient;
 }
@@ -133,6 +155,10 @@ export function createUserScopedSupabaseClient(accessToken: string): SupabaseCli
 
 export function isCoordinatorOrAdminRole(rawRole: string): boolean {
   return ALLOWED_COORDINATOR_ROLES.has(String(rawRole || '').trim().toLowerCase());
+}
+
+export function isTorreViewerRole(rawRole: string): boolean {
+  return ALLOWED_TORRE_VIEWER_ROLES.has(String(rawRole || '').trim().toLowerCase());
 }
 
 function normalizeStaffLoginEmail(rawEmail: string, staffName: string, staffId: string): string {
@@ -585,15 +611,243 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       })
       .eq('id', staffId);
 
-    res.status(200).json({
+      res.status(200).json({
+        ok: true,
+        authUserId,
+        loginEmail,
+      });
+    } catch {
+      res.status(500).json({
+        error: 'Error interno procesando el aprovisionamiento de credenciales.',
+        code: 'STAFF_AUTH_INTERNAL_ERROR',
+      });
+    }
+  }
+
+/**
+ * Middleware Zero Trust exclusivo para `super_admin` activo:
+ * Verifica criptográficamente el Bearer JWT y exige fila activa con `role = 'super_admin'`
+ * en `public.profiles`.
+ */
+export async function requireSuperAdminAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const lookup = getAdminSupabaseClient() || createUserScopedSupabaseClient(token);
+    if (!lookup) {
+      res.status(503).json({
+        error: 'No se pudo inicializar el cliente de validación IAM en el servidor.',
+        code: 'SUPABASE_SERVER_UNCONFIGURED',
+      });
+      return;
+    }
+
+    const { data: profile, error: profileErr } = await lookup
+      .from('profiles')
+      .select('role, is_active')
+      .eq('id', data.user.id)
+      .maybeSingle();
+
+    const activeRole = String(profile?.role ?? '').trim().toLowerCase();
+    if (profileErr || !profile || profile.is_active !== true || activeRole !== 'super_admin') {
+      res.status(403).json({
+        error: 'Acceso denegado: esta acción es exclusiva del Administrador General activo.',
+        code: 'SUPER_ADMIN_REQUIRED',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: String(data.user.email || '').trim().toLowerCase(),
+      appRole: 'super_admin',
+      isCoordinatorOrAdmin: true,
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
+}
+
+/**
+ * Endpoint administrativo `POST /api/admin/corporate-users`:
+ * Elimina el uso de `auth.signUp()` público en el cliente (SEC-02).
+ * Crea el usuario en `auth.users` con `SUPABASE_SERVICE_ROLE_KEY` (permitiendo mantener
+ * cerrado el registro público en Supabase Auth) y finaliza el perfil + auditoría
+ * invocando `public.admin_finalize_created_user` bajo el JWT del `super_admin` actor.
+ */
+export async function handleCreateCorporateUser(req: Request, res: Response): Promise<void> {
+  const admin = getAdminSupabaseClient();
+  if (!admin) {
+    res.status(503).json({
+      error:
+        'Falta configurar SUPABASE_SERVICE_ROLE_KEY en el servidor para crear usuarios corporativos.',
+      code: 'SERVICE_ROLE_KEY_MISSING',
+    });
+    return;
+  }
+
+  const actorToken = String(req.authUser?.accessToken || '').trim();
+  const actorClient = createUserScopedSupabaseClient(actorToken);
+  if (!actorClient) {
+    res.status(401).json({
+      error: 'Sesión administrativa no válida.',
+      code: 'AUTH_SESSION_EXPIRED',
+    });
+    return;
+  }
+
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const fullName = String(body.fullName ?? '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = String(body.password ?? '');
+  const role = String(body.role ?? 'vendedor').trim().toLowerCase();
+  const mustChangePassword = body.mustChangePassword === true;
+
+  if (fullName.length < 2 || fullName.length > 160) {
+    res.status(400).json({
+      error: 'El nombre completo debe contener entre 2 y 160 caracteres.',
+      code: 'INVALID_FULL_NAME',
+    });
+    return;
+  }
+
+  if (email.length < 5 || email.length > 254 || !STRICT_EMAIL_REGEX.test(email)) {
+    res.status(400).json({
+      error: 'Ingresa un correo electrónico corporativo válido.',
+      code: 'INVALID_EMAIL',
+    });
+    return;
+  }
+
+  if (!CORPORATE_MANAGED_ROLES.has(role)) {
+    res.status(400).json({
+      error:
+        'Rol inválido. Valores permitidos: super_admin, coordinacion, contraloria, supervisor, vendedor.',
+      code: 'INVALID_CORPORATE_ROLE',
+    });
+    return;
+  }
+
+  if (password.trim().length === 0 || password.length < MIN_CORPORATE_PASSWORD_LENGTH) {
+    res.status(400).json({
+      error: `La contraseña inicial debe tener al menos ${MIN_CORPORATE_PASSWORD_LENGTH} caracteres.`,
+      code: 'WEAK_PASSWORD',
+    });
+    return;
+  }
+
+  let createdUserId: string | null = null;
+
+  try {
+    const { data: created, error: createErr } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      app_metadata: {
+        role,
+        app_role: role,
+        display_name: fullName,
+        is_active: true,
+        must_change_password: mustChangePassword,
+      },
+    });
+
+    if (createErr || !created?.user?.id) {
+      const errMsg = String(createErr?.message || '');
+      const isDuplicate = /already registered|already exists|email_exists|user_already_exists/i.test(
+        errMsg
+      );
+      res.status(isDuplicate ? 409 : 400).json({
+        error: isDuplicate
+          ? 'Este correo electrónico ya está registrado en el sistema.'
+          : `No se pudo crear la cuenta en Supabase Auth: ${errMsg || 'error desconocido'}`,
+        code: isDuplicate ? 'EMAIL_ALREADY_EXISTS' : 'AUTH_CREATE_FAILED',
+      });
+      return;
+    }
+
+    createdUserId = created.user.id;
+
+    const { data: finalizedRows, error: finalizeErr } = await actorClient.rpc(
+      'admin_finalize_created_user',
+      {
+        p_target_user_id: createdUserId,
+        p_full_name: fullName,
+        p_role: role,
+        p_must_change_password: mustChangePassword,
+      }
+    );
+
+    const profileRow = Array.isArray(finalizedRows) ? finalizedRows[0] : finalizedRows;
+
+    if (finalizeErr || !profileRow) {
+      await admin.auth.admin.deleteUser(createdUserId).catch(() => {});
+      createdUserId = null;
+      res.status(400).json({
+        error:
+          finalizeErr?.message ||
+          'No se pudo registrar el perfil corporativo; la operación fue revertida de forma segura.',
+        code: 'PROFILE_FINALIZE_FAILED',
+      });
+      return;
+    }
+
+    res.status(201).json({
       ok: true,
-      authUserId,
-      loginEmail,
+      profile: profileRow,
     });
   } catch {
+    if (createdUserId) {
+      await admin.auth.admin.deleteUser(createdUserId).catch(() => {});
+    }
     res.status(500).json({
-      error: 'Error interno procesando el aprovisionamiento de credenciales.',
-      code: 'STAFF_AUTH_INTERNAL_ERROR',
+      error: 'Error interno creando el usuario corporativo.',
+      code: 'CORPORATE_USER_INTERNAL_ERROR',
     });
   }
 }

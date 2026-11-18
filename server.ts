@@ -12,9 +12,11 @@ import {
 } from './src/server/pdfDegustacionesExtractor';
 import {
   createRateLimiter,
+  handleCreateCorporateUser,
   handleProvisionStaffAuth,
   requireAttendanceActorAuth,
   requireCoordinatorOrAdminAuth,
+  requireSuperAdminAuth,
 } from './src/server/supabaseAdminAuth';
 import {
   handleBatchAttendanceSignedUrls,
@@ -203,6 +205,13 @@ app.post(
   requireCoordinatorOrAdminAuth,
   adminAuthRateLimiter,
   handleProvisionStaffAuth
+);
+
+app.post(
+  '/api/admin/corporate-users',
+  requireSuperAdminAuth,
+  adminAuthRateLimiter,
+  handleCreateCorporateUser
 );
 
 // ============================================================================

@@ -25,6 +25,8 @@ export type ContraloriaSubTab = 'bandeja_entrada' | 'conciliacion_auditoria';
 export const ContraloriaView: React.FC = () => {
   const {
     currentRole,
+    verifiedIamRole,
+    isContraloriaOrAdmin,
     requests,
     reconciliation,
     solicitudesContraloria,
@@ -152,6 +154,19 @@ export const ContraloriaView: React.FC = () => {
 
   const handleAdvance = (nextStatus: RequisitionStatus) => {
     if (!activeReq) return;
+    const requiresControllerAuthority =
+      nextStatus === 'APROBADO_CONTRALORIA' ||
+      nextStatus === 'RECHAZADO' ||
+      nextStatus === 'CONCILIADO_CERRADO';
+
+    if (requiresControllerAuthority && !isContraloriaOrAdmin) {
+      setTransitionMsg({
+        text: 'Segregación de Funciones: esta etapa requiere autorización exclusiva de Contraloría Interna o Administración General.',
+        isError: true,
+      });
+      return;
+    }
+
     const res = advanceRequisitionWorkflow(activeReq.id, nextStatus, justificationText);
     setTransitionMsg({ text: res.message, isError: !res.success });
     setJustificationText('');
@@ -184,6 +199,13 @@ export const ContraloriaView: React.FC = () => {
   };
 
   const handleIssuePazYSalvo = () => {
+    if (!isContraloriaOrAdmin) {
+      setTransitionMsg({
+        text: 'Segregación de Funciones: solo Contraloría Interna o Administración General pueden emitir y sellar un Paz y Salvo.',
+        isError: true,
+      });
+      return;
+    }
     const notes =
       pazYSalvoNotes.trim() ||
       `Conciliación conforme para solicitud ${activeReq?.requestCode || reconciliation.requestCode}.`;
@@ -532,7 +554,7 @@ export const ContraloriaView: React.FC = () => {
               {/* Botones de Flujo de Aprobación */}
               <div className="p-4 rounded-xl bg-black border border-zinc-900">
                 <span className="text-xs font-black text-white block mb-2 uppercase tracking-wider">
-                  Aprobaciones Escalonadas (Rol: {currentRole}):
+                  Aprobaciones Escalonadas (Rol IAM: {verifiedIamRole || currentRole}):
                 </span>
 
                 <div className="space-y-2 mb-3">

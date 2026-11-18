@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Eye,
+  EyeOff,
+  KeyRound,
   Laptop,
   Loader2,
   Lock,
@@ -16,6 +19,10 @@ import {
   signOutSupabaseSession,
   type VerifiedAuthProfile,
 } from '../../services/authService';
+import {
+  MIN_SUPABASE_PASSWORD_LENGTH,
+  completeOwnPasswordChange,
+} from '../../services/userManagementService';
 import {
   getSupabaseClient,
   isSupabaseConfigured,
@@ -46,21 +53,27 @@ function isLocalLoopbackHost(): boolean {
  * - Si detecta un perfil `promotora`, redirige de inmediato a `/portal/ruta` sin montar módulos administrativos.
  */
 export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
-  const canUseLocalWorkstation = import.meta.env.DEV && isLocalLoopbackHost();
+  const canUseLocalWorkstation =
+    import.meta.env.DEV &&
+    isLocalLoopbackHost() &&
+    import.meta.env.VITE_ENABLE_LOCAL_DEV_BYPASS === 'true';
   const initialHasAuthToken = isSupabaseConfigured && hasStoredSupabaseAuthToken();
 
-  const [checking, setChecking] = useState<boolean>(
-    () => !canUseLocalWorkstation || initialHasAuthToken
-  );
+  const [checking, setChecking] = useState<boolean>(() => isSupabaseConfigured || initialHasAuthToken);
   const [profile, setProfile] = useState<VerifiedAuthProfile | null>(null);
-  const [localDevActive, setLocalDevActive] = useState<boolean>(
-    () => canUseLocalWorkstation && !initialHasAuthToken
-  );
+  const [localDevActive, setLocalDevActive] = useState<boolean>(false);
 
   const [identifier, setIdentifier] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Estado para cambio obligatorio de contraseña en primer inicio (`must_change_password = true`)
+  const [newPassword, setNewPassword] = useState<string>('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState<string>('');
+  const [showNewPassword, setShowNewPassword] = useState<boolean>(false);
+  const [changingPassword, setChangingPassword] = useState<boolean>(false);
+  const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -74,9 +87,6 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     void client.auth.getSession().then(async ({ data }) => {
       if (!active) return;
       if (!data.session) {
-        if (canUseLocalWorkstation) {
-          setLocalDevActive(true);
-        }
         setProfile(null);
         setChecking(false);
         return;
@@ -84,7 +94,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(data.session);
       if (!active) return;
-      if (resolved?.appRole === 'promotora' || Boolean(resolved?.staffId && !resolved?.isCoordinatorOrAdmin)) {
+      if (
+        resolved?.appRole === 'promotora' ||
+        Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
+      ) {
         window.location.replace('/portal');
         return;
       }
@@ -103,7 +116,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(session);
       if (!active) return;
-      if (resolved?.appRole === 'promotora' || Boolean(resolved?.staffId && !resolved?.isCoordinatorOrAdmin)) {
+      if (
+        resolved?.appRole === 'promotora' ||
+        Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
+      ) {
         window.location.replace('/portal');
         return;
       }
@@ -149,16 +165,54 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
   };
 
   const handleEnterLocalWorkstation = () => {
-    if (!import.meta.env.DEV || !isLocalLoopbackHost()) return;
+    if (!canUseLocalWorkstation) return;
     setErrorMsg(null);
     setLocalDevActive(true);
   };
 
   const handleSignOut = async () => {
     setLocalDevActive(false);
+    setNewPassword('');
+    setConfirmNewPassword('');
+    setPasswordChangeError(null);
     await signOutSupabaseSession();
     setProfile(null);
     setPassword('');
+  };
+
+  const handleCompleteMandatoryPasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (changingPassword || !profile) return;
+    setPasswordChangeError(null);
+
+    if (newPassword.trim().length === 0 || newPassword.length < MIN_SUPABASE_PASSWORD_LENGTH) {
+      setPasswordChangeError(
+        `La nueva contraseña debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`
+      );
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordChangeError('Las contraseñas no coinciden. Verifícalas e intenta nuevamente.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await completeOwnPasswordChange(newPassword);
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setShowNewPassword(false);
+      setProfile((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+    } catch (err) {
+      setPasswordChangeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar la contraseña corporativa.'
+      );
+    } finally {
+      setChangingPassword(false);
+    }
   };
 
   if (!isSupabaseConfigured && !(import.meta.env.DEV && localDevActive && canUseLocalWorkstation)) {
@@ -188,13 +242,15 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     const devProfile: VerifiedAuthProfile = {
       userId: 'local-dev-workstation',
       email: 'estacion.local@codizulca.local',
-      displayName: 'Modo Edición Local (Admin)',
+      displayName: 'Modo Edición Local (Super Admin)',
       appRole: 'admin',
-      iamRole: null,
-      rawAppRole: 'admin',
+      iamRole: 'super_admin',
+      rawAppRole: 'super_admin',
       legacyRole: 'gerente_admin',
       staffId: null,
       isCoordinatorOrAdmin: true,
+      canAccessTorreControl: true,
+      mustChangePassword: false,
     };
 
     return (
@@ -323,15 +379,16 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     );
   }
 
-  if (!profile.isCoordinatorOrAdmin) {
+  if (!profile.canAccessTorreControl) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/30 p-6 space-y-4 text-center">
           <ShieldAlert className="w-11 h-11 text-red-500 mx-auto" />
           <h2 className="text-lg font-extrabold">Acceso Restringido (403)</h2>
           <p className="text-xs text-zinc-400">
-            Tu sesión autenticada posee el rol <strong>{profile.appRole || 'sin asignar'}</strong> y
-            no tiene permisos para operar la Torre de Control de Coordinación.
+            Tu sesión autenticada posee el rol{' '}
+            <strong>{profile.iamRole || profile.appRole || 'sin asignar'}</strong> y no tiene
+            permisos para operar la Torre de Control corporativa.
           </p>
           <button
             type="button"
@@ -341,6 +398,120 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
             <LogOut className="w-4 h-4" />
             <span>Cerrar sesión</span>
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (profile.mustChangePassword) {
+    return (
+      <div
+        className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4"
+        data-testid="mandatory-password-change-gate"
+      >
+        <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-white/10 shadow-2xl p-6 sm:p-8 space-y-5">
+          <div className="flex items-start gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-red-600/15 border border-red-500/30 flex items-center justify-center shrink-0">
+              <KeyRound className="w-5 h-5 text-red-400" />
+            </div>
+            <div>
+              <span className="inline-block text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                Seguridad Corporativa · Primer Acceso
+              </span>
+              <h2 className="text-lg font-extrabold tracking-tight mt-1">
+                Actualiza tu contraseña
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">
+                Hola <strong className="text-white">{profile.displayName}</strong>, por política de
+                seguridad debes definir una contraseña personal antes de ingresar.
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handleCompleteMandatoryPasswordChange} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-zinc-300 mb-1.5">
+                Nueva contraseña (mínimo {MIN_SUPABASE_PASSWORD_LENGTH} caracteres)
+              </label>
+              <div className="relative">
+                <input
+                  type={showNewPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  required
+                  minLength={MIN_SUPABASE_PASSWORD_LENGTH}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-black border border-zinc-800 text-sm text-white focus:outline-none focus:border-red-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((v) => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-white cursor-pointer"
+                  aria-label={showNewPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                >
+                  {showNewPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-zinc-300 mb-1.5">
+                Confirmar nueva contraseña
+              </label>
+              <input
+                type={showNewPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                required
+                minLength={MIN_SUPABASE_PASSWORD_LENGTH}
+                value={confirmNewPassword}
+                onChange={(e) => setConfirmNewPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-sm text-white focus:outline-none focus:border-red-500"
+              />
+            </div>
+
+            {passwordChangeError && (
+              <div className="rounded-xl bg-red-950/50 border border-red-500/40 px-3.5 py-2.5 text-xs text-red-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{passwordChangeError}</span>
+              </div>
+            )}
+
+            <div className="space-y-2.5 pt-1">
+              <button
+                type="submit"
+                disabled={changingPassword}
+                className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-extrabold text-sm flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-red-950/50"
+              >
+                {changingPassword ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Actualizando credencial...</span>
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>Guardar contraseña y continuar</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={changingPassword}
+                onClick={() => void handleSignOut()}
+                className="w-full py-2 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-semibold text-zinc-300 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Cerrar sesión</span>
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     );

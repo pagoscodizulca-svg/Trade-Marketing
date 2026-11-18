@@ -8,6 +8,8 @@ coverage/
 .env.local
 .env.*
 !.env.example
+src/config/env.js
+!src/config/env.example.js
 ruta-degustacion/.env
 ruta-degustacion/.env.local
 ruta-degustacion/.env.*

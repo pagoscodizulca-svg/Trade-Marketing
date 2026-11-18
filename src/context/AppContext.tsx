@@ -46,6 +46,7 @@ import {
   MAX_SAFE_TIMEOUT_MS,
 } from '../utils/caracasWeekCycle';
 import { isStrictAdminRole } from '../services/degustacionesWeeklyCycleService';
+import type { ManagedUserRole } from '../services/userManagementService';
 
 export type SyncState = 'sincronizando' | 'sincronizado' | 'tiempo_real' | 'error';
 
@@ -96,10 +97,14 @@ interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
-  /** Rol IAM verificado en public.profiles ('super_admin' | 'coordinacion' | 'vendedor' | null) */
-  verifiedIamRole: 'super_admin' | 'coordinacion' | 'vendedor' | null;
-  /** Verdadero únicamente para usuarios con rol estricto de Administrador (`admin` / `gerente_admin`) */
+  /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'supervisor' | 'vendedor' | null) */
+  verifiedIamRole: ManagedUserRole | null;
+  /** Verdadero únicamente para usuarios con rol estricto de Administrador (`super_admin` / `admin`) */
   isStrictAdmin: boolean;
+  /** Verdadero para usuarios con autoridad de Contraloría Interna o Super Admin (Segregación de Funciones) */
+  isContraloriaOrAdmin: boolean;
+  /** Verdadero para usuarios de operación Trade Marketing (Super Admin, Coordinación, Supervisión) */
+  isTradeOpsRole: boolean;
   /** Lunes `YYYY-MM-DD` de inicio de la semana ISO en curso evaluada en `America/Caracas` */
   caracasWeekStartYmd: string;
   users: User[];
@@ -317,7 +322,7 @@ export const AppProvider: React.FC<{
     email: string;
     displayName: string;
     appRole?: string | null;
-    iamRole?: 'super_admin' | 'coordinacion' | 'vendedor' | null;
+    iamRole?: ManagedUserRole | null;
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -330,10 +335,18 @@ export const AppProvider: React.FC<{
     () => getCaracasWeekCycleBounds().inicioSemanaActualYmd
   );
   const lastFocusRevalidationMsRef = useRef<number>(Date.now());
-  const isStrictAdmin =
-    verifiedProfile?.iamRole === 'super_admin' ||
-    isStrictAdminRole(verifiedProfile?.appRole) ||
-    isStrictAdminRole(currentRole);
+  const verifiedIamRole: ManagedUserRole | null = verifiedProfile?.iamRole ?? null;
+  const isStrictAdmin = verifiedProfile
+    ? verifiedIamRole === 'super_admin' || isStrictAdminRole(verifiedProfile.appRole)
+    : isStrictAdminRole(currentRole);
+  const isContraloriaOrAdmin = verifiedProfile
+    ? verifiedIamRole === 'super_admin' || verifiedIamRole === 'contraloria'
+    : currentRole === 'analista_contraloria' || currentRole === 'gerente_admin';
+  const isTradeOpsRole = verifiedProfile
+    ? verifiedIamRole === 'super_admin' ||
+      verifiedIamRole === 'coordinacion' ||
+      verifiedIamRole === 'supervisor'
+    : true;
   const [currentUser, setCurrentUser] = useState<User | null>(
     verifiedProfile
       ? {
@@ -344,6 +357,20 @@ export const AppProvider: React.FC<{
         }
       : null
   );
+
+  useEffect(() => {
+    if (verifiedProfile) {
+      setCurrentRole(verifiedProfile.legacyRole);
+      setCurrentUser({
+        id: verifiedProfile.userId,
+        name: verifiedProfile.displayName,
+        email: verifiedProfile.email,
+        role: verifiedProfile.legacyRole,
+      });
+    } else {
+      setCurrentUser(null);
+    }
+  }, [verifiedProfile]);
 
   const [stores, setStores] = useState<Store[]>([]);
   const [visits, setVisits] = useState<ScheduledVisit[]>([]);
@@ -1620,8 +1647,10 @@ export const AppProvider: React.FC<{
         currentUser,
         currentRole,
         setCurrentRole,
-        verifiedIamRole: verifiedProfile?.iamRole ?? null,
+        verifiedIamRole,
         isStrictAdmin,
+        isContraloriaOrAdmin,
+        isTradeOpsRole,
         caracasWeekStartYmd,
         users,
         stores,

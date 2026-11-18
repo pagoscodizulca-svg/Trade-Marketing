@@ -12,6 +12,7 @@ import {
 import { GlobalExportPdfModal } from './GlobalExportPdfModal';
 import { RoleGuard } from '../auth/RoleGuard';
 import { useApp } from '../../context/AppContext';
+import type { ManagedUserRole } from '../../services/userManagementService';
 
 export type MainNavTab =
   | 'promotoras'
@@ -19,6 +20,14 @@ export type MainNavTab =
   | 'contraloria'
   | 'kpis_trazabilidad'
   | 'gestion_usuarios';
+
+export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]> = {
+  promotoras: ['super_admin', 'coordinacion', 'supervisor'],
+  llenado_cronograma: ['super_admin', 'coordinacion', 'supervisor'],
+  contraloria: ['super_admin', 'contraloria', 'coordinacion'],
+  kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion', 'supervisor'],
+  gestion_usuarios: ['super_admin'],
+};
 
 interface HeaderProps {
   activeTab: MainNavTab;
@@ -106,8 +115,8 @@ export const Header: React.FC<HeaderProps> = ({
             {navItems.map((item) => {
               const isActive = activeTab === item.id;
               return (
+                <RoleGuard key={item.id} allowedRoles={MODULE_ALLOWED_ROLES[item.id]}>
                 <button
-                  key={item.id}
                   type="button"
                   title={`${item.label} — ${item.subtitle}`}
                   aria-label={`${item.label} — ${item.subtitle}`}
@@ -179,6 +188,7 @@ export const Header: React.FC<HeaderProps> = ({
                     }`}
                   />
                 </button>
+                </RoleGuard>
               );
             })}
           </nav>

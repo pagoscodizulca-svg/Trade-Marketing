@@ -374,6 +374,93 @@ CREATE TRIGGER trg_validate_asistencia_evidencia_slot
 -- =============================================================================
 -- 3. ROW LEVEL SECURITY (RLS) ZERO TRUST EN TABLAS DE ASISTENCIA
 -- =============================================================================
+
+-- Garantía defensiva de orden lexicográfico: si este archivo se ejecuta de forma
+-- aislada antes de `20261112_zero_trust_fdv_promotoras_portal_ruta.sql`, asegura
+-- la existencia del esquema `private` y sus helpers requeridos por las políticas.
+CREATE SCHEMA IF NOT EXISTS private;
+REVOKE ALL ON SCHEMA private FROM PUBLIC, anon;
+GRANT USAGE ON SCHEMA private TO authenticated, service_role;
+
+DO $$
+BEGIN
+  IF to_regprocedure('private.current_app_role()') IS NULL THEN
+    EXECUTE $fn$
+      CREATE FUNCTION private.current_app_role()
+      RETURNS TEXT
+      LANGUAGE sql
+      STABLE
+      SECURITY INVOKER
+      SET search_path = ''
+      AS $body$
+        SELECT lower(
+          pg_catalog.btrim(
+            COALESCE(
+              (SELECT auth.jwt()) -> 'app_metadata' ->> 'app_role',
+              (SELECT auth.jwt()) -> 'app_metadata' ->> 'role',
+              ''
+            )
+          )
+        );
+      $body$;
+    $fn$;
+  END IF;
+
+  IF to_regprocedure('private.is_coordinator_or_admin()') IS NULL THEN
+    EXECUTE $fn$
+      CREATE FUNCTION private.is_coordinator_or_admin()
+      RETURNS BOOLEAN
+      LANGUAGE sql
+      STABLE
+      SECURITY INVOKER
+      SET search_path = ''
+      AS $body$
+        SELECT (SELECT auth.uid()) IS NOT NULL
+           AND (SELECT private.current_app_role()) IN (
+             'super_admin',
+             'superadmin',
+             'admin',
+             'gerencia',
+             'gerente_admin',
+             'coordinacion',
+             'coordinadora',
+             'coordinadora_trade',
+             'jefe_trade',
+             'supervisor'
+           );
+      $body$;
+    $fn$;
+  END IF;
+
+  IF to_regprocedure('private.current_active_promotora_id()') IS NULL THEN
+    EXECUTE $fn$
+      CREATE FUNCTION private.current_active_promotora_id()
+      RETURNS UUID
+      LANGUAGE plpgsql
+      STABLE
+      SECURITY DEFINER
+      SET search_path = ''
+      AS $body$
+      DECLARE
+        v_uid UUID := (SELECT auth.uid());
+        v_staff_id UUID := NULL;
+      BEGIN
+        IF v_uid IS NULL THEN
+          RETURN NULL;
+        END IF;
+        SELECT s.id INTO v_staff_id
+        FROM public.staff s
+        WHERE s.auth_user_id = v_uid
+        LIMIT 1;
+        RETURN v_staff_id;
+      END;
+      $body$;
+    $fn$;
+    REVOKE ALL ON FUNCTION private.current_active_promotora_id() FROM PUBLIC, anon;
+    GRANT EXECUTE ON FUNCTION private.current_active_promotora_id() TO authenticated, service_role;
+  END IF;
+END $$;
+
 ALTER TABLE public.asistencias_jornada ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.asistencia_evidencias ENABLE ROW LEVEL SECURITY;
 

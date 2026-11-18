@@ -1,7 +1,4 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
-  SUPABASE_ANON_KEY,
-  SUPABASE_PROJECT_URL,
   assertSupabaseConfigured,
   getSupabaseClient,
   isSupabaseConfigured,
@@ -10,21 +7,29 @@ import {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
-export const MIN_SUPABASE_PASSWORD_LENGTH = 6;
-export const ISOLATED_SIGNUP_STORAGE_KEY = 'codizulca-isolated-signup';
+export const MIN_SUPABASE_PASSWORD_LENGTH = 8;
 
-export type ManagedUserRole = 'super_admin' | 'coordinacion' | 'vendedor';
+export type ManagedUserRole =
+  | 'super_admin'
+  | 'contraloria'
+  | 'coordinacion'
+  | 'supervisor'
+  | 'vendedor';
 
 export const MANAGED_USER_ROLES: readonly ManagedUserRole[] = [
   'super_admin',
+  'contraloria',
   'coordinacion',
+  'supervisor',
   'vendedor',
 ] as const;
 
 export const MANAGED_USER_ROLE_LABELS: Record<ManagedUserRole, string> = {
   super_admin: 'Administrador General',
-  coordinacion: 'Coordinación',
-  vendedor: 'Vendedor',
+  contraloria: 'Contraloría Interna',
+  coordinacion: 'Coordinación Trade',
+  supervisor: 'Supervisor de Campo',
+  vendedor: 'Vendedor (FDV)',
 };
 
 export interface ManagedUserProfile {
@@ -88,7 +93,9 @@ interface RawAuditRow {
 export function isManagedUserRole(value: unknown): value is ManagedUserRole {
   return (
     value === 'super_admin' ||
+    value === 'contraloria' ||
     value === 'coordinacion' ||
+    value === 'supervisor' ||
     value === 'vendedor'
   );
 }
@@ -165,7 +172,9 @@ function validateEmail(rawEmail: string): string {
 function validateRole(rawRole: unknown): ManagedUserRole {
   const clean = String(rawRole ?? '').trim().toLowerCase();
   if (!isManagedUserRole(clean)) {
-    throw new Error('Rol inválido. Selecciona super_admin, coordinacion o vendedor.');
+    throw new Error(
+      'Rol inválido. Selecciona super_admin, contraloria, coordinacion, supervisor o vendedor.'
+    );
   }
   return clean;
 }
@@ -249,44 +258,33 @@ function formatSupabaseRpcError(error: { message?: string; code?: string } | nul
   return msg;
 }
 
-/**
- * Instancia un cliente aislado estrictamente en memoria con las variables públicas estándar
- * (`persistSession: false`, `autoRefreshToken: false`, `detectSessionInUrl: false`,
- * `storageKey: 'codizulca-isolated-signup'`) para que `auth.signUp()` jamás cierre ni
- * reemplace la sesión activa del `super_admin`.
- */
-function createIsolatedSignupClient(): SupabaseClient {
+async function requireAuthenticatedSuperAdminSession(): Promise<{
+  userId: string;
+  accessToken: string;
+}> {
   assertSupabaseConfigured();
+  const client = getSupabaseClient();
+  const [{ data: userData, error: userErr }, { data: sessionData }] = await Promise.all([
+    client.auth.getUser(),
+    client.auth.getSession(),
+  ]);
 
-  return createClient(SUPABASE_PROJECT_URL, SUPABASE_ANON_KEY, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-      detectSessionInUrl: false,
-      storageKey: ISOLATED_SIGNUP_STORAGE_KEY,
-      storage: {
-        getItem: () => null,
-        setItem: () => {
-          // Almacenamiento aislado en memoria: nunca escribe en localStorage
-        },
-        removeItem: () => {
-          // Intencionalmente vacío
-        },
-      },
-    },
-  });
+  const token = String(sessionData.session?.access_token ?? '').trim();
+  if (userErr || !userData.user?.id || !token) {
+    throw new Error(
+      'Sesión no válida o expirada. Inicia sesión nuevamente como Administrador General.'
+    );
+  }
+
+  return {
+    userId: userData.user.id,
+    accessToken: token,
+  };
 }
 
 async function requireAuthenticatedSuperAdminSessionId(): Promise<string> {
-  assertSupabaseConfigured();
-  const client = getSupabaseClient();
-  const { data, error } = await client.auth.getUser();
-
-  if (error || !data.user?.id) {
-    throw new Error('Sesión no válida o expirada. Inicia sesión nuevamente como Administrador General.');
-  }
-
-  return data.user.id;
+  const session = await requireAuthenticatedSuperAdminSession();
+  return session.userId;
 }
 
 /**
@@ -349,16 +347,14 @@ export async function listManagedUsers(): Promise<ManagedUserProfile[]> {
 }
 
 /**
- * Crea un usuario activo y confirmado de inmediato en dos pasos seguros:
- *  - Paso A: Registra únicamente `{ email, password }` en Auth mediante `isolatedClient`
- *    (sin confiar en `user_metadata` ni tocar la sesión activa del `super_admin`).
- *  - Paso B: Invoca `public.admin_finalize_created_user` con el cliente principal autenticado
- *    para fijar nombre, rol real, confirmación inmediata y `must_change_password`.
+ * Crea un usuario corporativo activo y confirmado exclusivamente a través del backend
+ * administrativo (`POST /api/admin/corporate-users`), eliminando el uso de `auth.signUp()`
+ * público en el navegador y permitiendo mantener cerrado el registro abierto en Supabase Auth.
  */
 export async function createManagedUser(
   input: CreateManagedUserInput
 ): Promise<ManagedUserProfile> {
-  await requireAuthenticatedSuperAdminSessionId();
+  const { accessToken } = await requireAuthenticatedSuperAdminSession();
 
   const fullName = validateFullName(input.fullName);
   const email = validateEmail(input.email);
@@ -372,64 +368,38 @@ export async function createManagedUser(
     );
   }
 
-  const isolatedClient = createIsolatedSignupClient();
-
-  try {
-    // Paso A: Registro aislado en Auth sin user_metadata privilegiado
-    const { data: signUpData, error: signUpError } = await isolatedClient.auth.signUp({
+  const res = await fetch('/api/admin/corporate-users', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      fullName,
       email,
       password,
-    });
+      role,
+      mustChangePassword,
+    }),
+  });
 
-    if (signUpError) {
-      throw new Error(
-        formatSupabaseRpcError(signUpError, 'No se pudo registrar el usuario en Supabase Auth.')
-      );
-    }
+  const payload = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    code?: string;
+    profile?: RawProfileRow;
+  };
 
-    const createdUser = signUpData.user;
-    if (!createdUser?.id || !UUID_REGEX.test(createdUser.id)) {
-      throw new Error('Supabase Auth no devolvió un identificador de usuario válido.');
-    }
-
-    // Cuando la confirmación de correo está activa en Supabase, un email ya existente
-    // retorna identities=[] sin error explícito para prevenir enumeración pública.
-    if (Array.isArray(createdUser.identities) && createdUser.identities.length === 0) {
-      throw new Error('Este correo electrónico ya está registrado en el sistema.');
-    }
-
-    // Paso B: Cliente principal autenticado como super_admin finaliza perfil, rol y confirmación
-    const adminClient = getSupabaseClient();
-    const { data: rpcRows, error: rpcError } = await adminClient.rpc(
-      'admin_finalize_created_user',
-      {
-        p_target_user_id: createdUser.id,
-        p_full_name: fullName,
-        p_role: role,
-        p_must_change_password: mustChangePassword,
-      }
+  if (!res.ok || !payload.profile) {
+    throw new Error(
+      formatSupabaseRpcError(
+        { message: payload.error, code: payload.code },
+        `No se pudo crear el usuario corporativo (HTTP ${res.status}).`
+      )
     );
-
-    if (rpcError) {
-      throw new Error(
-        formatSupabaseRpcError(
-          rpcError,
-          'El usuario fue creado en Auth, pero falló la activación del perfil administrativo.'
-        )
-      );
-    }
-
-    const row = Array.isArray(rpcRows) ? (rpcRows[0] as RawProfileRow | undefined) : undefined;
-    if (!row) {
-      throw new Error('La base de datos no devolvió el perfil finalizado del usuario.');
-    }
-
-    return mapProfileRow(row);
-  } finally {
-    await isolatedClient.auth.signOut({ scope: 'local' }).catch(() => {
-      // Limpieza local silenciosa de la instancia aislada en memoria
-    });
   }
+
+  return mapProfileRow(payload.profile);
 }
 
 /**

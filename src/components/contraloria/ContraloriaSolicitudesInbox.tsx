@@ -27,7 +27,7 @@ interface ContraloriaSolicitudesInboxProps {
 export const ContraloriaSolicitudesInbox: React.FC<
   ContraloriaSolicitudesInboxProps
 > = ({ onSelectApprovedRequisitionCode }) => {
-  const { currentUser, solicitudesContraloria } = useApp();
+  const { currentUser, isContraloriaOrAdmin, solicitudesContraloria } = useApp();
 
   const auditorDisplayName = useMemo(() => {
     if (
@@ -96,6 +96,13 @@ export const ContraloriaSolicitudesInbox: React.FC<
 
   const handleControllerAction = async (decision: 'APROBADA' | 'RECHAZADA') => {
     if (!selectedSolicitud || isProcessingDecision) return;
+    if (!isContraloriaOrAdmin) {
+      setActionBanner({
+        text: 'Segregación de Funciones: solo Contraloría Interna o Administración General pueden aprobar o rechazar solicitudes de producto.',
+        isError: true,
+      });
+      return;
+    }
 
     setIsProcessingDecision(decision);
     setActionBanner(null);
@@ -381,6 +388,7 @@ export const ContraloriaSolicitudesInbox: React.FC<
                   </div>
 
                   {selectedSolicitud.estado === 'PENDIENTE_APROBACION' ? (
+                    isContraloriaOrAdmin ? (
                     <div className="space-y-3">
                       <div>
                         <label className="block text-xs font-bold text-zinc-300 mb-1.5">
@@ -425,6 +433,15 @@ export const ContraloriaSolicitudesInbox: React.FC<
                         </button>
                       </div>
                     </div>
+                    ) : (
+                      <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/35 text-xs text-amber-200 flex items-center gap-2.5">
+                        <ShieldCheck className="w-4 h-4 text-amber-300 shrink-0" />
+                        <span>
+                          <strong>Segregación de Funciones activa:</strong> solicitud radicada y en
+                          espera de dictamen por Contraloría Interna o Administración General.
+                        </span>
+                      </div>
+                    )
                   ) : (
                     <div
                       className={`p-3.5 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${

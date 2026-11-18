@@ -8,7 +8,7 @@ import { Calendar, LogOut, MapPin } from 'lucide-react';
 import { RoleGuard } from './components/auth/RoleGuard';
 import { TradeAuthGate } from './components/auth/TradeAuthGate';
 import { AppProvider, useApp } from './context/AppContext';
-import { Header, MainNavTab } from './components/common/Header';
+import { Header, MODULE_ALLOWED_ROLES, MainNavTab } from './components/common/Header';
 import {
   DegustacionesNotificationBell,
   DegustacionesRealtimeToastStack,
@@ -53,8 +53,11 @@ const MainAppContent: React.FC<{
   isLocalDevWorkstation: boolean;
   onSignOut: () => Promise<void>;
 }> = ({ authProfile, isLocalDevWorkstation, onSignOut }) => {
+  const defaultHomeTab: MainNavTab =
+    authProfile.iamRole === 'contraloria' ? 'contraloria' : 'promotoras';
+
   const [activeTab, setActiveTabState] = useState<MainNavTab>(() =>
-    isUserManagementPath() ? 'gestion_usuarios' : 'promotoras'
+    isUserManagementPath() ? 'gestion_usuarios' : defaultHomeTab
   );
 
   const setActiveTab = useCallback((nextTab: MainNavTab) => {
@@ -77,12 +80,12 @@ const MainAppContent: React.FC<{
       if (isUserManagementPath()) {
         setActiveTabState('gestion_usuarios');
       } else {
-        setActiveTabState((prev) => (prev === 'gestion_usuarios' ? 'promotoras' : prev));
+        setActiveTabState((prev) => (prev === 'gestion_usuarios' ? defaultHomeTab : prev));
       }
     };
     window.addEventListener('popstate', syncTabFromUrl);
     return () => window.removeEventListener('popstate', syncTabFromUrl);
-  }, []);
+  }, [defaultHomeTab]);
   const liveClock = useLiveVenezuelaClock();
   const {
     degustacionNotifications,
@@ -246,23 +249,63 @@ const MainAppContent: React.FC<{
             }
           >
             {/* Modulo 1: Promotoras y FDV */}
-            {activeTab === 'promotoras' && <FieldPromotoraView />}
+            {activeTab === 'promotoras' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.promotoras}
+                variant="route"
+                deniedTitle="Módulo operativo de Trade Marketing y Supervisión"
+                deniedDescription="El acceso a Promotoras y FDV está reservado para Coordinación Trade, Supervisión de Campo y Administración General."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <FieldPromotoraView />
+              </RoleGuard>
+            )}
 
             {/* Modulo 2: Llenado por productos(Cronograma) */}
-            {activeTab === 'llenado_cronograma' && <ScheduleMatrixView />}
+            {activeTab === 'llenado_cronograma' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.llenado_cronograma}
+                variant="route"
+                deniedTitle="Módulo de Planificación y Matriz de Productos"
+                deniedDescription="La edición de cronogramas e insumos está reservada para Coordinación Trade, Supervisión de Campo y Administración General."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <ScheduleMatrixView />
+              </RoleGuard>
+            )}
 
             {/* Modulo 3: Contraloría */}
-            {activeTab === 'contraloria' && <ContraloriaView />}
+            {activeTab === 'contraloria' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.contraloria}
+                variant="route"
+                deniedTitle="Módulo de Contraloría Interna"
+                deniedDescription="Tu perfil de Supervisión de Campo no tiene acceso al módulo financiero de Contraloría Interna."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <ContraloriaView />
+              </RoleGuard>
+            )}
 
             {/* Modulo 4: KPI y Trazabilidad */}
-            {activeTab === 'kpis_trazabilidad' && <ExecutiveDashboard />}
+            {activeTab === 'kpis_trazabilidad' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.kpis_trazabilidad}
+                variant="route"
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <ExecutiveDashboard />
+              </RoleGuard>
+            )}
 
             {/* Módulo IAM Exclusivo Super Admin: Gestión de Usuarios */}
             {activeTab === 'gestion_usuarios' && (
               <RoleGuard
-                allowedRoles={['super_admin']}
+                allowedRoles={MODULE_ALLOWED_ROLES.gestion_usuarios}
                 variant="route"
-                onReturnHome={() => setActiveTab('promotoras')}
+                deniedTitle="Módulo exclusivo del Administrador General"
+                deniedDescription="Tu perfil actual no cuenta con autorización para acceder a Gestión de Usuarios."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
                 <UserManagementView />
               </RoleGuard>

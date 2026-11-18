@@ -38,39 +38,46 @@ end $$;
 -- Para que los eventos UPDATE/DELETE de Realtime lleguen con la fila completa.
 alter table public.entregas_degustacion replica identity full;
 
--- Row Level Security
+-- Row Level Security (Zero Trust — rol anon bloqueado al 100%)
 alter table public.entregas_degustacion enable row level security;
 
--- ADVERTENCIA / TODO: estas políticas son PERMISIVAS (cualquiera con la anon key puede leer y escribir)
--- porque la app aún no autentica usuarios. DEBEN ENDURECERSE antes de uso en producción
--- (p. ej. exigir rol `authenticated` y filtrar por usuario/organización).
--- Nota: la app no usa `delete` con la anon key salvo al importar en modo "reemplazar";
--- si se endurecen las políticas, hay que conservar delete para quien importe.
+revoke all on public.entregas_degustacion from public, anon;
+grant select, insert, update, delete on public.entregas_degustacion to authenticated;
 
 drop policy if exists "entregas_degustacion_select" on public.entregas_degustacion;
-create policy "entregas_degustacion_select"
-  on public.entregas_degustacion for select
-  to anon, authenticated
-  using (true);
-
 drop policy if exists "entregas_degustacion_insert" on public.entregas_degustacion;
-create policy "entregas_degustacion_insert"
-  on public.entregas_degustacion for insert
-  to anon, authenticated
-  with check (true);
-
 drop policy if exists "entregas_degustacion_update" on public.entregas_degustacion;
-create policy "entregas_degustacion_update"
-  on public.entregas_degustacion for update
-  to anon, authenticated
-  using (true)
-  with check (true);
-
--- Importación en modo "reemplazar": la app elimina los registros anteriores tras insertar los nuevos.
 drop policy if exists "entregas_degustacion_delete" on public.entregas_degustacion;
-create policy "entregas_degustacion_delete"
-  on public.entregas_degustacion for delete
-  to anon, authenticated
-  using (true);
 
-grant select, insert, update, delete on public.entregas_degustacion to anon, authenticated;
+create policy "entregas_degustacion_select_authenticated"
+  on public.entregas_degustacion for select
+  to authenticated
+  using ((select auth.uid()) is not null);
+
+create policy "entregas_degustacion_insert_coord"
+  on public.entregas_degustacion for insert
+  to authenticated
+  with check (
+    lower(coalesce((select auth.jwt()) -> 'app_metadata' ->> 'app_role', (select auth.jwt()) -> 'app_metadata' ->> 'role', ''))
+      in ('super_admin', 'admin', 'coordinacion', 'coordinadora', 'supervisor')
+  );
+
+create policy "entregas_degustacion_update_logistics"
+  on public.entregas_degustacion for update
+  to authenticated
+  using (
+    lower(coalesce((select auth.jwt()) -> 'app_metadata' ->> 'app_role', (select auth.jwt()) -> 'app_metadata' ->> 'role', ''))
+      in ('super_admin', 'admin', 'coordinacion', 'coordinadora', 'supervisor', 'chofer')
+  )
+  with check (
+    lower(coalesce((select auth.jwt()) -> 'app_metadata' ->> 'app_role', (select auth.jwt()) -> 'app_metadata' ->> 'role', ''))
+      in ('super_admin', 'admin', 'coordinacion', 'coordinadora', 'supervisor', 'chofer')
+  );
+
+create policy "entregas_degustacion_delete_coord"
+  on public.entregas_degustacion for delete
+  to authenticated
+  using (
+    lower(coalesce((select auth.jwt()) -> 'app_metadata' ->> 'app_role', (select auth.jwt()) -> 'app_metadata' ->> 'role', ''))
+      in ('super_admin', 'admin', 'coordinacion', 'coordinadora', 'supervisor')
+  );

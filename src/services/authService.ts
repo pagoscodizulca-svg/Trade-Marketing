@@ -10,7 +10,13 @@ export const GENERIC_INVALID_CREDENTIALS_MESSAGE = 'Correo o contraseña incorre
 export const PORTAL_UNAUTHORIZED_ACCESS_MESSAGE =
   'Acceso no habilitado: tu correo no figura como promotora activa en el registro de Personal.';
 
-export type CanonicalAppRole = 'promotora' | 'coordinadora' | 'admin' | 'fdv';
+export type CanonicalAppRole =
+  | 'admin'
+  | 'contraloria'
+  | 'coordinadora'
+  | 'supervisor'
+  | 'promotora'
+  | 'fdv';
 
 export interface VerifiedAuthProfile {
   userId: string;
@@ -22,6 +28,8 @@ export interface VerifiedAuthProfile {
   legacyRole: UserRole;
   staffId: string | null;
   isCoordinatorOrAdmin: boolean;
+  canAccessTorreControl: boolean;
+  mustChangePassword: boolean;
 }
 
 /**
@@ -95,15 +103,19 @@ export function normalizeCanonicalAppRole(rawRole: unknown): CanonicalAppRole | 
   ) {
     return 'admin';
   }
+  if (clean === 'contraloria' || clean === 'analista_contraloria' || clean === 'contralor') {
+    return 'contraloria';
+  }
   if (
     clean === 'coordinacion' ||
     clean === 'coordinadora' ||
     clean === 'coordinadora_trade' ||
-    clean === 'jefe_trade' ||
-    clean === 'supervisor' ||
-    clean === 'analista_contraloria'
+    clean === 'jefe_trade'
   ) {
     return 'coordinadora';
+  }
+  if (clean === 'supervisor' || clean === 'supervisora' || clean === 'supervisor_trade') {
+    return 'supervisor';
   }
   if (clean === 'promotora') {
     return 'promotora';
@@ -115,40 +127,60 @@ export function normalizeCanonicalAppRole(rawRole: unknown): CanonicalAppRole | 
 }
 
 function mapToLegacyUserRole(rawRole: string, canonical: CanonicalAppRole | null): UserRole {
-  if (rawRole === 'analista_contraloria') return 'analista_contraloria';
-  if (rawRole === 'supervisor') return 'supervisor';
+  if (canonical === 'contraloria' || rawRole === 'analista_contraloria') {
+    return 'analista_contraloria';
+  }
+  if (canonical === 'supervisor' || rawRole === 'supervisor') {
+    return 'supervisor';
+  }
   if (canonical === 'admin') return 'gerente_admin';
   if (canonical === 'coordinadora') return 'jefe_trade';
   return 'promotora';
 }
 
-function resolveFallbackIamRole(
-  rawAppRole: string,
-  normalizedEmail: string
-): ManagedUserRole | null {
+function resolveFallbackIamRole(rawAppRole: string): ManagedUserRole | null {
   const clean = String(rawAppRole ?? '').trim().toLowerCase();
   if (isManagedUserRole(clean)) {
     return clean;
   }
-  if (clean === 'superadmin') {
+  if (
+    clean === 'superadmin' ||
+    clean === 'admin' ||
+    clean === 'gerencia' ||
+    clean === 'gerente_admin'
+  ) {
     return 'super_admin';
   }
-  if (clean === 'admin' && normalizedEmail === 'admin@codizulca.com') {
-    return 'super_admin';
+  if (clean === 'analista_contraloria' || clean === 'contralor') {
+    return 'contraloria';
   }
   if (
     clean === 'coordinadora' ||
     clean === 'coordinadora_trade' ||
-    clean === 'jefe_trade' ||
-    clean === 'supervisor' ||
-    clean === 'analista_contraloria'
+    clean === 'jefe_trade'
   ) {
     return 'coordinacion';
+  }
+  if (clean === 'supervisora' || clean === 'supervisor_trade') {
+    return 'supervisor';
   }
   if (clean === 'fdv' || clean === 'fuerza_ventas') {
     return 'vendedor';
   }
   return null;
+}
+
+function isTradeCoordinatorOrAdminCanonical(role: CanonicalAppRole | null): boolean {
+  return role === 'admin' || role === 'coordinadora' || role === 'supervisor';
+}
+
+function canCanonicalRoleAccessTorre(role: CanonicalAppRole | null): boolean {
+  return (
+    role === 'admin' ||
+    role === 'contraloria' ||
+    role === 'coordinadora' ||
+    role === 'supervisor'
+  );
 }
 
 /**
@@ -170,7 +202,7 @@ export function extractVerifiedProfileFromAuthUser(
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
 
   const email = normalizePortalEmail(user.email || '');
-  const iamRole = resolveFallbackIamRole(rawAppRole, email);
+  const iamRole = resolveFallbackIamRole(rawAppRole);
   const safeNameFromMeta = String(appMeta.display_name ?? '').trim();
   const displayName =
     safeNameFromMeta ||
@@ -185,7 +217,9 @@ export function extractVerifiedProfileFromAuthUser(
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
-    isCoordinatorOrAdmin: appRole === 'coordinadora' || appRole === 'admin',
+    isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(appRole),
+    canAccessTorreControl: canCanonicalRoleAccessTorre(appRole),
+    mustChangePassword: appMeta.must_change_password === true,
   };
 }
 
@@ -287,7 +321,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
     const client = getSupabaseClient();
     const { data: iamProfile, error: iamError } = await client
       .from('profiles')
-      .select('role, full_name, is_active')
+      .select('role, full_name, is_active, must_change_password')
       .eq('id', base.userId)
       .maybeSingle();
 
@@ -304,10 +338,12 @@ export async function resolveVerifiedProfileWithStaffFallback(
           email: normalizedEmail,
           displayName: iamFullName || base.displayName,
           appRole: iamCanonical,
-          iamRole: resolveFallbackIamRole(rawIamRole, normalizedEmail),
+          iamRole: resolveFallbackIamRole(rawIamRole),
           rawAppRole: rawIamRole,
           legacyRole: mapToLegacyUserRole(rawIamRole, iamCanonical),
-          isCoordinatorOrAdmin: iamCanonical === 'coordinadora' || iamCanonical === 'admin',
+          isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(iamCanonical),
+          canAccessTorreControl: canCanonicalRoleAccessTorre(iamCanonical),
+          mustChangePassword: Boolean(iamProfile.must_change_password),
         };
       }
     }
@@ -315,7 +351,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
     // Si public.profiles aún no está disponible, continúa con verificación JWT/staff
   }
 
-  if (base.isCoordinatorOrAdmin || base.appRole === 'fdv') {
+  if (base.canAccessTorreControl || base.appRole === 'fdv') {
     return { ...base, email: normalizedEmail };
   }
 
@@ -330,6 +366,8 @@ export async function resolveVerifiedProfileWithStaffFallback(
       staffId: activeStaff.staffId,
       displayName: activeStaff.name || base.displayName,
       isCoordinatorOrAdmin: false,
+      canAccessTorreControl: false,
+      mustChangePassword: false,
     };
   }
 
@@ -385,6 +423,8 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
       staffId: activeStaff.staffId,
       displayName: activeStaff.name || base.displayName,
       isCoordinatorOrAdmin: false,
+      canAccessTorreControl: false,
+      mustChangePassword: false,
     },
     unauthorizedReason: null,
   };

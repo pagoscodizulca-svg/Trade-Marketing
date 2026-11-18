@@ -6,6 +6,8 @@ import type { ManagedUserRole } from '../../services/userManagementService';
 export interface RoleGuardProps {
   allowedRoles: readonly ManagedUserRole[];
   variant?: 'inline' | 'route';
+  deniedTitle?: string;
+  deniedDescription?: string;
   onReturnHome?: () => void;
   children?: React.ReactNode;
 }
@@ -14,12 +16,14 @@ export interface RoleGuardProps {
  * Guardia declarativo de autorización IAM:
  * - En modo `inline` (por defecto, ej. enlaces de menú): oculta completamente el nodo del DOM
  *   si el rol verificado no pertenece a `allowedRoles`.
- * - En modo `route` (acceso directo por URL): bloquea el montaje de la vista protegida y
+ * - En modo `route` (acceso directo por URL o pestaña): bloquea el montaje de la vista protegida y
  *   muestra una pantalla corporativa 403 con retorno controlado al inicio.
  */
 export const RoleGuard: React.FC<RoleGuardProps> = ({
   allowedRoles,
   variant = 'inline',
+  deniedTitle = 'Acceso restringido para tu rol corporativo',
+  deniedDescription = 'Tu perfil actual no cuenta con autorización para operar este módulo.',
   onReturnHome,
   children,
 }) => {
@@ -51,10 +55,10 @@ export const RoleGuard: React.FC<RoleGuardProps> = ({
           HTTP 403 · Acceso Restringido
         </span>
         <h2 className="text-lg font-extrabold text-white tracking-tight">
-          Módulo exclusivo del Administrador General
+          {deniedTitle}
         </h2>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          Tu perfil actual no cuenta con autorización para acceder a Gestión de Usuarios.
+          {deniedDescription}
         </p>
       </div>
 
