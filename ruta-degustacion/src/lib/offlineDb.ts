@@ -388,3 +388,15 @@ export async function setMeta<T>(key: string, value: T): Promise<void> {
   });
   notifyChange('meta');
 }
+
+/** Purga atómicamente todas las tablas locales de IndexedDB al expirar, revocarse o cerrarse una jornada. */
+export async function purgeAllOfflineData(): Promise<void> {
+  await run([STORE_DELIVERIES, STORE_OUTBOX, STORE_META], 'readwrite', async (tx) => {
+    tx.objectStore(STORE_DELIVERIES).clear();
+    tx.objectStore(STORE_OUTBOX).clear();
+    tx.objectStore(STORE_META).clear();
+  });
+  notifyChange('deliveries');
+  notifyChange('outbox');
+  notifyChange('meta');
+}

@@ -133,6 +133,8 @@ import {
 } from '../../services/degustacionesWeeklyCycleService';
 import { TradeContraloriaSolicitudesTab } from './TradeContraloriaSolicitudesTab';
 import { MultiFormatTastingUploadModal } from './MultiFormatTastingUploadModal';
+import { ShiftLinkManagerPanel } from '../admin/ShiftLinkManagerPanel';
+import { isOperativeSucursal, type OperativeSucursal } from '../../services/userManagementService';
 
 export type FieldSubTab =
   | 'degustaciones'
@@ -309,7 +311,15 @@ export const FieldPromotoraView: React.FC = () => {
     focusedTastingSnapshot,
     setFocusedTastingSnapshot,
     solicitudesContraloria,
+    activeSucursal,
+    verifiedSucursal,
   } = useApp();
+
+  const resolvedFieldSucursal: OperativeSucursal = isOperativeSucursal(activeSucursal)
+    ? activeSucursal
+    : isOperativeSucursal(verifiedSucursal)
+      ? verifiedSucursal
+      : 'ZULIA';
 
   const liveClock = useLiveVenezuelaClock();
   const [selectedMetric360, setSelectedMetric360] = useState<Metric360Id | null>(null);
@@ -3357,26 +3367,12 @@ export const FieldPromotoraView: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    const selectedProm =
-                      tastingPromotoraFilter !== 'TODAS' && tastingPromotoraFilter !== 'POR_ASIGNAR'
-                        ? staffList.find(
-                            (s) =>
-                              canonicalStaffKey(s.name) ===
-                              canonicalStaffKey(tastingPromotoraFilter)
-                          )
-                        : null;
-                    handleSendWhatsAppPortalLink({
-                      promotoraName: selectedProm?.name || null,
-                      promotoraEmail: selectedProm?.email || null,
-                      phone: selectedProm?.phone || null,
-                    });
-                  }}
-                  className="px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-500/45 hover:border-emerald-400 transition flex items-center gap-1.5 cursor-pointer"
-                  title="Enviar link dinámico /portal por WhatsApp a promotora"
+                  onClick={() => setActiveSubTab('personal')}
+                  className="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-bold border border-white/15 hover:border-red-500/45 transition flex items-center gap-1.5 cursor-pointer"
+                  title="Generar enlace dinámico firmado por jornada en la pestaña Personal"
                 >
-                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Enviar Link por WhatsApp</span>
+                  <ShieldCheck className="w-3.5 h-3.5 text-red-400" />
+                  <span>Enlaces Dinámicos</span>
                 </button>
 
                 {FEATURE_FLAGS.ENABLE_MODULO1_CARGAR_ARCHIVO && (
@@ -3415,6 +3411,44 @@ export const FieldPromotoraView: React.FC = () => {
                 )}
               </div>
             </div>
+
+            {/* Aviso Visual Instantáneo Realtime en la pestaña Degustaciones (FDV -> Trade Marketing) */}
+            {degustacionNotifications.unreadCount > 0 && (
+              <div
+                role="status"
+                data-testid="degustaciones-realtime-live-banner"
+                className="px-4 py-3 bg-red-950/45 border-b border-[#DC2626]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="relative flex h-2.5 w-2.5 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#DC2626] opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#DC2626]" />
+                  </span>
+                  <div className="min-w-0">
+                    <span className="font-extrabold text-white">
+                      {degustacionNotifications.unreadCount === 1
+                        ? '1 nueva solicitud de degustación recibida desde FDV'
+                        : `${degustacionNotifications.unreadCount} nuevas solicitudes de degustación recibidas desde FDV`}
+                    </span>
+                    {degustacionNotifications.unreadItems[0] && (
+                      <span className="text-zinc-300 ml-1.5">
+                        · Última: <strong className="text-white">{degustacionNotifications.unreadItems[0].storeName}</strong>{' '}
+                        ({degustacionNotifications.unreadItems[0].sellerName})
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => void degustacionNotifications.markAllAsRead()}
+                    className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-[#DC2626] text-zinc-200 hover:text-white border border-white/15 text-[11px] font-bold transition cursor-pointer"
+                  >
+                    Marcar como vistas
+                  </button>
+                </div>
+              </div>
+            )}
 
             {lastAuthorizedShareBanner && (
               <div className="px-4 py-3 bg-emerald-950/35 border-b border-emerald-500/35 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs">
@@ -6822,23 +6856,16 @@ export const FieldPromotoraView: React.FC = () => {
                 )}
               </div>
 
-              {/* Botones inferiores: Enviar Link por WhatsApp + Abrir /portal */}
+              {/* Acción de acceso firmado por jornada */}
               <div className="flex items-center gap-1.5 pt-0.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleSendWhatsAppPortalLink({
-                      promotoraName: member.name,
-                      promotoraEmail: member.email,
-                      phone: member.phone,
-                    })
-                  }
-                  className="flex-1 py-2 px-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 hover:text-white border border-emerald-500/40 transition cursor-pointer"
-                  title={`Enviar link de /portal por WhatsApp a ${member.name} (${member.phone || 'seleccionar contacto'})`}
+                <a
+                  href="#shift-links-personal-panel"
+                  className="flex-1 py-2 px-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 bg-red-600/15 hover:bg-red-600/30 text-red-200 hover:text-white border border-red-500/35 transition"
+                  title="Generar enlace dinámico firmado con expiración para esta promotora"
                 >
-                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span className="truncate">Enviar Link por WhatsApp</span>
-                </button>
+                  <ShieldCheck className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <span className="truncate">Generar Enlace Firmado</span>
+                </a>
                 <a
                   href={buildStaffAppLink(member)}
                   target="_blank"
@@ -6934,6 +6961,25 @@ export const FieldPromotoraView: React.FC = () => {
                   <span>Registrar Personal</span>
                 </button>
               </div>
+            </div>
+
+            {/* Generador de Enlaces Dinámicos Firmados (Promotoras + Chofer · Cero PII en URL) */}
+            <div id="shift-links-personal-panel">
+              <ShiftLinkManagerPanel
+                sucursal={resolvedFieldSucursal}
+                promotorasOptions={staffList.map((s) => ({
+                  id: s.id,
+                  name: s.name,
+                  roleLabel: s.role || 'Promotora',
+                }))}
+                routeSuggestions={Array.from(
+                  new Set(
+                    tastingSchedule
+                      .map((t) => String(t.zone || '').trim())
+                      .filter(Boolean)
+                  )
+                )}
+              />
             </div>
 
             {/* GRUPO 1: PLANTILLA FIJA */}

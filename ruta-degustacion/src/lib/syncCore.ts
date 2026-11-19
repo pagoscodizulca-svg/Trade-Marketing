@@ -23,6 +23,7 @@ const MENSAJE_SIN_CONFIG = 'Sin conexión configurada: faltan las credenciales p
 const MENSAJE_SIN_SESION =
   'Sesión requerida para sincronizar entregas con el servidor. Inicie sesión para enviar cambios pendientes.';
 export const AUTH_TOKEN_META_KEY = 'auth_access_token';
+export const SHIFT_TOKEN_META_KEY = 'shift_access_token';
 
 export interface SyncConfig {
   url: string;
@@ -78,6 +79,20 @@ export async function readAuthToken(): Promise<string | null> {
   return clean.length > 0 ? clean : null;
 }
 
+export async function saveShiftToken(token: string | null): Promise<void> {
+  await setMeta(SHIFT_TOKEN_META_KEY, token ? String(token).trim() : null);
+}
+
+export async function clearShiftToken(): Promise<void> {
+  await saveShiftToken(null);
+}
+
+export async function readShiftToken(): Promise<string | null> {
+  const token = await getMeta<string | null>(SHIFT_TOKEN_META_KEY);
+  const clean = typeof token === 'string' ? token.trim() : '';
+  return clean.length > 0 ? clean : null;
+}
+
 const backoffMs = (retryCount: number) => Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, retryCount));
 
 type SendOutcome =
@@ -120,7 +135,75 @@ export function buildOutboxHeaders(
 }
 
 const esErrorDeColumna = (status: number, texto: string) =>
-  status === 400 && /PGRST204|42703|hora_entrega_real|actualizado_chofer_at/i.test(texto);
+  status === 400 && /PGRST204|42703|hora_entrega_real|actualizado_chofer_at|client_mutation_id/i.test(texto);
+
+/**
+ * Envía UNA operación de jornada temporal firmada (`?t=...`) hacia `POST /api/shift-links/sync`
+ * con idempotencia estricta `client_mutation_id` (UUID v4) y validación de firma en servidor.
+ */
+async function sendOperationViaShiftLink(
+  shiftToken: string,
+  item: OutboxItem,
+  timeoutMs: number,
+): Promise<SendOutcome> {
+  const bodyObj = construirCuerpoServidor(item.payload, item.created_at_iso, true);
+  let res: Response;
+  try {
+    res = await fetchConTiempo(
+      '/api/shift-links/sync',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-shift-token': shiftToken,
+        },
+        body: JSON.stringify({
+          mutations: [
+            {
+              client_mutation_id: item.operation_id,
+              tipo: 'CHOFER_ENTREGA_PATCH',
+              payload: {
+                delivery_id: item.delivery_id,
+                ...bodyObj,
+              },
+            },
+          ],
+        }),
+      },
+      timeoutMs,
+    );
+  } catch (err) {
+    const abortado = err instanceof Error && err.name === 'AbortError';
+    return {
+      kind: 'network',
+      message: abortado ? `Sin respuesta del servidor en ${Math.round(timeoutMs / 1000)} s` : 'Sin conexión con el servidor',
+    };
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    return {
+      kind: 'auth',
+      message: 'El enlace dinámico de jornada expiró o fue revocado.',
+    };
+  }
+
+  if (res.ok) {
+    const parsed = (await res.json().catch(() => ({}))) as {
+      results?: Array<{ ok?: boolean; error?: string; code?: string }>;
+    };
+    const first = parsed.results?.[0];
+    if (first?.ok) return { kind: 'ok' };
+    if (first?.code === 'FORBIDDEN_SCOPE') {
+      return { kind: 'auth', message: first.error || 'Sin permisos para esta entrega.' };
+    }
+    return { kind: 'permanent', message: first?.error || 'Rechazado por el servidor de jornada.' };
+  }
+
+  if (res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500) {
+    return { kind: 'transient', message: `Servidor no disponible (${res.status})` };
+  }
+  return { kind: 'permanent', message: `El servidor rechazó la mutación (${res.status}).` };
+}
 
 /**
  * Envía UNA operación como PATCH por `id` con valores absolutos (idempotente).
@@ -148,7 +231,12 @@ async function sendOperation(
         {
           method: 'PATCH',
           headers: buildOutboxHeaders(cfg, accessToken, { Prefer: 'return=representation' }),
-          body: JSON.stringify(construirCuerpoServidor(item.payload, item.created_at_iso, conExtra)),
+          body: JSON.stringify({
+            ...construirCuerpoServidor(item.payload, item.created_at_iso, conExtra),
+            ...(conExtra && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.operation_id)
+              ? { client_mutation_id: item.operation_id }
+              : {}),
+          }),
         },
         timeoutMs,
       );
@@ -248,16 +336,17 @@ async function ejecutar(opts: FlushOptions): Promise<FlushResult> {
     result.status = result.remaining > 0 ? 'offline' : 'idle';
     return result;
   }
+  const shiftToken = await readShiftToken();
   const cfg = await readConfig();
-  if (!cfg) {
+  if (!shiftToken && !cfg) {
     result.remaining = await countOutbox();
     result.status = result.remaining > 0 ? 'sin-config' : 'idle';
     result.lastError = result.remaining > 0 ? MENSAJE_SIN_CONFIG : null;
     return result;
   }
 
-  const accessToken = await readAuthToken();
-  if (!accessToken || accessToken === cfg.anonKey) {
+  const accessToken = shiftToken ? null : await readAuthToken();
+  if (!shiftToken && (!accessToken || (cfg && accessToken === cfg.anonKey))) {
     result.remaining = await countOutbox();
     result.status = result.remaining > 0 ? 'auth-required' : 'idle';
     result.lastError = result.remaining > 0 ? MENSAJE_SIN_SESION : null;
@@ -287,7 +376,9 @@ async function ejecutar(opts: FlushOptions): Promise<FlushResult> {
       continue;
     }
 
-    const out = await sendOperation(cfg, accessToken, tomada, timeoutMs);
+    const out = shiftToken
+      ? await sendOperationViaShiftLink(shiftToken, tomada, timeoutMs)
+      : await sendOperation(cfg!, accessToken!, tomada, timeoutMs);
     if (out.kind === 'ok') {
       await ackOperation(tomada.operation_id, tomada.delivery_id);
       result.sent += 1;

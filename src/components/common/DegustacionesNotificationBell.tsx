@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell,
+  BellOff,
+  BellRing,
   Check,
   CheckCheck,
   Clock,
@@ -12,6 +14,12 @@ import {
   X,
 } from 'lucide-react';
 import { DegustacionNotificationItem, DegustacionToastAlert } from '../../types';
+import {
+  getWebPushClientState,
+  subscribeBrowserToWebPush,
+  unsubscribeBrowserFromWebPush,
+  type WebPushClientStatus,
+} from '../../services/webPushClientService';
 
 function formatExactAndRelativeVeTime(isoString: string, nowMs: number): {
   relative: string;
@@ -83,7 +91,44 @@ export const DegustacionesNotificationBell: React.FC<DegustacionesNotificationBe
   const [isOpen, setIsOpen] = useState(false);
   const [isMarkingAll, setIsMarkingAll] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [pushStatus, setPushStatus] = useState<WebPushClientStatus>('prompt');
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushFeedback, setPushFeedback] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    void getWebPushClientState().then((res) => {
+      if (active) setPushStatus(res.status);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  const handleToggleWebPush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    setPushFeedback(null);
+    try {
+      if (pushStatus === 'subscribed') {
+        await unsubscribeBrowserFromWebPush();
+        setPushStatus('prompt');
+        setPushFeedback('Alertas Push del navegador desactivadas.');
+      } else {
+        await subscribeBrowserToWebPush();
+        setPushStatus('subscribed');
+        setPushFeedback('Alertas Web Push activadas para nuevas degustaciones FDV.');
+      }
+    } catch (err) {
+      setPushFeedback(
+        err instanceof Error ? err.message : 'No se pudo actualizar el estado de Web Push.'
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   // Actualizar reloj relativo cada 20 segundos mientras esté montado
   useEffect(() => {
@@ -230,6 +275,52 @@ export const DegustacionesNotificationBell: React.FC<DegustacionesNotificationBe
               </button>
             )}
           </div>
+
+          {/* Barra de suscripción Web Push (VAPID) + Estado Realtime */}
+          {pushStatus !== 'unsupported' && (
+            <div className="px-4 py-2 bg-[#121215] border-b border-white/[0.08] flex flex-wrap items-center justify-between gap-2 text-[10px]">
+              <span className="text-zinc-400 inline-flex items-center gap-1.5">
+                {pushStatus === 'subscribed' ? (
+                  <BellRing className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                ) : (
+                  <BellOff className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                )}
+                <span>
+                  {pushStatus === 'subscribed'
+                    ? 'Web Push VAPID activo en este dispositivo'
+                    : pushStatus === 'unconfigured'
+                      ? 'Web Push pendiente de llaves VAPID en servidor'
+                      : pushStatus === 'denied'
+                        ? 'Permiso de notificaciones bloqueado en navegador'
+                        : 'Recibe alertas de FDV incluso en segundo plano'}
+                </span>
+              </span>
+              {(pushStatus === 'prompt' || pushStatus === 'subscribed') && (
+                <button
+                  type="button"
+                  data-testid="btn-toggle-web-push"
+                  disabled={pushBusy}
+                  onClick={() => void handleToggleWebPush()}
+                  className={`px-2 py-1 rounded-md font-bold border transition cursor-pointer disabled:opacity-50 ${
+                    pushStatus === 'subscribed'
+                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 hover:bg-zinc-900'
+                      : 'bg-[#DC2626] hover:bg-red-500 text-white border-[#DC2626]'
+                  }`}
+                >
+                  {pushBusy
+                    ? 'Procesando...'
+                    : pushStatus === 'subscribed'
+                      ? 'Desactivar Push'
+                      : 'Activar Push'}
+                </button>
+              )}
+              {pushFeedback && (
+                <span className="basis-full text-[10px] text-zinc-300 font-mono">
+                  {pushFeedback}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Lista de Degustaciones Pendientes de Revisión */}
           <div className="max-h-[410px] overflow-y-auto divide-y divide-white/[0.06] bg-[#09090B]">

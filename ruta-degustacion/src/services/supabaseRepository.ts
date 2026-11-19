@@ -17,7 +17,8 @@ import {
   type OutboxItem,
   type StoredDelivery,
 } from '../lib/offlineDb';
-import { saveAuthToken, saveConfig, TABLE } from '../lib/syncCore';
+import { readShiftToken, saveAuthToken, saveConfig, TABLE } from '../lib/syncCore';
+import { fetchChoferShiftBootstrap } from './shiftSessionService';
 
 /*
  * Tabla requerida en Supabase: ver supabase/migrations/20261106_entregas_degustacion.sql
@@ -146,8 +147,14 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     return token;
   }
 
-  /** Descarga todas las filas (paginadas) del servidor con la sesión autenticada del usuario. */
+  /** Descarga todas las filas (paginadas) del servidor con la sesión autenticada o enlace de jornada firmado. */
   async function traerTodo(): Promise<Record<string, unknown>[]> {
+    const shiftToken = idbOk ? await readShiftToken().catch(() => null) : null;
+    if (shiftToken) {
+      const boot = await fetchChoferShiftBootstrap(shiftToken);
+      return boot.entregas;
+    }
+
     const client = await getClient();
     await syncSessionToken(client);
     const filas: Record<string, unknown>[] = [];
@@ -241,6 +248,8 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
 
   async function abrirRealtime(): Promise<void> {
     if (realtimeAbierto || !started) return;
+    const shiftToken = idbOk ? await readShiftToken().catch(() => null) : null;
+    if (shiftToken) return; // Las jornadas firmadas operan sobre bootstrap + sync HTTPS sin abrir canal amplio
     realtimeAbierto = true;
     try {
       const client = await getClient();
@@ -264,9 +273,14 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
 
   async function arrancar(): Promise<void> {
     try {
-      await saveConfig({ url, anonKey });
-      const client = await getClient();
-      await syncSessionToken(client).catch(() => undefined);
+      if (url && anonKey) {
+        await saveConfig({ url, anonKey });
+      }
+      const activeShiftToken = await readShiftToken().catch(() => null);
+      if (!activeShiftToken && url && anonKey) {
+        const client = await getClient();
+        await syncSessionToken(client).catch(() => undefined);
+      }
       const filas = await getAllDeliveries();
       const iso = await getMeta<string>('last_full_sync_iso');
       // Las marcas «Sincronizado en servidor» de la sesión anterior se limpian al abrir la app.

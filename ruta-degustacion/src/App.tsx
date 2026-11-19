@@ -23,6 +23,13 @@ import {
   signOutRutaUser,
   subscribeRutaAuthEvents,
 } from './services/supabaseAuth';
+import {
+  loadChoferShiftSessionSync,
+  purgeChoferOfflineSensitiveData,
+  saveChoferShiftSession,
+  verifyChoferShiftToken,
+  type StoredChoferShiftSession,
+} from './services/shiftSessionService';
 
 const MODE_KEY = 'rutadegustacion:v1:modo';
 
@@ -37,6 +44,7 @@ function modoInicial(): AppMode {
 export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<RutaAuthUser | null>(null);
+  const [shiftSession, setShiftSession] = useState<StoredChoferShiftSession | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [modoSolicitado, setModoSolicitado] = useState<AppMode>(modoInicial);
   const [uiTheme, setUiTheme] = useState<RutaUiThemeMode>(() => readStoredRutaUiThemeMode());
@@ -59,10 +67,85 @@ export default function App() {
 
   const { configError } = useMemo(() => resolveRutaSupabaseConfig(), []);
 
-  // Restaurar sesión persistente y validar perfil activo en `public.profiles`
+  // Restaurar enlace dinámico firmado (`?t=...`) O sesión persistente Supabase Auth
   useEffect(() => {
     let active = true;
-    void restoreRutaSession().then((res) => {
+
+    const toChoferUserFromShift = (stored: StoredChoferShiftSession): RutaAuthUser => ({
+      id: stored.session.personal_id || stored.session.id,
+      email: '',
+      fullName:
+        stored.session.personal_nombre ||
+        `Chofer Jornada · ${stored.session.ruta_codigo}`,
+      role: 'chofer',
+      sucursal: stored.session.sucursal,
+    });
+
+    const bootstrapSession = async () => {
+      const url = new URL(window.location.href);
+      const rawToken = url.searchParams.get('t')?.trim() || '';
+
+      if (rawToken) {
+        url.searchParams.delete('t');
+        url.searchParams.set('modo', 'chofer');
+        window.history.replaceState(null, '', url);
+
+        const verified = await verifyChoferShiftToken(rawToken);
+        if (!active) return;
+
+        if (!verified.ok) {
+          await purgeChoferOfflineSensitiveData();
+          setShiftSession(null);
+          setAuthUser(null);
+          setAuthError(verified.error);
+          setAuthLoading(false);
+          return;
+        }
+
+        if (verified.session.rol !== 'chofer') {
+          await purgeChoferOfflineSensitiveData();
+          setShiftSession(null);
+          setAuthUser(null);
+          setAuthError('Este enlace firmado corresponde al portal de Promotoras (/portal).');
+          setAuthLoading(false);
+          return;
+        }
+
+        const stored: StoredChoferShiftSession = {
+          token: rawToken,
+          session: verified.session,
+          savedAtIso: new Date().toISOString(),
+        };
+        await saveChoferShiftSession(stored);
+        if (!active) return;
+        setShiftSession(stored);
+        setAuthUser(toChoferUserFromShift(stored));
+        setAuthError(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      const cachedShift = loadChoferShiftSessionSync();
+      if (cachedShift && cachedShift.session.rol === 'chofer') {
+        const expMs = new Date(cachedShift.session.expires_at).getTime();
+        if (!Number.isFinite(expMs) || expMs <= Date.now()) {
+          await purgeChoferOfflineSensitiveData();
+          setShiftSession(null);
+          setAuthUser(null);
+          setAuthError('Tu enlace de jornada expiró y los datos locales fueron purgados.');
+          setAuthLoading(false);
+          return;
+        }
+        await saveChoferShiftSession(cachedShift);
+        if (!active) return;
+        setShiftSession(cachedShift);
+        setAuthUser(toChoferUserFromShift(cachedShift));
+        setAuthError(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      const res = await restoreRutaSession();
       if (!active) return;
       if (res.ok) {
         setAuthUser(res.user);
@@ -72,7 +155,9 @@ export default function App() {
         setAuthError(res.code === 'NO_SESSION' ? null : res.error);
       }
       setAuthLoading(false);
-    });
+    };
+
+    void bootstrapSession();
 
     const unsubscribe = subscribeRutaAuthEvents({
       onSignedOut: () => {
@@ -86,6 +171,41 @@ export default function App() {
       unsubscribe();
     };
   }, []);
+
+  // Vigilante automático de expiración UTC o revocación de jornada -> purga inmediata de IndexedDB
+  useEffect(() => {
+    if (!shiftSession) return;
+    const expMs = new Date(shiftSession.session.expires_at).getTime();
+    const triggerPurge = async (reason: string) => {
+      repo.stop();
+      await purgeChoferOfflineSensitiveData();
+      setShiftSession(null);
+      setAuthUser(null);
+      setAuthError(reason);
+    };
+
+    const check = () => {
+      if (!Number.isFinite(expMs) || Date.now() >= expMs) {
+        void triggerPurge('Tu enlace de jornada expiró. Los datos locales fueron purgados.');
+      }
+    };
+    check();
+    const timer = window.setInterval(check, 15_000);
+    return () => window.clearInterval(timer);
+  }, [repo, shiftSession]);
+
+  // Si la sincronización de jornada devuelve error de revocación/expiración, purgar automáticamente
+  useEffect(() => {
+    if (!shiftSession || !sync.errorMessage) return;
+    if (/expir[oó]|revocado|401|403|SESSION_REVOKED|SESSION_EXPIRED/i.test(sync.errorMessage)) {
+      repo.stop();
+      void purgeChoferOfflineSensitiveData().then(() => {
+        setShiftSession(null);
+        setAuthUser(null);
+        setAuthError('Tu enlace de jornada fue revocado o expiró. Los datos locales se purgaron.');
+      });
+    }
+  }, [repo, shiftSession, sync.errorMessage]);
 
   // Arrancar sincronización de entregas EXCLUSIVAMENTE con usuario autenticado y autorizado
   useEffect(() => {
@@ -139,10 +259,18 @@ export default function App() {
 
   const handleSignOut = useCallback(async () => {
     repo.stop();
+    if (shiftSession) {
+      await purgeChoferOfflineSensitiveData();
+      setShiftSession(null);
+      setAuthUser(null);
+      setAuthError(null);
+      return;
+    }
     await signOutRutaUser();
+    await purgeChoferOfflineSensitiveData();
     setAuthUser(null);
     setAuthError(null);
-  }, [repo]);
+  }, [repo, shiftSession]);
 
   if (authLoading || !authUser) {
     return (

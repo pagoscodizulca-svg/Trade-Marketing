@@ -38,11 +38,21 @@ import {
 import {
   decodeBase64ToBlob,
   enqueuePortalAction,
-  flushPortalOfflineQueue,
   isTransientOfflineOrNetworkError,
-  listPendingPortalActions,
-  type QueuedPortalAction,
+  loadPortalOfflineSnapshot,
+  loadPortalShiftSession,
+  purgePortalOfflineSensitiveData,
+  savePortalOfflineSnapshot,
+  savePortalShiftSession,
+  type StoredPortalShiftSession,
 } from '../../services/portalOfflineQueueService';
+import {
+  fetchShiftBootstrapData,
+  syncShiftOfflineMutationsBatch,
+  verifyShiftLinkToken,
+} from '../../services/shiftLinksService';
+import { useOfflineSync } from '../../hooks/useOfflineSync';
+import { OfflineSyncBanner } from './OfflineSyncBanner';
 import { createIncidenciaPdv } from '../../services/popIncidenciasService';
 import { isOperativeSucursal } from '../../services/userManagementService';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
@@ -86,6 +96,13 @@ function formatSyncTime(iso: string | null): string {
 export const PromotoraRutaPortalView: React.FC = () => {
   const [authChecking, setAuthChecking] = useState<boolean>(true);
   const [profile, setProfile] = useState<VerifiedAuthProfile | null>(null);
+  const [shiftSessionState, setShiftSessionState] = useState<StoredPortalShiftSession | null>(null);
+  const [shiftRoutes, setShiftRoutes] = useState<RutaPromotoraRecord[]>([]);
+  const [cachedOfflineRoutes, setCachedOfflineRoutes] = useState<RutaPromotoraRecord[]>([]);
+  const [geofenceCatalog, setGeofenceCatalog] = useState<PortalPdvGeofenceRef[]>([]);
+  const [cachedProductsCount, setCachedProductsCount] = useState<number>(0);
+  const [shiftSyncedAt, setShiftSyncedAt] = useState<string | null>(null);
+  const [shiftRefreshing, setShiftRefreshing] = useState<boolean>(false);
 
   const [emailInput, setEmailInput] = useState<string>('');
   const [passwordInput, setPasswordInput] = useState<string>('');
@@ -112,17 +129,162 @@ export const PromotoraRutaPortalView: React.FC = () => {
     return () => window.clearTimeout(t);
   }, [liveBanner]);
 
-  // Verificación criptográfica de sesión y pertenencia activa a Personal (public.staff)
+  const hydrateShiftBootstrap = useCallback(
+    async (token: string): Promise<boolean> => {
+      setShiftRefreshing(true);
+      try {
+        const boot = await fetchShiftBootstrapData(token);
+        const storedRecord: StoredPortalShiftSession = {
+          token,
+          session: boot.session,
+          savedAtIso: new Date().toISOString(),
+        };
+        const bootRoutes = (boot.rutas as RutaPromotoraRecord[]) || [];
+        await savePortalShiftSession(storedRecord);
+        await savePortalOfflineSnapshot({
+          routes: bootRoutes,
+          clients: boot.clientes,
+          products: boot.productos,
+          syncedAtIso: boot.syncedAt,
+        });
+        setShiftSessionState(storedRecord);
+        setShiftRoutes(bootRoutes);
+        setGeofenceCatalog(
+          boot.clientes.map((c) => ({
+            id: c.id,
+            codigoCliente: c.codigo_cliente,
+            nombreComercial: c.nombre_comercial,
+            latitud: typeof c.latitud === 'number' ? c.latitud : null,
+            longitud: typeof c.longitud === 'number' ? c.longitud : null,
+            radioGeocercaM: typeof c.radio_geocerca_m === 'number' ? c.radio_geocerca_m : 150,
+          }))
+        );
+        setCachedProductsCount(boot.productos.length);
+        setShiftSyncedAt(boot.syncedAt);
+        setActionError(null);
+        return true;
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (status === 401 || status === 403) {
+          await purgePortalOfflineSensitiveData();
+          setShiftSessionState(null);
+          setShiftRoutes([]);
+          setLoginError(
+            err instanceof Error
+              ? err.message
+              : 'Tu enlace dinámico de jornada expiró o fue revocado.'
+          );
+          return false;
+        }
+        if (isTransientOfflineOrNetworkError(err)) {
+          const snap = await loadPortalOfflineSnapshot();
+          setShiftRoutes(snap.routes);
+          setCachedProductsCount(snap.products.length);
+          setShiftSyncedAt(snap.syncedAtIso);
+          return true;
+        }
+        setActionError(
+          err instanceof Error ? err.message : 'No se pudo actualizar la jornada firmada.'
+        );
+        return false;
+      } finally {
+        setShiftRefreshing(false);
+      }
+    },
+    []
+  );
+
+  // Verificación criptográfica de Enlace Dinámico (`?t=...`) O sesión Supabase Auth
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setAuthChecking(false);
-      return;
-    }
-
     let active = true;
-    const client = getSupabaseClient();
 
-    void client.auth.getSession().then(async ({ data }) => {
+    const bootstrapAuthOrShift = async () => {
+      // 1. Detectar token opaco firmado `?t=...` en la URL y limpiar query string inmediatamente (Regla 3)
+      const urlParams =
+        typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+      const rawUrlToken = urlParams?.get('t')?.trim() || '';
+
+      if (rawUrlToken) {
+        try {
+          window.history.replaceState({}, '', '/portal');
+        } catch {
+          /* ignorar */
+        }
+
+        const verified = await verifyShiftLinkToken(rawUrlToken);
+        if (!active) return;
+
+        if (!verified.ok) {
+          await purgePortalOfflineSensitiveData();
+          setShiftSessionState(null);
+          setProfile(null);
+          setLoginError(verified.error);
+          setAuthChecking(false);
+          return;
+        }
+
+        if (verified.session.rol !== 'promotora') {
+          await purgePortalOfflineSensitiveData();
+          setShiftSessionState(null);
+          setLoginError('Este enlace firmado corresponde al portal de Choferes (/logistica).');
+          setAuthChecking(false);
+          return;
+        }
+
+        await hydrateShiftBootstrap(rawUrlToken);
+        if (active) setAuthChecking(false);
+        return;
+      }
+
+      // 2. Rehidratar sesión de enlace temporal previa (permite abrir la PWA 100 % offline)
+      const storedShift = await loadPortalShiftSession().catch(() => null);
+      if (!active) return;
+      if (storedShift && storedShift.session?.rol === 'promotora') {
+        const expMs = new Date(storedShift.session.expires_at).getTime();
+        if (!Number.isFinite(expMs) || expMs <= Date.now()) {
+          await purgePortalOfflineSensitiveData();
+          setShiftSessionState(null);
+          setLoginError(
+            'Tu enlace de jornada expiró. Los datos locales fueron purgados automáticamente.'
+          );
+        } else {
+          const snap = await loadPortalOfflineSnapshot().catch(() => ({
+            routes: [],
+            clients: [],
+            products: [],
+            syncedAtIso: null,
+          }));
+          if (!active) return;
+          setShiftSessionState(storedShift);
+          setShiftRoutes(snap.routes);
+          setGeofenceCatalog(
+            snap.clients.map((c) => ({
+              id: c.id,
+              codigoCliente: c.codigo_cliente,
+              nombreComercial: c.nombre_comercial,
+              latitud: typeof c.latitud === 'number' ? c.latitud : null,
+              longitud: typeof c.longitud === 'number' ? c.longitud : null,
+              radioGeocercaM: typeof c.radio_geocerca_m === 'number' ? c.radio_geocerca_m : 150,
+            }))
+          );
+          setCachedProductsCount(snap.products.length);
+          setShiftSyncedAt(snap.syncedAtIso);
+          setAuthChecking(false);
+          if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+            void hydrateShiftBootstrap(storedShift.token);
+          }
+          return;
+        }
+      }
+
+      // 3. Sesión estándar Supabase Auth por correo electrónico
+      if (!isSupabaseConfigured) {
+        setAuthChecking(false);
+        return;
+      }
+
+      const client = getSupabaseClient();
+      const { data } = await client.auth.getSession();
       if (!active) return;
       if (!data.session) {
         setProfile(null);
@@ -139,8 +301,17 @@ export const PromotoraRutaPortalView: React.FC = () => {
         setLoginError(unauthorizedReason);
       }
       setAuthChecking(false);
-    });
+    };
 
+    void bootstrapAuthOrShift();
+
+    if (!isSupabaseConfigured) {
+      return () => {
+        active = false;
+      };
+    }
+
+    const client = getSupabaseClient();
     const { data: listener } = client.auth.onAuthStateChange(async (event, session) => {
       if (!active || inFlightLoginRef.current) return;
       if (event === 'SIGNED_OUT' || !session) {
@@ -163,7 +334,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
       active = false;
       listener.subscription.unsubscribe();
     };
-  }, []);
+  }, [hydrateShiftBootstrap]);
 
   const {
     routes,
@@ -175,19 +346,51 @@ export const PromotoraRutaPortalView: React.FC = () => {
     refreshRoutes,
     applyOptimisticRouteUpdate,
   } = usePromotoraRutaRealtime({
-    profile,
+    profile: shiftSessionState ? null : profile,
     supervisorFilterPromotoraId: null,
     onLiveBanner: showBanner,
   });
 
+  // Persistir instantánea offline también en sesiones Auth estándar
+  useEffect(() => {
+    if (shiftSessionState || !profile) return;
+    if (routes.length > 0) {
+      setCachedOfflineRoutes(routes);
+      void savePortalOfflineSnapshot({
+        routes,
+        clients: geofenceCatalog.map((g) => ({
+          id: g.id,
+          codigo_cliente: g.codigoCliente,
+          nombre_comercial: g.nombreComercial,
+          latitud: g.latitud,
+          longitud: g.longitud,
+          radio_geocerca_m: g.radioGeocercaM,
+        })),
+        products: [],
+        syncedAtIso: lastSyncedAt ?? new Date().toISOString(),
+      }).catch(() => undefined);
+    } else if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      void loadPortalOfflineSnapshot()
+        .then((snap) => {
+          if (snap.routes.length > 0) setCachedOfflineRoutes(snap.routes);
+        })
+        .catch(() => undefined);
+    }
+  }, [geofenceCatalog, lastSyncedAt, profile, routes, shiftSessionState]);
+
+  const activeRoutesList = useMemo(
+    () => (shiftSessionState ? shiftRoutes : routes.length > 0 ? routes : cachedOfflineRoutes),
+    [cachedOfflineRoutes, routes, shiftRoutes, shiftSessionState]
+  );
+
   const todayYmd = getCaracasTodayYmd();
 
   const filteredRoutes = useMemo(() => {
-    return routes.filter((r) => {
+    return activeRoutesList.filter((r) => {
       if (dateFilter === 'hoy') return r.fecha === todayYmd;
       return r.fecha >= todayYmd;
     });
-  }, [routes, dateFilter, todayYmd]);
+  }, [activeRoutesList, dateFilter, todayYmd]);
 
   const handleLoginSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -229,19 +432,23 @@ export const PromotoraRutaPortalView: React.FC = () => {
   };
 
   const handleSignOut = async () => {
+    if (shiftSessionState) {
+      await purgePortalOfflineSensitiveData();
+      setShiftSessionState(null);
+      setShiftRoutes([]);
+      setLoginError(null);
+      return;
+    }
     await signOutSupabaseSession();
+    await purgePortalOfflineSensitiveData();
     setProfile(null);
+    setCachedOfflineRoutes([]);
     setPasswordInput('');
     setShowPassword(false);
     setLoginError(null);
   };
 
-  // ---- Hito 5 (B-08): GPS + geocerca + ejecución PDV + cola offline ----
-  const [geofenceCatalog, setGeofenceCatalog] = useState<PortalPdvGeofenceRef[]>([]);
-  const [pendingOffline, setPendingOffline] = useState<QueuedPortalAction[]>([]);
-  const [isOnline, setIsOnline] = useState<boolean>(
-    typeof navigator === 'undefined' ? true : navigator.onLine
-  );
+  // ---- Hito 5 (B-08) + v1.9.0: GPS + geocerca + ejecución PDV + hook reactivo useOfflineSync ----
   const [geoFeedback, setGeoFeedback] = useState<Record<string, string>>({});
   const [executionTarget, setExecutionTarget] = useState<RutaPromotoraRecord | null>(null);
   const [execForm, setExecForm] = useState({
@@ -258,23 +465,112 @@ export const PromotoraRutaPortalView: React.FC = () => {
   const [incidenciaRutaTarget, setIncidenciaRutaTarget] = useState<RutaPromotoraRecord | null>(
     null
   );
-  const flushingRef = useRef(false);
 
   const openIncidenciaModalForRuta = useCallback((ruta: RutaPromotoraRecord | null) => {
     setIncidenciaRutaTarget(ruta);
     setIncidenciaModalOpen(true);
   }, []);
 
-  const refreshPending = useCallback(async () => {
-    try {
-      setPendingOffline(await listPendingPortalActions());
-    } catch {
-      setPendingOffline([]);
-    }
-  }, []);
+  const offlineSync = useOfflineSync({
+    enabled: Boolean(profile || shiftSessionState),
+    shiftExpiresAtIso: shiftSessionState?.session.expires_at ?? null,
+    executeAction: async (action) => {
+      if (shiftSessionState) {
+        const mut =
+          action.kind === 'INCIDENCIA_PDV'
+            ? {
+                client_mutation_id: action.id,
+                tipo: 'PROMOTORA_INCIDENCIA' as const,
+                payload: {
+                  pdv_nombre: action.pdvNombre,
+                  cliente_id: action.clienteId ?? null,
+                  ruta_id: action.rutaId ?? null,
+                  tipo_incidencia: action.tipoIncidencia,
+                  severidad: action.severidad,
+                  descripcion: action.descripcion,
+                  reportado_por_nombre:
+                    action.reportadoPorNombre || shiftSessionState.session.personal_nombre || '',
+                },
+                photoBase64: action.photoBase64 ?? null,
+              }
+            : {
+                client_mutation_id: action.id,
+                tipo: 'PROMOTORA_RUTA_STEP' as const,
+                payload: {
+                  ruta_id: action.rutaId,
+                  accion: action.accion,
+                  lat: action.lat,
+                  lng: action.lng,
+                  accuracy_m: action.accuracyMeters,
+                  motivo_fuera_geocerca: action.motivoFueraGeocerca ?? '',
+                  ejecucion: action.ejecucion ?? null,
+                },
+              };
+        const res = await syncShiftOfflineMutationsBatch(shiftSessionState.token, [mut]);
+        const first = res.results[0];
+        if (!first?.ok) {
+          throw new Error(first?.error || 'No se pudo sincronizar el registro offline.');
+        }
+        return;
+      }
+
+      if (action.kind === 'INCIDENCIA_PDV') {
+        const photoBlob = action.photoBase64
+          ? decodeBase64ToBlob(action.photoBase64, action.photoMimeType)
+          : null;
+        await createIncidenciaPdv(
+          {
+            pdvNombre: action.pdvNombre,
+            clienteId: action.clienteId ?? null,
+            rutaId: action.rutaId ?? null,
+            tipoIncidencia: action.tipoIncidencia,
+            severidad: action.severidad,
+            descripcion: action.descripcion,
+            ...(action.reportadoPorNombre
+              ? { reportadoPorNombre: action.reportadoPorNombre }
+              : {}),
+            ...(action.sucursal ? { sucursal: action.sucursal } : {}),
+          },
+          photoBlob
+        );
+        return;
+      }
+
+      await submitPromotoraRouteExecution({
+        rutaId: action.rutaId,
+        accion: action.accion,
+        clientSubmissionId: action.id,
+        lat: action.lat,
+        lng: action.lng,
+        accuracyMeters: action.accuracyMeters,
+        motivoFueraGeocerca: action.motivoFueraGeocerca,
+        ejecucion: action.ejecucion ?? null,
+      });
+    },
+    onSynced: (count) => {
+      showBanner(`${count} registro(s) offline sincronizado(s) con el servidor.`);
+      if (shiftSessionState) {
+        void hydrateShiftBootstrap(shiftSessionState.token);
+      } else {
+        void refreshRoutes();
+      }
+    },
+    onShiftInvalidated: (reason) => {
+      setShiftSessionState(null);
+      setShiftRoutes([]);
+      setLoginError(reason);
+    },
+  });
+
+  const {
+    isOnline,
+    pendingActions: pendingOffline,
+    refreshPending,
+    syncNow: flushOfflineQueue,
+  } = offlineSync;
 
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || shiftSessionState) return;
     let active = true;
     void fetchPortalPdvGeofences().then((rows) => {
       if (active) setGeofenceCatalog(rows);
@@ -283,79 +579,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [profile, refreshPending]);
-
-  const flushOfflineQueue = useCallback(
-    async (force = false) => {
-      if (flushingRef.current) return;
-      flushingRef.current = true;
-      try {
-        const result = await flushPortalOfflineQueue(
-          async (action) => {
-            if (action.kind === 'INCIDENCIA_PDV') {
-              const photoBlob = action.photoBase64
-                ? decodeBase64ToBlob(action.photoBase64, action.photoMimeType)
-                : null;
-              await createIncidenciaPdv(
-                {
-                  pdvNombre: action.pdvNombre,
-                  clienteId: action.clienteId ?? null,
-                  rutaId: action.rutaId ?? null,
-                  tipoIncidencia: action.tipoIncidencia,
-                  severidad: action.severidad,
-                  descripcion: action.descripcion,
-                  ...(action.reportadoPorNombre
-                    ? { reportadoPorNombre: action.reportadoPorNombre }
-                    : {}),
-                  ...(action.sucursal ? { sucursal: action.sucursal } : {}),
-                },
-                photoBlob
-              );
-              return;
-            }
-
-            await submitPromotoraRouteExecution({
-              rutaId: action.rutaId,
-              accion: action.accion,
-              clientSubmissionId: action.id,
-              lat: action.lat,
-              lng: action.lng,
-              accuracyMeters: action.accuracyMeters,
-              motivoFueraGeocerca: action.motivoFueraGeocerca,
-              ejecucion: action.ejecucion ?? null,
-            });
-          },
-          { forceIgnoreSchedule: force }
-        );
-        if (result.succeeded > 0) {
-          showBanner(`${result.succeeded} registro(s) offline sincronizado(s).`);
-          void refreshRoutes();
-        }
-        await refreshPending();
-      } finally {
-        flushingRef.current = false;
-      }
-    },
-    [refreshPending, refreshRoutes, showBanner]
-  );
-
-  useEffect(() => {
-    const onOnline = () => {
-      setIsOnline(true);
-      void flushOfflineQueue(true);
-    };
-    const onOffline = () => setIsOnline(false);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    const timer = window.setInterval(() => {
-      if (navigator.onLine) void flushOfflineQueue(false);
-    }, 30000);
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-      window.clearInterval(timer);
-    };
-  }, [flushOfflineQueue]);
+  }, [profile, refreshPending, shiftSessionState]);
 
   const performRouteStep = async (
     item: RutaPromotoraRecord,
@@ -402,9 +626,72 @@ export const PromotoraRutaPortalView: React.FC = () => {
     const submissionId =
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
-        : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        : '00000000-0000-4000-8000-' + Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+
+    const enqueueLocalAndApplyOptimistic = async () => {
+      await enqueuePortalAction({
+        id: submissionId,
+        rutaId: item.id,
+        accion,
+        clienteNombre: item.cliente_nombre,
+        lat: fix?.lat ?? null,
+        lng: fix?.lng ?? null,
+        accuracyMeters: fix?.accuracyMeters ?? null,
+        motivoFueraGeocerca: motivoFuera,
+        ejecucion,
+      });
+      const optimisticStatus = accion === 'CHECKIN' ? 'EN_CURSO' : 'COMPLETADA';
+      if (shiftSessionState) {
+        setShiftRoutes((prev) =>
+          prev.map((r) => (r.id === item.id ? { ...r, estado_ruta: optimisticStatus } : r))
+        );
+      } else {
+        applyOptimisticRouteUpdate({ ...item, estado_ruta: optimisticStatus });
+      }
+      await refreshPending();
+      showBanner('Sin conexión: el registro quedó en cola offline y se sincronizará automáticamente.');
+      if (accion === 'CHECKOUT') setExecutionTarget(null);
+    };
 
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        await enqueueLocalAndApplyOptimistic();
+        return;
+      }
+
+      if (shiftSessionState) {
+        const res = await syncShiftOfflineMutationsBatch(shiftSessionState.token, [
+          {
+            client_mutation_id: submissionId,
+            tipo: 'PROMOTORA_RUTA_STEP',
+            payload: {
+              ruta_id: item.id,
+              accion,
+              lat: fix?.lat ?? null,
+              lng: fix?.lng ?? null,
+              accuracy_m: fix?.accuracyMeters ?? null,
+              motivo_fuera_geocerca: motivoFuera,
+              ejecucion,
+            },
+          },
+        ]);
+        const first = res.results[0];
+        if (!first?.ok) {
+          throw new Error(first?.error || 'No se pudo actualizar la ruta de jornada.');
+        }
+        const nextStatus = accion === 'CHECKIN' ? 'EN_CURSO' : 'COMPLETADA';
+        setShiftRoutes((prev) =>
+          prev.map((r) => (r.id === item.id ? { ...r, estado_ruta: nextStatus } : r))
+        );
+        showBanner(
+          accion === 'CHECKIN'
+            ? `Check-in registrado en ${item.cliente_nombre}.`
+            : `Degustación completada en ${item.cliente_nombre}.`
+        );
+        if (accion === 'CHECKOUT') setExecutionTarget(null);
+        return;
+      }
+
       const result = await submitPromotoraRouteExecution({
         rutaId: item.id,
         accion,
@@ -423,21 +710,15 @@ export const PromotoraRutaPortalView: React.FC = () => {
       );
       if (accion === 'CHECKOUT') setExecutionTarget(null);
     } catch (err) {
+      const status = (err as { status?: number })?.status;
+      if (shiftSessionState && (status === 401 || status === 403)) {
+        await offlineSync.purgeAndCloseShift(
+          err instanceof Error ? err.message : 'Tu enlace de jornada expiró o fue revocado.'
+        );
+        return;
+      }
       if (isTransientOfflineOrNetworkError(err)) {
-        await enqueuePortalAction({
-          id: submissionId,
-          rutaId: item.id,
-          accion,
-          clienteNombre: item.cliente_nombre,
-          lat: fix?.lat ?? null,
-          lng: fix?.lng ?? null,
-          accuracyMeters: fix?.accuracyMeters ?? null,
-          motivoFueraGeocerca: motivoFuera,
-          ejecucion,
-        });
-        await refreshPending();
-        showBanner('Sin conexión: el registro quedó en cola offline y se sincronizará automáticamente.');
-        if (accion === 'CHECKOUT') setExecutionTarget(null);
+        await enqueueLocalAndApplyOptimistic();
       } else {
         const message =
           err instanceof Error ? err.message : 'No se pudo actualizar el estado de la ruta.';
@@ -502,13 +783,25 @@ export const PromotoraRutaPortalView: React.FC = () => {
     );
   };
 
-  if (!isSupabaseConfigured) {
+  if (!isSupabaseConfigured && !shiftSessionState && !authChecking) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
-        <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/30 p-6 text-center space-y-3">
+        <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/35 p-6 text-center space-y-3">
           <AlertTriangle className="w-10 h-10 text-red-500 mx-auto" />
-          <h1 className="text-lg font-extrabold">Portal de Promotoras sin conexión</h1>
-          <p className="text-xs text-zinc-400">{SUPABASE_NOT_CONFIGURED_MESSAGE}</p>
+          <h1 className="text-lg font-extrabold">
+            {loginError ? 'Acceso de Jornada Finalizado' : 'Portal de Promotoras sin conexión'}
+          </h1>
+          {loginError ? (
+            <div
+              role="alert"
+              data-testid="shift-invalid-alert"
+              className="rounded-xl bg-red-950/60 border border-red-500/45 px-3.5 py-2.5 text-xs text-red-100 text-left"
+            >
+              {loginError}
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-400">{SUPABASE_NOT_CONFIGURED_MESSAGE}</p>
+          )}
         </div>
       </div>
     );
@@ -526,7 +819,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
   }
 
   // 1. Pantalla Minimalista de Login Exclusivo (Solo Correo Electrónico y Contraseña)
-  if (!profile) {
+  if (!profile && !shiftSessionState) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center px-4 py-8 font-sans selection:bg-red-600 selection:text-white">
         <div className="w-full max-w-sm rounded-2xl bg-zinc-950 border border-white/15 shadow-[0_24px_64px_-16px_rgba(0,0,0,0.9)] p-6 sm:p-8 space-y-6">
@@ -645,6 +938,25 @@ export const PromotoraRutaPortalView: React.FC = () => {
     );
   }
 
+  const activeDisplayName = shiftSessionState
+    ? shiftSessionState.session.personal_nombre || 'Promotora en Jornada'
+    : (profile?.displayName ?? 'Promotora');
+  const activePortalSucursal = shiftSessionState
+    ? shiftSessionState.session.sucursal
+    : isOperativeSucursal(profile?.sucursal)
+      ? profile.sucursal
+      : null;
+  const effectiveLastSyncedAt = shiftSessionState ? shiftSyncedAt : lastSyncedAt;
+  const effectiveIsRefreshing = shiftSessionState ? shiftRefreshing : isRefreshing;
+  const effectiveIsLoading = shiftSessionState ? shiftRefreshing && shiftRoutes.length === 0 : isLoading;
+  const handleManualRefresh = () => {
+    if (shiftSessionState) {
+      void hydrateShiftBootstrap(shiftSessionState.token);
+    } else {
+      void refreshRoutes();
+    }
+  };
+
   // 2. Vista Operativa Exclusiva del Módulo de Ruta de la Promotora Activa
   return (
     <div className="min-h-screen bg-[#09090b] text-white flex flex-col font-sans">
@@ -665,33 +977,33 @@ export const PromotoraRutaPortalView: React.FC = () => {
                 </h1>
                 <span
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border ${
-                    isRealtimeConnected
+                    isOnline && (isRealtimeConnected || Boolean(shiftSessionState))
                       ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
                       : 'bg-amber-950/70 text-amber-300 border-amber-700/60'
                   }`}
                   title={
-                    isRealtimeConnected
-                      ? 'Suscripción WebSocket activa en tiempo real'
-                      : 'Modo respaldo seguro activo (reconciliación automática)'
+                    isOnline
+                      ? 'Conectado con respaldo Offline PWA activo'
+                      : 'Modo Offline PWA activo (sincronización automática al reconectar)'
                   }
                 >
-                  {isRealtimeConnected ? (
+                  {isOnline ? (
                     <>
-                      <Wifi className="w-3 h-3" /> En Vivo
+                      <Wifi className="w-3 h-3" /> {shiftSessionState ? 'Jornada' : 'En Vivo'}
                     </>
                   ) : (
                     <>
-                      <WifiOff className="w-3 h-3" /> Respaldo
+                      <WifiOff className="w-3 h-3" /> Offline
                     </>
                   )}
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 truncate flex items-center gap-1.5">
                 <UserCheck className="w-3 h-3 text-red-400 shrink-0" />
-                <span className="truncate">{profile.displayName}</span>
+                <span className="truncate">{activeDisplayName}</span>
                 <span className="text-zinc-600">·</span>
                 <span className="font-mono text-[10px] text-zinc-500">
-                  Sync: {formatSyncTime(lastSyncedAt)}
+                  Sync: {formatSyncTime(effectiveLastSyncedAt)}
                 </span>
               </p>
             </div>
@@ -713,17 +1025,19 @@ export const PromotoraRutaPortalView: React.FC = () => {
             )}
             <button
               type="button"
-              onClick={() => void refreshRoutes()}
-              disabled={isRefreshing}
-              title="Recargar ruta verificada desde Supabase"
+              onClick={handleManualRefresh}
+              disabled={effectiveIsRefreshing}
+              title="Recargar ruta verificada desde el servidor"
               className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-200 disabled:opacity-50 cursor-pointer"
             >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-red-400' : ''}`} />
+              <RefreshCw
+                className={`w-4 h-4 ${effectiveIsRefreshing ? 'animate-spin text-red-400' : ''}`}
+              />
             </button>
             <button
               type="button"
               onClick={() => void handleSignOut()}
-              title="Cerrar sesión"
+              title={shiftSessionState ? 'Cerrar jornada y purgar datos locales' : 'Cerrar sesión'}
               className="p-2 rounded-xl bg-zinc-900 hover:bg-red-950/60 border border-zinc-800 hover:border-red-700 text-zinc-300 hover:text-red-300 cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
@@ -733,6 +1047,30 @@ export const PromotoraRutaPortalView: React.FC = () => {
       </header>
 
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-5 space-y-4">
+        <OfflineSyncBanner
+          visualState={offlineSync.visualState}
+          pendingCount={offlineSync.pendingCount}
+          isSyncing={offlineSync.isSyncing}
+          isOnline={offlineSync.isOnline}
+          lastError={offlineSync.lastError}
+          cachedClientsCount={geofenceCatalog.length}
+          cachedProductsCount={cachedProductsCount}
+          shiftLabel={
+            shiftSessionState
+              ? `${shiftSessionState.session.region_nombre} · Ruta ${shiftSessionState.session.ruta_codigo}`
+              : null
+          }
+          shiftExpiresAtIso={shiftSessionState?.session.expires_at ?? null}
+          onRetryNow={() => void flushOfflineQueue(true)}
+          onCloseShiftPurge={
+            shiftSessionState
+              ? () =>
+                  void offlineSync.purgeAndCloseShift(
+                    'Jornada cerrada manualmente. Se purgaron todos los datos locales de IndexedDB.'
+                  )
+              : undefined
+          }
+        />
         {liveBanner && (
           <div className="rounded-xl bg-emerald-950/60 border border-emerald-500/40 px-4 py-2.5 text-xs text-emerald-200 font-semibold flex items-center justify-between gap-2">
             <span>{liveBanner}</span>
@@ -804,7 +1142,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
         </div>
 
         {/* Listado de tarjetas de ruta */}
-        {isLoading ? (
+        {effectiveIsLoading ? (
           <div className="rounded-2xl bg-zinc-950 border border-white/10 p-12 flex flex-col items-center justify-center gap-3 text-zinc-400">
             <Loader2 className="w-6 h-6 text-red-500 animate-spin" />
             <span className="text-xs font-mono">Sincronizando degustaciones asignadas...</span>
@@ -1096,12 +1434,13 @@ export const PromotoraRutaPortalView: React.FC = () => {
             : null
         }
         defaultRutaId={incidenciaRutaTarget?.id ?? null}
-        pdvOptions={routes.map((r) => ({
+        pdvOptions={activeRoutesList.map((r) => ({
           id: matchRutaPdvGeofence(r, geofenceCatalog)?.id ?? null,
           nombre: r.cliente_nombre,
         }))}
-        sucursal={isOperativeSucursal(profile.sucursal) ? profile.sucursal : null}
-        reportadoPorNombre={profile.displayName}
+        sucursal={activePortalSucursal}
+        reportadoPorNombre={activeDisplayName}
+        shiftToken={shiftSessionState?.token ?? null}
         onSuccess={(res) => {
           showBanner(res.message);
           void refreshPending();

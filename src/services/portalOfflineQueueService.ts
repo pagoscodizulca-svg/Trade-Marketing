@@ -6,15 +6,24 @@
  * cuyo nombre comience con `codizulca`, garantizando cero pérdida de marcajes e incidencias offline.
  */
 
-import type { EjecucionPdvInput } from '../types/degustacionesPipeline';
+import type { EjecucionPdvInput, RutaPromotoraRecord } from '../types/degustacionesPipeline';
 import type { SeveridadIncidenciaPdv, TipoIncidenciaPdv } from './popIncidenciasService';
 import type { OperativeSucursal } from './userManagementService';
+import type { VerifiedShiftSession } from './shiftLinksService';
+import { requestSwPurgePrivateCaches } from '../lib/registerTradeSw';
 
 export const PORTAL_OFFLINE_IDB_NAME = 'codizulca_portal_offline_v1';
 export const PORTAL_OFFLINE_STORE_NAME = 'pending_actions';
-const PORTAL_OFFLINE_IDB_VERSION = 1;
+export const PORTAL_CACHE_ROUTES_STORE = 'cached_routes';
+export const PORTAL_CACHE_CLIENTS_STORE = 'cached_clients';
+export const PORTAL_CACHE_PRODUCTS_STORE = 'cached_products';
+export const PORTAL_SHIFT_META_STORE = 'shift_session';
+const PORTAL_OFFLINE_IDB_VERSION = 2;
 
-export const MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB estricto
+export const MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB máximo en lectura bruta
+export const MAX_OFFLINE_QUEUE_PHOTO_BYTES = 350 * 1024; // 350 KB recomendado tras compresión Canvas/WebP
+
+export const SHIFT_SESSION_STORAGE_KEY = 'codizulca.shift.promotora.v1';
 
 export type AllowedIncidenciaPhotoMime = 'image/jpeg' | 'image/png' | 'image/webp';
 
@@ -99,11 +108,54 @@ export interface FlushPortalQueueResult {
 // Almacén de respaldo en memoria para entornos sin IndexedDB (pruebas Node o WebView restringido)
 const memoryFallbackQueue = new Map<string, QueuedPortalAction>();
 
+export interface CachedPortalClientRef {
+  id: string;
+  codigo_cliente: string;
+  nombre_comercial: string;
+  direccion?: string | null;
+  ciudad?: string | null;
+  zona?: string | null;
+  ruta?: string | null;
+  latitud?: number | null;
+  longitud?: number | null;
+  radio_geocerca_m?: number | null;
+}
+
+export interface CachedPortalProductRef {
+  id: string;
+  codigo?: string | null;
+  nombre: string;
+  categoria?: string | null;
+  marca?: string | null;
+  unidad_medida?: string | null;
+}
+
+export interface PortalOfflineSnapshot {
+  routes: RutaPromotoraRecord[];
+  clients: CachedPortalClientRef[];
+  products: CachedPortalProductRef[];
+  syncedAtIso: string | null;
+}
+
+export interface StoredPortalShiftSession {
+  token: string;
+  session: VerifiedShiftSession;
+  savedAtIso: string;
+}
+
+let memorySnapshot: PortalOfflineSnapshot = {
+  routes: [],
+  clients: [],
+  products: [],
+  syncedAtIso: null,
+};
+let memoryShiftSession: StoredPortalShiftSession | null = null;
+
 function generateSubmissionId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
-  return `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return '00000000-0000-4000-8000-' + Math.random().toString(16).slice(2, 14).padEnd(12, '0');
 }
 
 function hasNativeIndexedDb(): boolean {
@@ -119,6 +171,18 @@ function openPortalQueueDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore(PORTAL_OFFLINE_STORE_NAME, { keyPath: 'id' });
         store.createIndex('by_created_at', 'createdAtIso', { unique: false });
         store.createIndex('by_next_retry', 'nextRetryAtMs', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(PORTAL_CACHE_ROUTES_STORE)) {
+        db.createObjectStore(PORTAL_CACHE_ROUTES_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(PORTAL_CACHE_CLIENTS_STORE)) {
+        db.createObjectStore(PORTAL_CACHE_CLIENTS_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(PORTAL_CACHE_PRODUCTS_STORE)) {
+        db.createObjectStore(PORTAL_CACHE_PRODUCTS_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(PORTAL_SHIFT_META_STORE)) {
+        db.createObjectStore(PORTAL_SHIFT_META_STORE, { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -487,6 +551,240 @@ export async function removePortalAction(id: string): Promise<void> {
 
 export function clearMemoryPortalQueueForTests(): void {
   memoryFallbackQueue.clear();
+  memorySnapshot = { routes: [], clients: [], products: [], syncedAtIso: null };
+  memoryShiftSession = null;
+}
+
+/**
+ * Precarga en IndexedDB la foto acotada de la jornada activa (rutas, clientes y productos de la región/ruta)
+ * para permitir trabajo 100 % offline cuando la promotora pierde cobertura en tienda.
+ */
+export async function savePortalOfflineSnapshot(snapshot: PortalOfflineSnapshot): Promise<void> {
+  memorySnapshot = {
+    routes: [...snapshot.routes],
+    clients: [...snapshot.clients],
+    products: [...snapshot.products],
+    syncedAtIso: snapshot.syncedAtIso ?? new Date().toISOString(),
+  };
+
+  if (!hasNativeIndexedDb()) return;
+
+  const db = await openPortalQueueDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(
+        [
+          PORTAL_CACHE_ROUTES_STORE,
+          PORTAL_CACHE_CLIENTS_STORE,
+          PORTAL_CACHE_PRODUCTS_STORE,
+          PORTAL_SHIFT_META_STORE,
+        ],
+        'readwrite'
+      );
+      const rStore = tx.objectStore(PORTAL_CACHE_ROUTES_STORE);
+      const cStore = tx.objectStore(PORTAL_CACHE_CLIENTS_STORE);
+      const pStore = tx.objectStore(PORTAL_CACHE_PRODUCTS_STORE);
+      const mStore = tx.objectStore(PORTAL_SHIFT_META_STORE);
+
+      rStore.clear();
+      for (const r of memorySnapshot.routes) rStore.put(r);
+      cStore.clear();
+      for (const c of memorySnapshot.clients) cStore.put(c);
+      pStore.clear();
+      for (const p of memorySnapshot.products) pStore.put(p);
+      mStore.put({ key: 'snapshot_synced_at', value: memorySnapshot.syncedAtIso });
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('Error precargando caché offline de jornada.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function loadPortalOfflineSnapshot(): Promise<PortalOfflineSnapshot> {
+  if (!hasNativeIndexedDb()) {
+    return {
+      routes: [...memorySnapshot.routes],
+      clients: [...memorySnapshot.clients],
+      products: [...memorySnapshot.products],
+      syncedAtIso: memorySnapshot.syncedAtIso,
+    };
+  }
+
+  const db = await openPortalQueueDb();
+  try {
+    return await new Promise<PortalOfflineSnapshot>((resolve, reject) => {
+      const tx = db.transaction(
+        [
+          PORTAL_CACHE_ROUTES_STORE,
+          PORTAL_CACHE_CLIENTS_STORE,
+          PORTAL_CACHE_PRODUCTS_STORE,
+          PORTAL_SHIFT_META_STORE,
+        ],
+        'readonly'
+      );
+      const rReq = tx.objectStore(PORTAL_CACHE_ROUTES_STORE).getAll();
+      const cReq = tx.objectStore(PORTAL_CACHE_CLIENTS_STORE).getAll();
+      const pReq = tx.objectStore(PORTAL_CACHE_PRODUCTS_STORE).getAll();
+      const mReq = tx.objectStore(PORTAL_SHIFT_META_STORE).get('snapshot_synced_at');
+
+      tx.oncomplete = () => {
+        const metaRec = mReq.result as { key: string; value?: string | null } | undefined;
+        resolve({
+          routes: (rReq.result as RutaPromotoraRecord[]) || [],
+          clients: (cReq.result as CachedPortalClientRef[]) || [],
+          products: (pReq.result as CachedPortalProductRef[]) || [],
+          syncedAtIso: metaRec?.value ?? null,
+        });
+      };
+      tx.onerror = () => reject(tx.error ?? new Error('Error leyendo caché offline de jornada.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function savePortalShiftSession(
+  record: StoredPortalShiftSession | null
+): Promise<void> {
+  memoryShiftSession = record ? { ...record } : null;
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      if (record) {
+        sessionStorage.setItem(SHIFT_SESSION_STORAGE_KEY, JSON.stringify(record));
+      } else {
+        sessionStorage.removeItem(SHIFT_SESSION_STORAGE_KEY);
+      }
+    }
+  } catch {
+    /* sessionStorage restringido */
+  }
+
+  if (!hasNativeIndexedDb()) return;
+
+  const db = await openPortalQueueDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PORTAL_SHIFT_META_STORE, 'readwrite');
+      const store = tx.objectStore(PORTAL_SHIFT_META_STORE);
+      if (record) {
+        store.put({ key: 'active_shift', value: record });
+      } else {
+        store.delete('active_shift');
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('Error guardando sesión temporal.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function loadPortalShiftSession(): Promise<StoredPortalShiftSession | null> {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const raw = sessionStorage.getItem(SHIFT_SESSION_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as StoredPortalShiftSession;
+        if (parsed?.token && parsed?.session?.expires_at) {
+          memoryShiftSession = parsed;
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    /* continuar con IndexedDB */
+  }
+
+  if (!hasNativeIndexedDb()) return memoryShiftSession;
+
+  const db = await openPortalQueueDb();
+  try {
+    return await new Promise<StoredPortalShiftSession | null>((resolve, reject) => {
+      const tx = db.transaction(PORTAL_SHIFT_META_STORE, 'readonly');
+      const req = tx.objectStore(PORTAL_SHIFT_META_STORE).get('active_shift');
+      req.onsuccess = () => {
+        const rec = req.result as { value?: StoredPortalShiftSession } | undefined;
+        resolve(rec?.value ?? null);
+      };
+      req.onerror = () => reject(req.error ?? new Error('Error leyendo sesión temporal.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Purga total y determinista de datos sensibles locales (Regla 5):
+ * limpia todas las tablas de IndexedDB (`pending_actions`, `cached_routes`, `cached_clients`,
+ * `cached_products`, `shift_session`), `sessionStorage` y solicita al Service Worker purgar cachés privadas.
+ * Debe ejecutarse automáticamente al expirar, revocarse o cerrarse una jornada.
+ */
+export async function purgePortalOfflineSensitiveData(): Promise<void> {
+  memoryFallbackQueue.clear();
+  memorySnapshot = { routes: [], clients: [], products: [], syncedAtIso: null };
+  memoryShiftSession = null;
+
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(SHIFT_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    /* ignorar */
+  }
+
+  if (hasNativeIndexedDb()) {
+    try {
+      const db = await openPortalQueueDb();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const storeNames = [
+            PORTAL_OFFLINE_STORE_NAME,
+            PORTAL_CACHE_ROUTES_STORE,
+            PORTAL_CACHE_CLIENTS_STORE,
+            PORTAL_CACHE_PRODUCTS_STORE,
+            PORTAL_SHIFT_META_STORE,
+          ].filter((s) => db.objectStoreNames.contains(s));
+          if (storeNames.length === 0) {
+            resolve();
+            return;
+          }
+          const tx = db.transaction(storeNames, 'readwrite');
+          for (const s of storeNames) {
+            tx.objectStore(s).clear();
+          }
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error ?? new Error('Error purgando IndexedDB.'));
+        });
+      } finally {
+        db.close();
+      }
+    } catch {
+      /* intentar borrado completo de BD si no abrió */
+      try {
+        indexedDB.deleteDatabase(PORTAL_OFFLINE_IDB_NAME);
+      } catch {
+        /* ignorar */
+      }
+    }
+  }
+
+  // Purgar cachés privadas del navegador si el API CacheStorage está presente
+  if (typeof caches !== 'undefined') {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys
+          .filter((k) => !k.startsWith('codizulca-trade-shell-') && !k.startsWith('rutadegustacion-fuentes'))
+          .map((k) => caches.delete(k))
+      );
+    } catch {
+      /* ignorar */
+    }
+  }
+
+  await requestSwPurgePrivateCaches().catch(() => undefined);
 }
 
 /**

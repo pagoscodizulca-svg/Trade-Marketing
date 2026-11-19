@@ -19,13 +19,15 @@ import {
   type TipoIncidenciaPdv,
 } from '../../services/popIncidenciasService';
 import {
-  MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES,
-  encodeBinaryToBase64,
   enqueuePortalIncidenciaOffline,
   isTransientOfflineOrNetworkError,
-  validateClientImageMagicBytes,
   type AllowedIncidenciaPhotoMime,
 } from '../../services/portalOfflineQueueService';
+import {
+  compressOfflineEvidencePhoto,
+  MAX_OFFLINE_COMPRESSED_PHOTO_BYTES,
+} from '../../utils/offlinePhotoCompressor';
+import { syncShiftOfflineMutationsBatch } from '../../services/shiftLinksService';
 import type { OperativeSucursal } from '../../services/userManagementService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -52,6 +54,8 @@ export interface IncidenciaQuickModalProps {
   sucursal?: OperativeSucursal | null;
   reportadoPorNombre?: string;
   defaultSeveridad?: SeveridadIncidenciaPdv;
+  /** Token firmado de jornada temporal (`/portal?t=...`) para envío vía `/api/shift-links/sync` */
+  shiftToken?: string | null;
   onSuccess?: (result: IncidenciaQuickModalResult) => void;
 }
 
@@ -118,6 +122,7 @@ export const IncidenciaQuickModal: React.FC<IncidenciaQuickModalProps> = ({
   sucursal = null,
   reportadoPorNombre,
   defaultSeveridad = 'MEDIA',
+  shiftToken = null,
   onSuccess,
 }) => {
   const [pdvNombre, setPdvNombre] = useState<string>(defaultPdvNombre);
@@ -173,35 +178,33 @@ export const IncidenciaQuickModal: React.FC<IncidenciaQuickModalProps> = ({
     }
 
     setErrorMsg(null);
-    if (file.size > MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES) {
-      setPreparedPhoto(null);
-      setErrorMsg('La fotografía supera el límite máximo permitido de 5 MB.');
-      e.target.value = '';
-      return;
-    }
-
     setCheckingPhoto(true);
     try {
-      const buffer = await file.arrayBuffer();
-      const verified = validateClientImageMagicBytes(buffer, MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES);
-      const base64 = encodeBinaryToBase64(buffer, MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES);
-      const safeBytes = new Uint8Array(buffer.byteLength);
-      safeBytes.set(new Uint8Array(buffer));
-      const cleanBlob = new Blob([safeBytes.buffer], { type: verified.mimeType });
+      // Compresión en cliente Canvas -> WebP <= 350 KB antes de persistir en IndexedDB / enviar
+      const compressed = await compressOfflineEvidencePhoto(
+        file,
+        MAX_OFFLINE_COMPRESSED_PHOTO_BYTES
+      );
+      const ext =
+        compressed.mimeType === 'image/webp'
+          ? 'webp'
+          : compressed.mimeType === 'image/png'
+            ? 'png'
+            : 'jpg';
 
       setPreparedPhoto({
-        fileName: file.name || `evidencia.${verified.extension}`,
-        mimeType: verified.mimeType,
-        sizeBytes: verified.sizeBytes,
-        base64,
-        blob: cleanBlob,
+        fileName: file.name || `evidencia.${ext}`,
+        mimeType: compressed.mimeType,
+        sizeBytes: compressed.compressedBytes,
+        base64: compressed.base64,
+        blob: compressed.blob,
       });
     } catch (err) {
       setPreparedPhoto(null);
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : 'No se pudo validar la fotografía seleccionada (usa JPEG, PNG o WebP <= 5 MB).'
+          : 'No se pudo comprimir/validar la fotografía (solo JPEG, PNG o WebP <= 350 KB tras compresión).'
       );
       e.target.value = '';
     } finally {
@@ -266,6 +269,39 @@ export const IncidenciaQuickModal: React.FC<IncidenciaQuickModalProps> = ({
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         await enqueueFallbackOffline(cleanPdv, cleanDesc, validClienteId, validRutaId);
+        return;
+      }
+
+      if (shiftToken) {
+        const mutationId =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : '00000000-0000-4000-8000-' + Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+        const syncRes = await syncShiftOfflineMutationsBatch(shiftToken, [
+          {
+            client_mutation_id: mutationId,
+            tipo: 'PROMOTORA_INCIDENCIA',
+            payload: {
+              pdv_nombre: cleanPdv,
+              cliente_id: validClienteId,
+              ruta_id: validRutaId,
+              tipo_incidencia: tipoIncidencia,
+              severidad,
+              descripcion: cleanDesc,
+              reportado_por_nombre: reportadoPorNombre?.trim() || '',
+            },
+            photoBase64: preparedPhoto?.base64 ?? null,
+          },
+        ]);
+        const first = syncRes.results[0];
+        if (!first?.ok) {
+          throw new Error(first?.error || 'No se pudo registrar la incidencia en la jornada.');
+        }
+        onSuccess?.({
+          mode: 'online',
+          message: `Incidencia registrada en ${cleanPdv} (SLA ${activeSlaHours}h · Jornada firmada).`,
+        });
+        onClose();
         return;
       }
 

@@ -51,6 +51,8 @@ export function buildCorsMiddleware(options: {
       'x-factura-meta',
       'x-sucursal-activa',
       'x-cron-secret',
+      'x-shift-token',
+      'x-webhook-token',
     ],
     credentials: false,
     maxAge: 600,

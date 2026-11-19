@@ -12,6 +12,7 @@ import {
   type OperativeSucursal,
   type ServerSucursalCodigo,
 } from './supabaseAdminAuth';
+import { defaultTastingAlertDispatcher } from './tastingAlertDispatcher';
 
 export { OPERATIVE_SUCURSALES, type OperativeSucursal };
 export type FdvTurno = 'MAÑANA' | 'TARDE' | 'COMPLETO';
@@ -587,6 +588,12 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
       // 2. Inserción atómica protegida por `uq_surveys_degustacion_key_active` (PG 23505)
       const insertResult = await gateway.insertSolicitud(scopedAuthUser, record);
       if (insertResult.status === 'inserted') {
+        // Despacho asíncrono no bloqueante de alertas Outbox (WhatsApp + Web Push) sin frenar al vendedor FDV
+        if (!gatewayOverride) {
+          void defaultTastingAlertDispatcher
+            .dispatchPendingTastingAlerts(10)
+            .catch(() => undefined);
+        }
         res.status(201).json({
           ok: true,
           idempotentHit: false,

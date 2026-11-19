@@ -52,6 +52,8 @@ import {
   handleWeeklyTastingCutoffCron,
   requireCronSecretAuth,
 } from './src/server/weeklyTastingCronHandler';
+import { defaultShiftLinksHandlers } from './src/server/shiftLinksHandler';
+import { defaultTastingAlertDispatcher } from './src/server/tastingAlertDispatcher';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -441,6 +443,105 @@ app.get(
 );
 
 // ============================================================================
+// 1.J. ENLACES DINÁMICOS FIRMADOS POR JORNADA (v1.9.0 · HMAC-SHA256 + OFFLINE SYNC)
+// ============================================================================
+const shiftLinkAdminRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 40,
+});
+
+const shiftLinkFieldRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 90,
+});
+
+app.post(
+  ['/api/generate-shift-link', '/api/shift-links/generate'],
+  requireCoordinatorOrAdminAuth,
+  shiftLinkAdminRateLimiter,
+  defaultShiftLinksHandlers.handleGenerateShiftLink
+);
+
+app.post(
+  ['/api/revoke-shift-link', '/api/shift-links/revoke'],
+  requireCoordinatorOrAdminAuth,
+  shiftLinkAdminRateLimiter,
+  defaultShiftLinksHandlers.handleRevokeShiftLink
+);
+
+app.get(
+  '/api/shift-links',
+  requireCoordinatorOrAdminAuth,
+  shiftLinkAdminRateLimiter,
+  defaultShiftLinksHandlers.handleListShiftLinks
+);
+
+app.post(
+  ['/api/verify-shift-link', '/api/shift-links/verify'],
+  shiftLinkFieldRateLimiter,
+  defaultShiftLinksHandlers.handleVerifyShiftLink
+);
+
+app.get(
+  '/api/shift-links/bootstrap',
+  shiftLinkFieldRateLimiter,
+  defaultShiftLinksHandlers.handleBootstrapShiftLink
+);
+
+app.post(
+  '/api/shift-links/sync',
+  shiftLinkFieldRateLimiter,
+  defaultShiftLinksHandlers.handleSyncShiftOfflineBatch
+);
+
+// ============================================================================
+// 1.K. ALERTAS AUTOMÁTICAS WHATSAPP CLOUD API + WEB PUSH (VAPID · v1.9.0)
+// ============================================================================
+const notificationsRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+app.get(
+  '/api/notifications/web-push/public-key',
+  notificationsRateLimiter,
+  defaultTastingAlertDispatcher.handleGetWebPushPublicKey
+);
+
+app.post(
+  '/api/notifications/web-push/subscribe',
+  requireTorreControlAuth,
+  notificationsRateLimiter,
+  defaultTastingAlertDispatcher.handleSubscribeWebPush
+);
+
+app.delete(
+  '/api/notifications/web-push/subscribe',
+  requireTorreControlAuth,
+  notificationsRateLimiter,
+  defaultTastingAlertDispatcher.handleUnsubscribeWebPush
+);
+
+app.post(
+  '/api/notifications/dispatch-tasting-alert',
+  notificationsRateLimiter,
+  (req, res, next) => {
+    if (req.headers['x-cron-secret'] || req.headers['x-webhook-token']) {
+      next();
+      return;
+    }
+    void requireCoordinatorOrAdminAuth(req, res, next);
+  },
+  defaultTastingAlertDispatcher.handleDispatchTastingAlert
+);
+
+app.get(
+  '/api/webhooks/whatsapp',
+  notificationsRateLimiter,
+  defaultTastingAlertDispatcher.handleMetaWhatsAppWebhookVerify
+);
+
+// ============================================================================
 // 2. API 404 + MANEJO DE ERRORES
 // ============================================================================
 app.use('/api', (_req: Request, res: Response) => {
@@ -471,8 +572,14 @@ function serveSpa(mountPath: string, distPath: string, label: string): void {
     index: false,
     setHeaders(res, filePath) {
       const base = path.basename(filePath);
-      if (/^(sw\.js|index\.html|manifest\.json|registerSW\.js)$/i.test(base)) {
+      if (/^(sw\.js|registerSW\.js)$/i.test(base)) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Service-Worker-Allowed', '/');
+      } else if (/^(index\.html|manifest\.json|manifest\.webmanifest)$/i.test(base)) {
         res.setHeader('Cache-Control', 'no-cache');
+        if (base.endsWith('.webmanifest')) {
+          res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+        }
       } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }

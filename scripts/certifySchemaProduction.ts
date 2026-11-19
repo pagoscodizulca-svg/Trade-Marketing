@@ -208,7 +208,12 @@ export function assertSafeEnvironment(
       );
     }
 
-    if (/SERVICE_ROLE|SECRET_KEY/i.test(key) && !/placeholder|example|pega_aqui/i.test(val)) {
+    if (
+      /(SERVICE_ROLE|SECRET_KEY|SHIFT_LINK_SECRET|WHATSAPP_ACCESS_TOKEN|VAPID_PRIVATE_KEY|WEBHOOK_VERIFY_TOKEN)/i.test(
+        key
+      ) &&
+      !/placeholder|example|pega_aqui/i.test(val)
+    ) {
       throw new SecurityEnvViolationError(
         'FORBIDDEN_VITE_SECRET_NAME',
         `BLOQUEO DE SEGURIDAD: variable prohibida "${key}" presente en el entorno. Las llaves de servidor no pueden llevar prefijo VITE_.`
@@ -346,6 +351,43 @@ export function runStaticCertification(
       missingCadenaLogoCols.length === 0
         ? 'public.cadenas_comerciales posee metadatos idempotentes de Co-Branding (logo_storage_path, logo_mime_type, logo_updated_at, logo_updated_by).'
         : `Columnas faltantes en public.cadenas_comerciales: ${missingCadenaLogoCols.join(', ')}`,
+  });
+
+  const v190Tables = [
+    'sesiones_jornada',
+    'offline_mutation_receipts',
+    'notificaciones_outbox',
+    'web_push_subscriptions',
+  ];
+  const missingV190Tables = v190Tables.filter((t) => !analysis.tables.has(t));
+  const idempotencyTables = [
+    'ejecuciones_pdv_promotora',
+    'incidencias_pdv',
+    'rutas_promotoras',
+    'entregas_degustacion',
+    'reportes_trade',
+  ];
+  const missingClientMutationCols = idempotencyTables.filter(
+    (t) => !analysis.tables.get(t)?.has('client_mutation_id')
+  );
+  const v190Fns = [
+    'public.rpc_validar_sesion_jornada',
+    'public.rpc_bootstrap_sesion_jornada',
+    'public.rpc_aplicar_mutacion_offline_jornada',
+    'public.fn_enqueue_degustacion_outbox',
+  ];
+  const missingV190Fns = v190Fns.filter((fn) => !analysis.functions.has(fn));
+  const v190Ok =
+    missingV190Tables.length === 0 &&
+    missingClientMutationCols.length === 0 &&
+    missingV190Fns.length === 0;
+  checks.push({
+    id: 'static.v190_offline_shift_links_and_outbox',
+    passed: v190Ok,
+    severity: 'error',
+    detail: v190Ok
+      ? 'Esquema v1.9.0 verificado: sesiones_jornada (token_hash), client_mutation_id UNIQUE en 5 tablas + offline_mutation_receipts, notificaciones_outbox, web_push_subscriptions y RPCs/triggers.'
+      : `Faltantes v1.9.0: tablas=[${missingV190Tables.join(',')}] cols=[${missingClientMutationCols.join(',')}] fns=[${missingV190Fns.join(',')}]`,
   });
 
   const legacyDeprecatedOk =

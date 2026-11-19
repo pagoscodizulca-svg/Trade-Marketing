@@ -7,19 +7,19 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
 const SENSITIVE_KEY_REGEX =
-  /(authorization|cookie|password|passwd|secret|token|apikey|api_key|api-key|service_role|jwt|bearer|x-cron|signature|signedurl)/i;
+  /(authorization|cookie|password|passwd|secret|token|apikey|api_key|api-key|service_role|jwt|bearer|x-cron|x-shift-token|x-webhook|signature|signedurl|vapid|whatsapp_access)/i;
 
 const MAX_STRING_LEN = 500;
 const MAX_DEPTH = 5;
 
-/** Redacta JWT, llaves Supabase y credenciales embebidas en texto libre. */
+/** Redacta JWT, llaves Supabase, tokens de jornada y credenciales embebidas en texto libre. */
 export function redactString(input: string): string {
   return input
     .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[REDACTED_JWT]')
     .replace(/sb_(secret|publishable)_[A-Za-z0-9_-]+/gi, '[REDACTED_SB_KEY]')
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]')
+    .replace(/(?:Bearer|Shift)\s+[A-Za-z0-9._~+/=-]{12,}/gi, '[REDACTED_AUTH_TOKEN]')
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED_API_KEY]')
-    .replace(/([?&](?:token|apikey|access_token|signature)=)[^&\s]+/gi, '$1[REDACTED]');
+    .replace(/([?&](?:t|token|apikey|access_token|signature|hub\.verify_token)=)[^&\s]+/gi, '$1[REDACTED]');
 }
 
 export function redactValue(value: unknown, depth = 0, keyHint = ''): unknown {

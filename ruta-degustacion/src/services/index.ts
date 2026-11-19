@@ -12,4 +12,8 @@ const { config, configError } = resolveRutaSupabaseConfig();
 export const entregasRepo: EntregasRepository =
   config && !configError
     ? createSupabaseRepository(config.url, config.publicKey)
-    : createUnconfiguredRepository(configError);
+    : typeof window !== 'undefined' &&
+        (new URLSearchParams(window.location.search).has('t') ||
+          Boolean(sessionStorage.getItem('codizulca.shift.chofer.v1')))
+      ? createSupabaseRepository('', '')
+      : createUnconfiguredRepository(configError);

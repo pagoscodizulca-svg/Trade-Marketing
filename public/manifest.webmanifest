@@ -1,0 +1,33 @@
+{
+  "name": "CODIZULCA C.A. · Trade Marketing y Portal de Campo",
+  "short_name": "CODIZULCA Trade",
+  "description": "Plataforma Corporativa de Trade Marketing y Portal Offline-First de Promotoras (CODIZULCA C.A.).",
+  "lang": "es-VE",
+  "dir": "ltr",
+  "start_url": "/portal",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#09090B",
+  "theme_color": "#09090B",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
