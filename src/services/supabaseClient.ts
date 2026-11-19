@@ -1,5 +1,6 @@
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import type { MasterDataDatabase } from '../types/masterData';
+import type { OperativeSucursal } from './userManagementService';
 
 /**
  * Cliente Único, Centralizado y Seguro de Supabase (TypeScript) — Programa de Trade Marketing.
@@ -54,6 +55,7 @@ export interface CrearClienteSupabaseOpciones extends NormalizarUrlOpciones {
   publishableKey?: string;
   anonKey?: string;
   storage?: Storage;
+  fetch?: typeof fetch;
 }
 
 export interface ResultadoDiagnosticoSupabase {
@@ -346,10 +348,62 @@ export function assertMasterDataSupabaseConfigured(): void {
   }
 }
 
+const VALID_ACTIVE_SUCURSAL_HEADERS = new Set<OperativeSucursal>([
+  'ZULIA',
+  'VALENCIA',
+  'CENTRO',
+  'ORIENTE',
+  'CAPITAL',
+]);
+
 let unifiedClient: SupabaseClient | null = null;
 let dedicatedMasterClient: SupabaseClient<MasterDataDatabase> | null = null;
 let cachedAccessToken: string | null = null;
+let activeSucursalHeader: OperativeSucursal | null = null;
 let authListenerBound = false;
+
+/**
+ * Define o limpia la cabecera activa de sucursal (`x-sucursal-activa`) inyectada en cada
+ * petición del cliente Supabase hacia PostgreSQL (`obtener_sucursal_contexto_activo()`).
+ */
+export function setActiveClientSucursalHeader(sucursal: OperativeSucursal | null): void {
+  if (sucursal === null || sucursal === undefined) {
+    activeSucursalHeader = null;
+    return;
+  }
+  const normalized = String(sucursal).trim().toUpperCase() as OperativeSucursal;
+  activeSucursalHeader = VALID_ACTIVE_SUCURSAL_HEADERS.has(normalized) ? normalized : null;
+}
+
+/**
+ * Devuelve la sucursal operativa actualmente activa en la cabecera `x-sucursal-activa` (o `null`).
+ */
+export function getActiveClientSucursalHeader(): OperativeSucursal | null {
+  return activeSucursalHeader;
+}
+
+function buildSucursalAwareFetch(baseFetch?: typeof fetch): typeof fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchFn = baseFetch ?? globalThis.fetch;
+    const currentSucursal = activeSucursalHeader;
+    if (!currentSucursal) {
+      return fetchFn(input, init);
+    }
+
+    const headers = new Headers(
+      init?.headers ??
+        (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined)
+    );
+    if (!headers.has('x-sucursal-activa')) {
+      headers.set('x-sucursal-activa', currentSucursal);
+    }
+
+    return fetchFn(input, {
+      ...init,
+      headers,
+    });
+  };
+}
 
 function bindAuthTokenSync(client: SupabaseClient, fallbackKey: string): void {
   if (authListenerBound) return;
@@ -363,9 +417,12 @@ function bindAuthTokenSync(client: SupabaseClient, fallbackKey: string): void {
     }
   });
 
-  client.auth.onAuthStateChange((_event, session: Session | null) => {
+  client.auth.onAuthStateChange((event, session: Session | null) => {
     const token = session?.access_token || null;
     cachedAccessToken = token;
+    if (event === 'SIGNED_OUT') {
+      activeSucursalHeader = null;
+    }
     client.realtime.setAuth(token ?? fallbackKey);
   });
 }
@@ -390,7 +447,8 @@ export function crearClienteSupabase(
     opciones.url !== undefined ||
       opciones.publishableKey !== undefined ||
       opciones.anonKey !== undefined ||
-      opciones.storage !== undefined
+      opciones.storage !== undefined ||
+      opciones.fetch !== undefined
   );
 
   if (!hasCustomOptions) {
@@ -408,6 +466,9 @@ export function crearClienteSupabase(
   const shouldPersist = Boolean(opciones.storage) || typeof window !== 'undefined';
 
   return createClient(urlNormalizada, llave, {
+    global: {
+      fetch: buildSucursalAwareFetch(opciones.fetch),
+    },
     auth: {
       persistSession: shouldPersist,
       autoRefreshToken: shouldPersist,
@@ -431,6 +492,9 @@ export function getSupabaseClient(): SupabaseClient {
   if (!unifiedClient) {
     const isBrowser = typeof window !== 'undefined';
     unifiedClient = createClient(SUPABASE_PROJECT_URL, SUPABASE_ANON_KEY, {
+      global: {
+        fetch: buildSucursalAwareFetch(),
+      },
       auth: {
         persistSession: isBrowser,
         autoRefreshToken: isBrowser,
@@ -474,6 +538,9 @@ export function getMasterDataSupabaseClient(): SupabaseClient<MasterDataDatabase
       SUPABASE_MASTER_PROJECT_URL,
       SUPABASE_MASTER_ANON_KEY,
       {
+        global: {
+          fetch: buildSucursalAwareFetch(),
+        },
         auth: {
           persistSession: isBrowser,
           autoRefreshToken: isBrowser,

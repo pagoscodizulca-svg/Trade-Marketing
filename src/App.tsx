@@ -16,6 +16,7 @@ import {
 import type { VerifiedAuthProfile } from './services/authService';
 import { DegustacionNotificationItem } from './types';
 import { SyncStatusBadge } from './components/common/SyncStatusBadge';
+import { RegionGateSelector } from './components/region/RegionGateSelector';
 import { useLiveVenezuelaClock } from './utils/weekCalendar';
 import { pathForTab, resolveRoute } from './utils/appRouter';
 
@@ -102,7 +103,16 @@ const MainAppContent: React.FC<{
     degustacionNotifications,
     setFocusedTastingId,
     setFocusedTastingSnapshot,
+    requiresSucursalSelection,
+    isContraloriaOrAdmin,
   } = useApp();
+
+  const [comparativoOpenTick, setComparativoOpenTick] = useState<number>(0);
+
+  const handleOpenComparativo = useCallback(() => {
+    setComparativoOpenTick((prev) => prev + 1);
+    setActiveTab('kpis_trazabilidad');
+  }, [setActiveTab]);
 
   const handleOpenDegustacionNotification = useCallback(
     (item: DegustacionNotificationItem) => {
@@ -134,7 +144,7 @@ const MainAppContent: React.FC<{
     pop_incidencias: { title: 'Operación Trade · Material POP e Incidencias en PDV', badge: 'POP & SLA' },
     contraloria: { title: 'Módulo 3 · Contraloría y Auditoría Interna', badge: 'Conciliación & Paz y Salvo' },
     kpis_trazabilidad: { title: 'Módulo 4 · KPIs y Trazabilidad Ejecutiva', badge: 'Torre de Control' },
-    gestion_usuarios: { title: 'Seguridad IAM · Gestión de Usuarios Corporativos', badge: 'Super Admin' },
+    gestion_usuarios: { title: 'Personal y Accesos · Módulos por Sucursal e IAM Corporativo', badge: 'Sucursal & IAM' },
   };
 
   return (
@@ -245,6 +255,12 @@ const MainAppContent: React.FC<{
           </div>
         </div>
 
+        {/* Barra persistente de contexto regional / Sucursal Activa */}
+        <RegionGateSelector
+          mode="bar"
+          onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+        />
+
         {/* Alertas Visuales Instantáneas (Toast) al recibir nuevas degustaciones */}
         <DegustacionesRealtimeToastStack
           toasts={degustacionNotifications.activeToasts}
@@ -270,7 +286,14 @@ const MainAppContent: React.FC<{
                 deniedDescription="El acceso a Promotoras y FDV está reservado para Coordinación Trade, Supervisión de Campo y Administración General."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <FieldPromotoraView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <FieldPromotoraView />
+                )}
               </RoleGuard>
             )}
 
@@ -283,7 +306,14 @@ const MainAppContent: React.FC<{
                 deniedDescription="La edición de cronogramas e insumos está reservada para Coordinación Trade, Supervisión de Campo y Administración General."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <ScheduleMatrixView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <ScheduleMatrixView />
+                )}
               </RoleGuard>
             )}
 
@@ -296,7 +326,14 @@ const MainAppContent: React.FC<{
                 deniedDescription="La administración de clientes, cadenas comerciales, zonas y vendedores está reservada para Coordinación Trade y Super Admin."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <MasterDataManagementView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <MasterDataManagementView />
+                )}
               </RoleGuard>
             )}
 
@@ -309,7 +346,14 @@ const MainAppContent: React.FC<{
                 deniedDescription="Este módulo está reservado para Coordinación Trade, Contraloría (lectura) y Super Admin."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <PopAndIncidenciasView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <PopAndIncidenciasView />
+                )}
               </RoleGuard>
             )}
 
@@ -322,7 +366,14 @@ const MainAppContent: React.FC<{
                 deniedDescription="Tu perfil de Supervisión de Campo no tiene acceso al módulo financiero de Contraloría Interna."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <ContraloriaView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <ContraloriaView />
+                )}
               </RoleGuard>
             )}
 
@@ -333,20 +384,27 @@ const MainAppContent: React.FC<{
                 variant="route"
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <ExecutiveDashboard />
+                <ExecutiveDashboard requestedComparativoTick={comparativoOpenTick} />
               </RoleGuard>
             )}
 
-            {/* Módulo IAM Exclusivo Super Admin: Gestión de Usuarios */}
+            {/* Personal y Accesos: Módulos por Sucursal & IAM Corporativo */}
             {activeTab === 'gestion_usuarios' && (
               <RoleGuard
                 allowedRoles={MODULE_ALLOWED_ROLES.gestion_usuarios}
                 variant="route"
-                deniedTitle="Módulo exclusivo del Administrador General"
-                deniedDescription="Tu perfil actual no cuenta con autorización para acceder a Gestión de Usuarios."
+                deniedTitle="Módulo de Personal por Sucursal y Seguridad IAM"
+                deniedDescription="Este módulo está reservado para Coordinación Regional (su sucursal) y Administración General."
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
-                <UserManagementView />
+                {requiresSucursalSelection ? (
+                  <RegionGateSelector
+                    mode="gate"
+                    onOpenComparativo={isContraloriaOrAdmin ? handleOpenComparativo : undefined}
+                  />
+                ) : (
+                  <UserManagementView />
+                )}
               </RoleGuard>
             )}
           </Suspense>

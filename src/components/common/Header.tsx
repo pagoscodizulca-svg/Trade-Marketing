@@ -32,7 +32,7 @@ export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]
   pop_incidencias: ['super_admin', 'coordinacion', 'contraloria'],
   contraloria: ['super_admin', 'contraloria', 'coordinacion'],
   kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion'],
-  gestion_usuarios: ['super_admin'],
+  gestion_usuarios: ['super_admin', 'coordinacion'],
 };
 
 interface HeaderProps {
@@ -211,19 +211,19 @@ export const Header: React.FC<HeaderProps> = ({
             })}
           </nav>
 
-          <RoleGuard allowedRoles={['super_admin']}>
+          <RoleGuard allowedRoles={['super_admin', 'coordinacion']}>
             <div className="pt-3 mt-2 border-t border-white/[0.06] space-y-1">
               <div className="px-2.5 py-1 flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                  Seguridad IAM
+                  Personal & Seguridad IAM
                 </span>
               </div>
 
               <button
                 type="button"
                 data-testid="nav-gestion-usuarios"
-                title="Gestión de Usuarios — Roles, Accesos & Auditoría IAM"
-                aria-label="Gestión de Usuarios — Roles, Accesos & Auditoría IAM"
+                title="Personal y Accesos — Módulos por Sucursal & IAM"
+                aria-label="Personal y Accesos — Módulos por Sucursal & IAM"
                 onClick={() => setActiveTab('gestion_usuarios')}
                 className={`group relative w-full px-3 py-2.5 rounded-xl text-left flex items-center gap-2.5 transition-all cursor-pointer ${
                   activeTab === 'gestion_usuarios'
@@ -249,7 +249,7 @@ export const Header: React.FC<HeaderProps> = ({
                         : 'font-semibold text-zinc-200 group-hover:text-white'
                     }`}
                   >
-                    Gestión de Usuarios
+                    Personal y Accesos
                   </span>
                   <span
                     className={`text-[10px] block truncate mt-0.5 ${
@@ -258,7 +258,7 @@ export const Header: React.FC<HeaderProps> = ({
                         : 'text-zinc-500 group-hover:text-zinc-400'
                     }`}
                   >
-                    Roles, Accesos & Auditoría
+                    Módulos por Sucursal & IAM
                   </span>
                 </div>
 

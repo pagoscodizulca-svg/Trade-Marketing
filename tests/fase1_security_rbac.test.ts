@@ -240,7 +240,7 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
     assert.ok(rolesMatrix.contraloria.includes('contraloria'));
     assert.ok(rolesMatrix.kpis_trazabilidad.includes('contraloria'));
     assert.ok(!rolesMatrix.contraloria.includes('vendedor'));
-    assert.deepEqual(rolesMatrix.gestion_usuarios, ['super_admin']);
+    assert.deepEqual(rolesMatrix.gestion_usuarios, ['super_admin', 'coordinacion']);
   });
 
   await t.test('MVP-03 Backend: POST /api/admin/corporate-users con RBAC estricto y rollback ante fallo RPC', async () => {

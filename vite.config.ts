@@ -11,6 +11,63 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return undefined;
+            const norm = id.replace(/\\/g, '/');
+            if (
+              norm.includes('/node_modules/react/') ||
+              norm.includes('/node_modules/react-dom/') ||
+              norm.includes('/node_modules/scheduler/')
+            ) {
+              return 'vendor-react';
+            }
+            if (norm.includes('/node_modules/@supabase/')) {
+              return 'vendor-supabase';
+            }
+            if (norm.includes('/node_modules/exceljs/')) {
+              return 'vendor-exceljs';
+            }
+            if (norm.includes('/node_modules/read-excel-file/')) {
+              return 'vendor-excel-reader';
+            }
+            if (norm.includes('/node_modules/docx/')) {
+              return 'vendor-docx';
+            }
+            if (
+              norm.includes('/node_modules/jspdf/') ||
+              norm.includes('/node_modules/jspdf-autotable/')
+            ) {
+              return 'vendor-jspdf';
+            }
+            if (
+              norm.includes('/node_modules/html2canvas/') ||
+              norm.includes('/node_modules/dompurify/') ||
+              norm.includes('/node_modules/canvg/')
+            ) {
+              return 'vendor-pdf-canvas';
+            }
+            if (
+              norm.includes('/node_modules/motion/') ||
+              norm.includes('/node_modules/framer-motion/') ||
+              norm.includes('/node_modules/motion-dom/') ||
+              norm.includes('/node_modules/motion-utils/')
+            ) {
+              return 'vendor-motion';
+            }
+            if (norm.includes('/node_modules/lucide-react/')) {
+              return 'vendor-icons';
+            }
+            if (norm.includes('/node_modules/zod/')) {
+              return 'vendor-zod';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.

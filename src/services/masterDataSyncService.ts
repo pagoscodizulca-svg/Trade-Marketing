@@ -1170,11 +1170,15 @@ const cacheCadenas = new Map<string, EntradaCache<CadenaComercial[]>>();
 const cacheZonas = new Map<string, EntradaCache<ZonaComercial[]>>();
 const suscriptoresLocales = new Set<() => void>();
 
-export function invalidarCacheMaestros(): void {
+export function clearMasterDataCaches(): void {
   cacheVendedores.clear();
   cacheClientes.clear();
   cacheCadenas.clear();
   cacheZonas.clear();
+}
+
+export function invalidarCacheMaestros(): void {
+  clearMasterDataCaches();
   for (const listener of suscriptoresLocales) {
     try {
       listener();

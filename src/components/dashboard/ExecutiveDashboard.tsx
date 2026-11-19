@@ -43,6 +43,8 @@ import {
   FeasibilityReturnBasis,
 } from '../../utils/tastingFeasibility';
 import { RequisitionStatus } from '../../types';
+import { RegionGateSelector } from '../region/RegionGateSelector';
+import { RegionalComparisonTab } from './RegionalComparisonTab';
 
 // ============================================================================
 // CONSTANTES Y UTILIDADES DE NORMALIZACIÓN COMERCIAL CODIZULCA
@@ -394,7 +396,9 @@ export interface WeeklyTradeCostRow {
 // COMPONENTE PRINCIPAL: MÓDULO 4 - KPIs, COMPARATIVA MENSUAL Y COSTOS SEMANALES
 // ============================================================================
 
-export const ExecutiveDashboard: React.FC = () => {
+export const ExecutiveDashboard: React.FC<{
+  requestedComparativoTick?: number;
+}> = ({ requestedComparativoTick = 0 }) => {
   const {
     visits,
     tastingReports,
@@ -406,7 +410,25 @@ export const ExecutiveDashboard: React.FC = () => {
     module1Bundle,
     isLoadingSupabase,
     createRequisition,
+    isContraloriaOrAdmin,
+    requiresSucursalSelection,
+    activeSucursalLabel,
+    setActiveSucursal,
   } = useApp();
+
+  const [dashboardTopView, setDashboardTopView] = useState<
+    'sucursal_activa' | 'comparativo_regiones'
+  >(() =>
+    isContraloriaOrAdmin && requiresSucursalSelection
+      ? 'comparativo_regiones'
+      : 'sucursal_activa'
+  );
+
+  useEffect(() => {
+    if (isContraloriaOrAdmin && requestedComparativoTick > 0) {
+      setDashboardTopView('comparativo_regiones');
+    }
+  }, [isContraloriaOrAdmin, requestedComparativoTick]);
 
   const liveClock = useLiveVenezuelaClock();
 
@@ -1624,8 +1646,90 @@ export const ExecutiveDashboard: React.FC = () => {
     });
   };
 
+  const topViewSwitcherBar = isContraloriaOrAdmin ? (
+    <div
+      data-testid="executive-dashboard-view-switcher"
+      className="bg-zinc-900/95 border border-zinc-800 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3 no-print"
+    >
+      <div
+        className="inline-flex rounded-xl bg-zinc-950 p-1 border border-zinc-800"
+        role="tablist"
+        aria-label="Selector de vista ejecutiva"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={dashboardTopView === 'sucursal_activa'}
+          data-testid="tab-sucursal-activa"
+          onClick={() => setDashboardTopView('sucursal_activa')}
+          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+            dashboardTopView === 'sucursal_activa'
+              ? 'bg-red-600 text-white shadow-sm'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <Building2 className="w-3.5 h-3.5" />
+          <span>Indicadores de Sucursal Activa</span>
+        </button>
+
+        <button
+          type="button"
+          role="tab"
+          aria-selected={dashboardTopView === 'comparativo_regiones'}
+          data-testid="tab-comparativo-regiones"
+          onClick={() => setDashboardTopView('comparativo_regiones')}
+          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+            dashboardTopView === 'comparativo_regiones'
+              ? 'bg-red-600 text-white shadow-sm'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <BarChart3 className="w-3.5 h-3.5" />
+          <span>Comparativo por Región</span>
+        </button>
+      </div>
+
+      <span className="text-[11px] font-mono text-zinc-400 px-2">
+        {dashboardTopView === 'comparativo_regiones'
+          ? 'Consolidado Nacional · 5 Hubs (Solo Lectura)'
+          : `Contexto aislado: ${activeSucursalLabel}`}
+      </span>
+    </div>
+  ) : null;
+
+  if (isContraloriaOrAdmin && dashboardTopView === 'comparativo_regiones') {
+    return (
+      <div className="space-y-6">
+        {topViewSwitcherBar}
+        <RegionalComparisonTab
+          onSelectSucursalToInspect={(suc) => {
+            setActiveSucursal(suc);
+            setDashboardTopView('sucursal_activa');
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (requiresSucursalSelection) {
+    return (
+      <div className="space-y-6">
+        {topViewSwitcherBar}
+        <RegionGateSelector
+          mode="gate"
+          onOpenComparativo={
+            isContraloriaOrAdmin
+              ? () => setDashboardTopView('comparativo_regiones')
+              : undefined
+          }
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
+      {topViewSwitcherBar}
       {/* Membrete oficial exclusivo para soporte impreso / PDF */}
       <PrintSupportHeader
         moduleTitle="MÓDULO 4: KPI, COMPARATIVA MENSUAL DE MERCADO Y COSTOS SEMANALES"

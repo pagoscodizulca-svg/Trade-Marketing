@@ -45,7 +45,13 @@ import {
   persistMatrixUpsertBatch,
   resolveRealPromotoraForMatrix,
 } from '../services/scheduleMatrixService';
-import { isSupabaseConfigured } from '../services/supabaseClient';
+import { isSupabaseConfigured, setActiveClientSucursalHeader } from '../services/supabaseClient';
+import { clearMasterDataCaches } from '../services/masterDataSyncService';
+import {
+  DEFAULT_FIVE_REGIONES,
+  fetchActiveRegiones,
+  type ActiveRegionItem,
+} from '../services/regionesService';
 import {
   calculateProductionSupplies,
   normalizeProductionShift,
@@ -58,7 +64,14 @@ import {
   MAX_SAFE_TIMEOUT_MS,
 } from '../utils/caracasWeekCycle';
 import { isStrictAdminRole } from '../services/degustacionesWeeklyCycleService';
-import type { ManagedUserRole, SucursalCodigo } from '../services/userManagementService';
+import {
+  SUCURSAL_LABELS,
+  isOperativeSucursal,
+  normalizeSucursalCodigo,
+  type ManagedUserRole,
+  type OperativeSucursal,
+  type SucursalCodigo,
+} from '../services/userManagementService';
 import type {
   CampanaTrade,
   CampanaTradeInput,
@@ -146,14 +159,28 @@ export interface BatchFillClientsResult extends MatrixMutationResult {
   countCreated: number;
 }
 
-interface AppContextType {
+export interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
   /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'vendedor' | 'promotora' | 'cliente' | 'chofer' | null) */
   verifiedIamRole: ManagedUserRole | null;
-  /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'GLOBAL' | null) */
+  /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null) */
   verifiedSucursal: SucursalCodigo | null;
+  /** Catálogo dinámico de las 5 regiones activas (`public.regiones`) */
+  activeRegiones: ActiveRegionItem[];
+  /** Sucursal operativa activa en la sesión (`ZULIA | VALENCIA | CENTRO | ORIENTE | CAPITAL | null`) */
+  activeSucursal: OperativeSucursal | null;
+  /** Etiqueta corporativa legible de la sucursal activa */
+  activeSucursalLabel: string;
+  /** Verdadero únicamente para `super_admin` y `contraloria` (`GLOBAL`) */
+  canSwitchSucursal: boolean;
+  /** Verdadero cuando un perfil nacional (`super_admin` / `contraloria` GLOBAL) aún no ha elegido una Sucursal Activa */
+  requiresSucursalSelection: boolean;
+  /** Selecciona una Sucursal Activa, inyecta `x-sucursal-activa`, purga la caché operativa y recarga en limpio */
+  setActiveSucursal: (sucursal: OperativeSucursal) => void;
+  /** Purga de forma inmediata toda caché operativa en memoria al cambiar de sucursal o sesión */
+  purgeRegionalStateCache: () => void;
   /** Verdadero únicamente para usuarios con rol estricto de Administrador (`super_admin` / `admin`) */
   isStrictAdmin: boolean;
   /** Verdadero para usuarios con autoridad de Contraloría Interna o Super Admin (Segregación de Funciones) */
@@ -438,6 +465,69 @@ export const AppProvider: React.FC<{
   const lastFocusRevalidationMsRef = useRef<number>(Date.now());
   const verifiedIamRole: ManagedUserRole | null = verifiedProfile?.iamRole ?? null;
   const verifiedSucursal: SucursalCodigo | null = verifiedProfile?.sucursal ?? null;
+  const [activeRegiones, setActiveRegiones] = useState<ActiveRegionItem[]>(() =>
+    DEFAULT_FIVE_REGIONES.map((item) => ({ ...item }))
+  );
+  const [selectedNationalSucursal, setSelectedNationalSucursal] =
+    useState<OperativeSucursal | null>(null);
+  const [isMasterCachePurged, setIsMasterCachePurged] = useState<boolean>(false);
+
+  const canSwitchSucursal = Boolean(
+    verifiedProfile &&
+      (verifiedIamRole === 'super_admin' ||
+        (verifiedIamRole === 'contraloria' &&
+          (verifiedSucursal === 'GLOBAL' || verifiedSucursal === null)))
+  );
+
+  const lockedRegionalSucursal: OperativeSucursal | null =
+    !canSwitchSucursal && verifiedSucursal && isOperativeSucursal(verifiedSucursal)
+      ? verifiedSucursal
+      : null;
+
+  const activeSucursal: OperativeSucursal | null = canSwitchSucursal
+    ? selectedNationalSucursal
+    : lockedRegionalSucursal;
+
+  const requiresSucursalSelection: boolean = canSwitchSucursal && activeSucursal === null;
+
+  const activeSucursalLabel: string = useMemo(() => {
+    if (activeSucursal) {
+      if (isOperativeSucursal(activeSucursal)) {
+        return SUCURSAL_LABELS[activeSucursal];
+      }
+      const matched = activeRegiones.find((r) => r.codigo === activeSucursal);
+      return matched?.label || `Sucursal ${activeSucursal}`;
+    }
+    return requiresSucursalSelection ? 'Selección de Sucursal Pendiente' : 'Global · Nacional';
+  }, [activeSucursal, activeRegiones, requiresSucursalSelection]);
+
+  const activeSucursalRef = useRef<OperativeSucursal | null>(activeSucursal);
+  activeSucursalRef.current = activeSucursal;
+  const requiresSucursalSelectionRef = useRef<boolean>(requiresSucursalSelection);
+  requiresSucursalSelectionRef.current = requiresSucursalSelection;
+
+  // Sincronizar cabecera `x-sucursal-activa` antes de cualquier carga de datos hija
+  useEffect(() => {
+    setActiveClientSucursalHeader(activeSucursal);
+  }, [activeSucursal]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let cancelled = false;
+    void fetchActiveRegiones()
+      .then((rows) => {
+        if (!cancelled && rows.length > 0) {
+          setActiveRegiones(rows);
+        }
+      })
+      .catch(() => {
+        // Conserva DEFAULT_FIVE_REGIONES si está sin conexión
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [verifiedProfile?.userId]);
+
   const isStrictAdmin = verifiedProfile
     ? verifiedIamRole === 'super_admin' || isStrictAdminRole(verifiedProfile.appRole)
     : isStrictAdminRole(currentRole);
@@ -496,7 +586,10 @@ export const AppProvider: React.FC<{
   }, [reconciliation]);
 
   const refreshFinancialData = useCallback(async () => {
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured || requiresSucursalSelectionRef.current) {
+      setIsLoadingFinancial(false);
+      return;
+    }
     setIsLoadingFinancial(true);
     try {
       const bundle = await fetchContraloriaFinancialBundle();
@@ -577,17 +670,41 @@ export const AppProvider: React.FC<{
   );
 
   // Fuente Única de Verdad de Maestros (`public.clientes`, `public.vendedores`, `cadenas_comerciales`, `zonas`)
-  const masterData = useMasterData({
+  const rawMasterData = useMasterData({
     cargarVendedores: true,
     cargarClientes: true,
     cargarCadenas: true,
     cargarZonas: true,
     suscribirCambiosRealtime: true,
+    deshabilitado: requiresSucursalSelection,
   });
 
+  useEffect(() => {
+    if (rawMasterData.ultimaActualizacionIso && !requiresSucursalSelection) {
+      setIsMasterCachePurged(false);
+    }
+  }, [rawMasterData.ultimaActualizacionIso, requiresSucursalSelection]);
+
+  const masterData: UseMasterDataResult = useMemo(() => {
+    if (requiresSucursalSelection || isMasterCachePurged) {
+      return {
+        ...rawMasterData,
+        vendedores: [],
+        clientes: [],
+        cadenas: [],
+        zonas: [],
+        stores: [],
+      };
+    }
+    return rawMasterData;
+  }, [rawMasterData, requiresSucursalSelection, isMasterCachePurged]);
+
   const stores = useMemo(
-    () => mergeMasterStoresWithFallback(masterData.stores, fallbackStores),
-    [masterData.stores, fallbackStores]
+    () =>
+      requiresSucursalSelection || isMasterCachePurged
+        ? []
+        : mergeMasterStoresWithFallback(masterData.stores, fallbackStores),
+    [masterData.stores, fallbackStores, requiresSucursalSelection, isMasterCachePurged]
   );
 
   const visitsRef = useRef<ScheduledVisit[]>(visits);
@@ -597,13 +714,19 @@ export const AppProvider: React.FC<{
 
   // Estado de sincronización con Supabase (Módulo 1 y Módulo 2)
   const [module1Bundle, setModule1Bundle] = useState<Module1SupabaseBundle | null>(null);
-  const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
+  const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(
+    () => !requiresSucursalSelection
+  );
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [focusedTastingId, setFocusedTastingId] = useState<string | null>(null);
   const [focusedTastingSnapshot, setFocusedTastingSnapshot] =
     useState<DegustacionNotificationItem | null>(null);
 
   const refreshSupabaseData = useCallback(async () => {
+    if (requiresSucursalSelectionRef.current) {
+      setIsLoadingSupabase(false);
+      return;
+    }
     setIsLoadingSupabase(true);
     setSupabaseError(null);
     try {
@@ -1019,6 +1142,81 @@ export const AppProvider: React.FC<{
     },
   });
 
+  const purgeRegionalStateCache = useCallback(() => {
+    sessionDeletedVisitIds.clear();
+    sessionVisitsCleared = false;
+    clearMasterDataCaches();
+    setIsMasterCachePurged(true);
+    visitsRef.current = [];
+    reconciliationRef.current = EMPTY_RECONCILIATION;
+    setVisits([]);
+    setModule1Bundle(null);
+    setRequests([]);
+    setReconciliation(EMPTY_RECONCILIATION);
+    setConciliacionesByReqId({});
+    setCertificadosPazYSalvo({});
+    setCampanasTrade([]);
+    setPresupuestosTrade([]);
+    setTarifarioCostos([]);
+    setFallbackStores([]);
+    setAuditLogs([]);
+    setDiscrepancyAlerts([]);
+    setUsers([]);
+    setFocusedTastingId(null);
+    setFocusedTastingSnapshot(null);
+    setSupabaseError(null);
+  }, []);
+
+  const prevVerifiedUserIdRef = useRef<string | null>(verifiedProfile?.userId ?? null);
+  useEffect(() => {
+    const nextUserId = verifiedProfile?.userId ?? null;
+    if (prevVerifiedUserIdRef.current !== nextUserId) {
+      prevVerifiedUserIdRef.current = nextUserId;
+      setSelectedNationalSucursal(null);
+      setActiveClientSucursalHeader(canSwitchSucursal ? null : lockedRegionalSucursal);
+      purgeRegionalStateCache();
+    }
+  }, [verifiedProfile?.userId, canSwitchSucursal, lockedRegionalSucursal, purgeRegionalStateCache]);
+
+  const setActiveSucursal = useCallback(
+    (nextSucursal: OperativeSucursal) => {
+      if (!canSwitchSucursal) {
+        return;
+      }
+      const normalized = normalizeSucursalCodigo(nextSucursal);
+      if (!normalized || !isOperativeSucursal(normalized)) {
+        return;
+      }
+
+      // 1. Inyectar cabecera activa `x-sucursal-activa` en el cliente Supabase
+      setActiveClientSucursalHeader(normalized);
+      activeSucursalRef.current = normalized;
+      requiresSucursalSelectionRef.current = false;
+      setSelectedNationalSucursal(normalized);
+
+      // 2. Purgar inmediatamente toda caché operativa en memoria (cero mezcla entre regiones)
+      purgeRegionalStateCache();
+
+      // 3. Recargar en limpio exclusivamente para la sucursal seleccionada
+      void refreshSupabaseData();
+      void refreshFinancialData();
+      void rawMasterData.refrescar().finally(() => {
+        setIsMasterCachePurged(false);
+      });
+      void solicitudesContraloria.refreshSolicitudes();
+      void degustacionNotifications.reloadNotifications();
+    },
+    [
+      canSwitchSucursal,
+      purgeRegionalStateCache,
+      refreshSupabaseData,
+      refreshFinancialData,
+      rawMasterData,
+      solicitudesContraloria,
+      degustacionNotifications,
+    ]
+  );
+
   const syncReconciliationToState = (next: InventoryReconciliation) => {
     setReconciliation(next);
     if (next.requestId) {
@@ -1037,6 +1235,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
+          activeSucursal ??
           (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
@@ -1062,6 +1261,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
+          activeSucursal ??
           (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
@@ -1087,6 +1287,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
+          activeSucursal ??
           (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
@@ -1169,6 +1370,7 @@ export const AppProvider: React.FC<{
     try {
       const targetSucursal =
         req.sucursal ??
+        activeSucursal ??
         (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
           ? verifiedSucursal
           : 'ZULIA');
@@ -2120,10 +2322,15 @@ export const AppProvider: React.FC<{
   };
 
   const refreshAll = async () => {
+    if (requiresSucursalSelectionRef.current) {
+      return;
+    }
     await Promise.all([
       refreshSupabaseData(),
       refreshFinancialData(),
-      masterData.refrescar(),
+      rawMasterData.refrescar().finally(() => {
+        setIsMasterCachePurged(false);
+      }),
       degustacionNotifications.reloadNotifications(),
       solicitudesContraloria.refreshSolicitudes(),
     ]);
@@ -2137,6 +2344,13 @@ export const AppProvider: React.FC<{
         setCurrentRole,
         verifiedIamRole,
         verifiedSucursal,
+        activeRegiones,
+        activeSucursal,
+        activeSucursalLabel,
+        canSwitchSucursal,
+        requiresSucursalSelection,
+        setActiveSucursal,
+        purgeRegionalStateCache,
         isStrictAdmin,
         isContraloriaOrAdmin,
         isTradeOpsRole,
@@ -2195,6 +2409,10 @@ export const AppProvider: React.FC<{
       {children}
     </AppContext.Provider>
   );
+};
+
+export const useOptionalApp = (): AppContextType | undefined => {
+  return useContext(AppContext);
 };
 
 export const useApp = () => {
