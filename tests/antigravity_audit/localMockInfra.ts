@@ -1073,10 +1073,17 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
           return;
         }
         const prev: Record<string, any> = { ...(tables.profiles[idx] || {}) };
+        const nextSucursal =
+          role === 'super_admin'
+            ? 'GLOBAL'
+            : typeof args.p_sucursal === 'string' && args.p_sucursal.trim()
+              ? args.p_sucursal.trim().toUpperCase()
+              : prev.sucursal || (role === 'contraloria' ? 'GLOBAL' : 'ZULIA');
         const nextRow: Record<string, any> = {
           ...prev,
           full_name: fullName,
           role,
+          sucursal: nextSucursal,
           is_active: isActive,
           must_change_password:
             typeof mustChange === 'boolean' ? mustChange : Boolean(prev.must_change_password),
@@ -1119,11 +1126,21 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
           return;
         }
         const nowIso = new Date().toISOString();
+        const resolvedRole = String(args.p_role || 'vendedor').trim().toLowerCase();
+        const resolvedSucursal =
+          resolvedRole === 'super_admin'
+            ? 'GLOBAL'
+            : typeof args.p_sucursal === 'string' && args.p_sucursal.trim()
+              ? args.p_sucursal.trim().toUpperCase()
+              : resolvedRole === 'contraloria'
+                ? 'GLOBAL'
+                : 'ZULIA';
         const createdProfile = {
           id: targetId,
           email: targetActor.email,
           full_name: String(args.p_full_name || '').trim(),
-          role: String(args.p_role || 'vendedor').trim().toLowerCase(),
+          role: resolvedRole,
+          sucursal: resolvedSucursal,
           is_active: true,
           must_change_password: Boolean(args.p_must_change_password),
           created_at: nowIso,
@@ -1132,6 +1149,7 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
         targetActor.app_metadata = {
           role: createdProfile.role,
           app_role: createdProfile.role,
+          sucursal: createdProfile.sucursal,
           display_name: createdProfile.full_name,
           is_active: true,
         };

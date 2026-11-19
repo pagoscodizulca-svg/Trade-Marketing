@@ -13,14 +13,22 @@ import {
   FileSpreadsheet,
   X,
   Inbox,
+  Loader2,
+  ExternalLink,
+  DollarSign,
+  FolderKanban,
 } from 'lucide-react';
 import { RequisitionStatus } from '../../types';
+import type { PazYSalvoVerificationResult } from '../../types/contraloriaFinancial';
 import { ExportPdfButton } from '../common/ExportPdfButton';
 import { exportContraloriaPdf } from '../../utils/pdfExport';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
 import { ContraloriaSolicitudesInbox } from './ContraloriaSolicitudesInbox';
 
-export type ContraloriaSubTab = 'bandeja_entrada' | 'conciliacion_auditoria';
+export type ContraloriaSubTab =
+  | 'bandeja_entrada'
+  | 'conciliacion_auditoria'
+  | 'presupuestos_tarifario';
 
 export const ContraloriaView: React.FC = () => {
   const {
@@ -30,6 +38,14 @@ export const ContraloriaView: React.FC = () => {
     requests,
     reconciliation,
     solicitudesContraloria,
+    campanasTrade,
+    presupuestosTrade,
+    tarifarioCostos,
+    selectReconciliationForRequest,
+    saveCampanaTrade,
+    savePresupuestoTrade,
+    saveTarifarioCosto,
+    verifyPazYSalvoCertificate,
     advanceRequisitionWorkflow,
     createRequisition,
     addFiscalReceipt,
@@ -44,11 +60,13 @@ export const ContraloriaView: React.FC = () => {
   const [selectedReqCode, setSelectedReqCode] = useState<string>('');
   const activeReq = requests.find((r) => r.requestCode === selectedReqCode) || requests[0];
 
-  // Estado de transiciones del flujo
+  // Estado de transiciones y persistencia en BD
   const [justificationText, setJustificationText] = useState<string>('');
+  const [isSavingFinancial, setIsSavingFinancial] = useState<boolean>(false);
   const [transitionMsg, setTransitionMsg] = useState<{ text: string; isError?: boolean } | null>(
     null
   );
+  const [pysVerification, setPysVerification] = useState<PazYSalvoVerificationResult | null>(null);
 
   // Modal: Radicar Nueva Requisición Oficial
   const [isNewReqModalOpen, setIsNewReqModalOpen] = useState<boolean>(false);
@@ -64,20 +82,38 @@ export const ContraloriaView: React.FC = () => {
   const [newReqUnitCost, setNewReqUnitCost] = useState<number>(0);
   const [newReqBudgetCap, setNewReqBudgetCap] = useState<number>(0);
 
-  // Modal: Cargar Comprobante Fiscal real (sin valores prellenados ficticios)
+  // Modal: Cargar Comprobante Fiscal real (con archivo binario PDF/imagen hacia Storage privado)
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState<boolean>(false);
   const [invoiceNumber, setInvoiceNumber] = useState<string>('');
   const [supplierRif, setSupplierRif] = useState<string>('');
   const [supplierName, setSupplierName] = useState<string>('');
   const [invoiceConcept, setInvoiceConcept] = useState<string>('');
   const [invoiceTotal, setInvoiceTotal] = useState<string>('');
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
 
   // Notas de cierre Paz y Salvo
   const [pazYSalvoNotes, setPazYSalvoNotes] = useState<string>('');
 
+  // Formularios rápidos para Campañas, Presupuestos y Tarifario en BD
+  const [campCodigo, setCampCodigo] = useState<string>('');
+  const [campNombre, setCampNombre] = useState<string>('');
+  const [campMarca, setCampMarca] = useState<'ASTURIAS' | 'VENCAMPO' | 'GENERAL'>('ASTURIAS');
+  const [campInicio, setCampInicio] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [campFin, setCampFin] = useState<string>(() => new Date().toISOString().slice(0, 10));
+
+  const [presPeriodo, setPresPeriodo] = useState<string>(() => new Date().toISOString().slice(0, 7));
+  const [presCategoria, setPresCategoria] = useState<string>('Degustaciones BTL');
+  const [presMonto, setPresMonto] = useState<string>('');
+  const [presCampanaId, setPresCampanaId] = useState<string>('');
+
+  const [editingTarifaId, setEditingTarifaId] = useState<string | null>(null);
+  const [editingTarifaCost, setEditingTarifaCost] = useState<string>('');
+  const [editingTarifaPrice, setEditingTarifaPrice] = useState<string>('');
+
+  const isReconciliationLocked = Boolean(reconciliation.cerrada || reconciliation.pazYSalvoIssued);
+
   const handleOpenNewReqModal = () => {
-    const seq = String(requests.length + 1).padStart(4, '0');
-    setNewReqCode(`MP-${new Date().getFullYear()}-${seq}`);
+    setNewReqCode('AUTO');
     setNewReqDate(new Date().toISOString().slice(0, 10));
     setNewReqPurpose('');
     setNewReqRecipient('');
@@ -91,69 +127,62 @@ export const ContraloriaView: React.FC = () => {
     setIsNewReqModalOpen(true);
   };
 
-  const handleCreateRequisitionSubmit = (e: React.FormEvent) => {
+  const handleCreateRequisitionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingFinancial) return;
     const [yyyy, mm, dd] = newReqDate.split('-');
     const formattedDate = yyyy && mm && dd ? `${dd}/${mm}/${yyyy}` : newReqDate;
     const qty = Math.max(1, Number(newReqQty) || 1);
     const unitCost = Math.max(0, Number(newReqUnitCost) || 0);
     const totalCost = +(qty * unitCost).toFixed(2);
-    const code = newReqCode.trim() || `MP-${new Date().getFullYear()}-${String(requests.length + 1).padStart(4, '0')}`;
+    const requestedCode = newReqCode.trim().toUpperCase();
 
-    createRequisition({
-      requestCode: code,
-      requestDate: formattedDate,
-      campaignOrPurpose: newReqPurpose.trim(),
-      targetRecipient: newReqRecipient.trim() || 'Facturación / Almacén Codizulca',
-      deliveryDestination: newReqDestination.trim() || 'Despacho Operativo Trade Marketing',
-      notesAndObservations: newReqNotes.trim(),
-      approvedBudgetCapUsd: Math.max(totalCost, Number(newReqBudgetCap) || totalCost),
-      status: 'VALIDACION_COMERCIAL',
-      items: [
-        {
-          id: `item_${Date.now()}`,
-          itemNumber: 1,
-          productName: newReqProduct.trim(),
-          category: 'PRODUCTO_DEGUSTACION',
-          quantityRequested: qty,
-          unitOfMeasure: newReqUnit.trim() || 'Unid',
-          unitCostUsd: unitCost,
-          totalCostUsd: totalCost,
-        },
-      ],
-    });
+    setIsSavingFinancial(true);
+    try {
+      const res = await createRequisition({
+        requestCode: requestedCode && requestedCode !== 'AUTO' ? requestedCode : undefined,
+        requestDate: formattedDate,
+        campaignOrPurpose: newReqPurpose.trim(),
+        targetRecipient: newReqRecipient.trim() || 'Facturación / Almacén Codizulca',
+        deliveryDestination: newReqDestination.trim() || 'Despacho Operativo Trade Marketing',
+        notesAndObservations: newReqNotes.trim(),
+        approvedBudgetCapUsd: Math.max(totalCost, Number(newReqBudgetCap) || totalCost),
+        status: 'VALIDACION_COMERCIAL',
+        items: [
+          {
+            id: `item_${Date.now()}`,
+            itemNumber: 1,
+            productName: newReqProduct.trim(),
+            category: 'PRODUCTO_DEGUSTACION',
+            quantityRequested: qty,
+            unitOfMeasure: newReqUnit.trim() || 'Unid',
+            unitCostUsd: unitCost,
+            totalCostUsd: totalCost,
+          },
+        ],
+      });
 
-    setSelectedReqCode(code);
-    updateReconciliation({
-      requestCode: code,
-      productName: newReqProduct.trim(),
-      deliveredUnits: qty,
-      degustatedUnitsReported: 0,
-      returnedRemanentUnits: 0,
-      pazYSalvoIssued: false,
-    });
-    setIsNewReqModalOpen(false);
-    setTransitionMsg({ text: `Requisición ${code} radicada correctamente en Contraloría.` });
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success && res.requisicion) {
+        setSelectedReqCode(res.requisicion.requestCode);
+        setIsNewReqModalOpen(false);
+      }
+    } finally {
+      setIsSavingFinancial(false);
+    }
   };
 
   const handleSelectRequisition = (code: string) => {
     setSelectedReqCode(code);
+    setPysVerification(null);
     const found = requests.find((r) => r.requestCode === code);
-    if (found && reconciliation.requestCode !== found.requestCode) {
-      updateReconciliation({
-        requestId: found.id,
-        requestCode: found.requestCode,
-        productName: found.items[0]?.productName || found.campaignOrPurpose,
-        deliveredUnits: found.totalUnits,
-        degustatedUnitsReported: 0,
-        returnedRemanentUnits: 0,
-        pazYSalvoIssued: false,
-      });
+    if (found) {
+      selectReconciliationForRequest(found.id);
     }
   };
 
-  const handleAdvance = (nextStatus: RequisitionStatus) => {
-    if (!activeReq) return;
+  const handleAdvance = async (nextStatus: RequisitionStatus) => {
+    if (!activeReq || isSavingFinancial) return;
     const requiresControllerAuthority =
       nextStatus === 'APROBADO_CONTRALORIA' ||
       nextStatus === 'RECHAZADO' ||
@@ -167,38 +196,72 @@ export const ContraloriaView: React.FC = () => {
       return;
     }
 
-    const res = advanceRequisitionWorkflow(activeReq.id, nextStatus, justificationText);
-    setTransitionMsg({ text: res.message, isError: !res.success });
-    setJustificationText('');
-  };
-
-  const handleCreateReceipt = (e: React.FormEvent) => {
-    e.preventDefault();
-    const totalNum = Math.max(0, parseFloat(invoiceTotal) || 0);
-    if (!invoiceNumber.trim() || !supplierRif.trim() || totalNum <= 0) return;
-
-    const res = addFiscalReceipt({
-      invoiceNumber: invoiceNumber.trim(),
-      supplierRif: supplierRif.trim().toUpperCase(),
-      supplierName: supplierName.trim(),
-      concept: invoiceConcept.trim(),
-      subtotalUsd: +(totalNum / 1.16).toFixed(2),
-      taxAmountUsd: +(totalNum - totalNum / 1.16).toFixed(2),
-      totalUsd: totalNum,
-      imageUrl: '',
-    });
-    setTransitionMsg({ text: res.message, isError: !res.success });
-    if (res.success) {
-      setInvoiceNumber('');
-      setSupplierRif('');
-      setSupplierName('');
-      setInvoiceConcept('');
-      setInvoiceTotal('');
-      setIsReceiptModalOpen(false);
+    setIsSavingFinancial(true);
+    try {
+      const res = await advanceRequisitionWorkflow(activeReq.id, nextStatus, justificationText);
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success) setJustificationText('');
+    } finally {
+      setIsSavingFinancial(false);
     }
   };
 
-  const handleIssuePazYSalvo = () => {
+  const handleCreateReceipt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingFinancial) return;
+    const totalNum = Math.max(0, parseFloat(invoiceTotal) || 0);
+    if (!invoiceNumber.trim() || !supplierRif.trim() || totalNum <= 0) return;
+
+    setIsSavingFinancial(true);
+    try {
+      const res = await addFiscalReceipt(
+        {
+          invoiceNumber: invoiceNumber.trim(),
+          supplierRif: supplierRif.trim().toUpperCase(),
+          supplierName: supplierName.trim(),
+          concept: invoiceConcept.trim(),
+          subtotalUsd: +(totalNum / 1.16).toFixed(2),
+          taxAmountUsd: +(totalNum - totalNum / 1.16).toFixed(2),
+          totalUsd: totalNum,
+          imageUrl: '',
+        },
+        invoiceFile
+      );
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success) {
+        setInvoiceNumber('');
+        setSupplierRif('');
+        setSupplierName('');
+        setInvoiceConcept('');
+        setInvoiceTotal('');
+        setInvoiceFile(null);
+        setIsReceiptModalOpen(false);
+      }
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleValidateReceipt = async (receiptId: string, isValid: boolean, notes?: string) => {
+    if (isSavingFinancial) return;
+    if (!isContraloriaOrAdmin) {
+      setTransitionMsg({
+        text: 'Segregación de Funciones: solo Contraloría Interna o Super Admin puede validar comprobantes fiscales.',
+        isError: true,
+      });
+      return;
+    }
+    setIsSavingFinancial(true);
+    try {
+      const res = await validateFiscalReceipt(receiptId, isValid, notes);
+      setTransitionMsg({ text: res.message, isError: !res.success });
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleIssuePazYSalvo = async () => {
+    if (isSavingFinancial) return;
     if (!isContraloriaOrAdmin) {
       setTransitionMsg({
         text: 'Segregación de Funciones: solo Contraloría Interna o Administración General pueden emitir y sellar un Paz y Salvo.',
@@ -209,8 +272,109 @@ export const ContraloriaView: React.FC = () => {
     const notes =
       pazYSalvoNotes.trim() ||
       `Conciliación conforme para solicitud ${activeReq?.requestCode || reconciliation.requestCode}.`;
-    const res = closeReconciliationAndIssuePazYSalvo(notes);
-    setTransitionMsg({ text: res.message, isError: !res.success });
+    setIsSavingFinancial(true);
+    try {
+      const res = await closeReconciliationAndIssuePazYSalvo(notes);
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      setPysVerification(null);
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleVerifyPazYSalvoServer = async () => {
+    const certCode =
+      reconciliation.pazYSalvoCertificateCode ||
+      (activeReq ? `PYS-${activeReq.requestCode}` : '');
+    if (!certCode || isSavingFinancial) return;
+    setIsSavingFinancial(true);
+    try {
+      const result = await verifyPazYSalvoCertificate(certCode);
+      setPysVerification(result);
+      setTransitionMsg({
+        text: result.valid
+          ? `Integridad SHA-256 VERIFICADA en PostgreSQL para ${result.codigo_certificado}.`
+          : `No se pudo verificar la integridad criptográfica de ${certCode}.`,
+        isError: !result.valid,
+      });
+    } catch (err) {
+      setTransitionMsg({
+        text: err instanceof Error ? err.message : 'Error verificando SHA-256 en servidor.',
+        isError: true,
+      });
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleSaveCampanaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingFinancial) return;
+    setIsSavingFinancial(true);
+    try {
+      const res = await saveCampanaTrade({
+        codigo: campCodigo,
+        nombre: campNombre,
+        marca: campMarca,
+        fecha_inicio: campInicio,
+        fecha_fin: campFin,
+      });
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success) {
+        setCampCodigo('');
+        setCampNombre('');
+      }
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleSavePresupuestoSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingFinancial) return;
+    const monto = parseFloat(presMonto);
+    if (!Number.isFinite(monto) || monto < 0) return;
+    setIsSavingFinancial(true);
+    try {
+      const res = await savePresupuestoTrade({
+        campana_id: presCampanaId || null,
+        periodo_ym: presPeriodo,
+        categoria: presCategoria,
+        monto_asignado_usd: monto,
+      });
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success) setPresMonto('');
+    } finally {
+      setIsSavingFinancial(false);
+    }
+  };
+
+  const handleSaveTarifaRow = async (tarifa: (typeof tarifarioCostos)[number]) => {
+    if (isSavingFinancial) return;
+    const nextCost = parseFloat(editingTarifaCost);
+    const nextPrice = parseFloat(editingTarifaPrice);
+    if (!Number.isFinite(nextCost) || nextCost <= 0 || !Number.isFinite(nextPrice) || nextPrice < 0) {
+      setTransitionMsg({ text: 'Ingresa un costo (>0) y precio (>=0) válidos.', isError: true });
+      return;
+    }
+    setIsSavingFinancial(true);
+    try {
+      const res = await saveTarifarioCosto({
+        id: tarifa.id,
+        line_id: tarifa.line_id,
+        etiqueta: tarifa.etiqueta,
+        marca: tarifa.marca,
+        unidad_medida: tarifa.unidad_medida,
+        costo_unitario_usd: nextCost,
+        precio_referencia_usd: nextPrice,
+        vigente_desde: tarifa.vigente_desde,
+        sucursal: tarifa.sucursal,
+      });
+      setTransitionMsg({ text: res.message, isError: !res.success });
+      if (res.success) setEditingTarifaId(null);
+    } finally {
+      setIsSavingFinancial(false);
+    }
   };
 
   const workflowStages: { key: RequisitionStatus; label: string; roleAuth: string }[] = [
@@ -348,6 +512,28 @@ export const ContraloriaView: React.FC = () => {
                 }`}
               >
                 {requests.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('presupuestos_tarifario')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                activeSubTab === 'presupuestos_tarifario'
+                  ? 'bg-[#DC2626] text-[#FFFFFF] shadow-md'
+                  : 'text-zinc-300 hover:text-white hover:bg-white/[0.05]'
+              }`}
+            >
+              <DollarSign className="w-3.5 h-3.5" />
+              <span>Campañas, Presupuestos y Tarifario BD</span>
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                  activeSubTab === 'presupuestos_tarifario'
+                    ? 'bg-black/30 text-white'
+                    : 'bg-zinc-900 text-zinc-400 border border-white/10'
+                }`}
+              >
+                {tarifarioCostos.length}
               </span>
             </button>
           </div>
@@ -694,15 +880,16 @@ export const ContraloriaView: React.FC = () => {
                   <input
                     type="number"
                     min={0}
+                    disabled={isReconciliationLocked}
                     value={reconciliation.deliveredUnits}
                     onChange={(e) =>
-                      updateReconciliation({
+                      void updateReconciliation({
                         requestId: activeReq.id,
                         requestCode: activeReq.requestCode,
                         deliveredUnits: Math.max(0, parseInt(e.target.value, 10) || 0),
                       })
                     }
-                    className="w-24 text-center text-2xl font-black text-white font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500"
+                    className="w-24 text-center text-2xl font-black text-white font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500 disabled:opacity-50"
                   />
                   <span className="text-[10px] text-zinc-400 block mt-1.5 truncate">
                     {activeReq.items[0]?.productName || reconciliation.productName || 'Unidades'}
@@ -716,15 +903,16 @@ export const ContraloriaView: React.FC = () => {
                   <input
                     type="number"
                     min={0}
+                    disabled={isReconciliationLocked}
                     value={reconciliation.degustatedUnitsReported}
                     onChange={(e) =>
-                      updateReconciliation({
+                      void updateReconciliation({
                         requestId: activeReq.id,
                         requestCode: activeReq.requestCode,
                         degustatedUnitsReported: Math.max(0, parseInt(e.target.value, 10) || 0),
                       })
                     }
-                    className="w-24 text-center text-2xl font-black text-red-500 font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500"
+                    className="w-24 text-center text-2xl font-black text-red-500 font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500 disabled:opacity-50"
                   />
                   <span className="text-[10px] text-zinc-400 block mt-1.5">
                     Reportadas en ejecución
@@ -738,24 +926,26 @@ export const ContraloriaView: React.FC = () => {
                   <input
                     type="number"
                     min={0}
+                    disabled={isReconciliationLocked}
                     value={reconciliation.returnedRemanentUnits}
                     onChange={(e) =>
-                      updateReconciliation({
+                      void updateReconciliation({
                         requestId: activeReq.id,
                         requestCode: activeReq.requestCode,
                         returnedRemanentUnits: Math.max(0, parseInt(e.target.value, 10) || 0),
                       })
                     }
-                    className="w-24 text-center text-2xl font-black text-white font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500"
+                    className="w-24 text-center text-2xl font-black text-white font-mono bg-zinc-950 border border-zinc-800 rounded-lg py-1 focus:outline-none focus:border-red-500 disabled:opacity-50"
                   />
                   <input
                     type="text"
+                    disabled={isReconciliationLocked}
                     placeholder="N° Acta devolución (opcional)"
                     value={reconciliation.returnWarehouseReceiptNumber || ''}
                     onChange={(e) =>
-                      updateReconciliation({ returnWarehouseReceiptNumber: e.target.value })
+                      void updateReconciliation({ returnWarehouseReceiptNumber: e.target.value })
                     }
-                    className="mt-1.5 w-full text-center text-[10px] font-mono text-zinc-300 bg-transparent border-b border-zinc-800 focus:outline-none focus:border-red-500"
+                    className="mt-1.5 w-full text-center text-[10px] font-mono text-zinc-300 bg-transparent border-b border-zinc-800 focus:outline-none focus:border-red-500 disabled:opacity-50"
                   />
                 </div>
               </div>
@@ -792,13 +982,14 @@ export const ContraloriaView: React.FC = () => {
                         type="number"
                         min={0}
                         step="0.01"
+                        disabled={isReconciliationLocked}
                         value={reconciliation.approvedPettyCashUsd}
                         onChange={(e) =>
-                          updateReconciliation({
+                          void updateReconciliation({
                             approvedPettyCashUsd: Math.max(0, parseFloat(e.target.value) || 0),
                           })
                         }
-                        className="w-24 px-2 py-0.5 rounded bg-black border border-zinc-800 text-white font-mono text-xs focus:outline-none focus:border-red-500"
+                        className="w-24 px-2 py-0.5 rounded bg-black border border-zinc-800 text-white font-mono text-xs focus:outline-none focus:border-red-500 disabled:opacity-50"
                       />
                       <span>
                         • Rendido: ${reconciliation.totalExpensesReportedUsd.toFixed(2)} USD
@@ -808,8 +999,10 @@ export const ContraloriaView: React.FC = () => {
                 </div>
 
                 <button
+                  type="button"
+                  disabled={isReconciliationLocked || isSavingFinancial}
                   onClick={() => setIsReceiptModalOpen(true)}
-                  className="px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-black uppercase flex items-center gap-1.5 transition shrink-0"
+                  className="px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-45 disabled:cursor-not-allowed text-white text-xs font-black uppercase flex items-center gap-1.5 transition shrink-0"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   Cargar Factura Real
@@ -828,7 +1021,7 @@ export const ContraloriaView: React.FC = () => {
                       className="p-3.5 rounded-xl bg-black border border-zinc-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
                     >
                       <div className="space-y-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono font-bold text-white">
                             {rec.invoiceNumber}
                           </span>
@@ -847,6 +1040,24 @@ export const ContraloriaView: React.FC = () => {
                         </div>
                         <p className="font-bold text-white">{rec.supplierName}</p>
                         <p className="text-zinc-400 text-[11px]">{rec.concept}</p>
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          {rec.imageUrl && (
+                            <a
+                              href={rec.imageUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 font-mono underline"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              Ver Comprobante Privado ({rec.mimeType || 'PDF/IMG'})
+                            </a>
+                          )}
+                          {rec.archivoSha256Hex && (
+                            <span className="text-[9px] font-mono text-zinc-500">
+                              SHA256: {rec.archivoSha256Hex.slice(0, 14)}…
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       <div className="flex sm:flex-col items-center sm:items-end justify-between gap-1">
@@ -855,16 +1066,20 @@ export const ContraloriaView: React.FC = () => {
                         </span>
                         <div className="flex items-center gap-1">
                           <button
-                            onClick={() => validateFiscalReceipt(rec.id, true)}
-                            className="px-2.5 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-white text-[10px] font-bold border border-zinc-800"
+                            type="button"
+                            disabled={isReconciliationLocked || isSavingFinancial || !isContraloriaOrAdmin}
+                            onClick={() => void handleValidateReceipt(rec.id, true)}
+                            className="px-2.5 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40 text-white text-[10px] font-bold border border-zinc-800"
                           >
                             Validar
                           </button>
                           <button
+                            type="button"
+                            disabled={isReconciliationLocked || isSavingFinancial || !isContraloriaOrAdmin}
                             onClick={() =>
-                              validateFiscalReceipt(rec.id, false, 'Observación por Contraloría')
+                              void handleValidateReceipt(rec.id, false, 'Observación por Contraloría')
                             }
-                            className="px-2.5 py-0.5 rounded bg-red-950 hover:bg-red-900 text-red-400 text-[10px] font-bold border border-red-800"
+                            className="px-2.5 py-0.5 rounded bg-red-950 hover:bg-red-900 disabled:opacity-40 text-red-400 text-[10px] font-bold border border-red-800"
                           >
                             Observar
                           </button>
@@ -897,7 +1112,7 @@ export const ContraloriaView: React.FC = () => {
                       Acta Digital de "Paz y Salvo" de Activación
                     </h3>
                     <p className="text-xs text-zinc-400">
-                      Cierre vinculante de responsabilidades con Contraloría Codizulca
+                      Cierre inmutable sellado con SHA-256 en servidor PostgreSQL (`pgcrypto`)
                     </p>
                   </div>
                 </div>
@@ -905,7 +1120,7 @@ export const ContraloriaView: React.FC = () => {
                 {reconciliation.pazYSalvoIssued ? (
                   <span className="px-3 py-1 rounded-full bg-red-600 text-white font-black text-xs flex items-center gap-1.5 uppercase tracking-wider border border-red-500">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    EMITIDO Y VIGENTE
+                    INMUTABLE · SELLADO
                   </span>
                 ) : (
                   <span className="px-3 py-1 rounded-full bg-zinc-900 text-white border border-zinc-800 font-bold text-xs uppercase">
@@ -920,7 +1135,7 @@ export const ContraloriaView: React.FC = () => {
                     <div>
                       <span className="text-xs text-zinc-400 block font-bold">Certificado N°:</span>
                       <span className="text-sm font-black text-red-500 font-mono">
-                        PYS-{activeReq.requestCode}
+                        {reconciliation.pazYSalvoCertificateCode || `PYS-${activeReq.requestCode}`}
                       </span>
                     </div>
                     <div>
@@ -939,15 +1154,40 @@ export const ContraloriaView: React.FC = () => {
                     {reconciliation.auditNotes}
                   </p>
 
+                  {pysVerification && (
+                    <div
+                      className={`p-2.5 rounded-lg border text-[11px] font-mono ${
+                        pysVerification.valid
+                          ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-300'
+                          : 'bg-red-950/50 border-red-700 text-red-300'
+                      }`}
+                    >
+                      {pysVerification.valid
+                        ? `✓ VERIFICADO EN SERVIDOR: hash recomputado coincide 100% (${pysVerification.recomputed_sha256?.slice(0, 20)}…)`
+                        : '✗ ALERTA DE INTEGRIDAD: El hash almacenado no pudo verificarse.'}
+                    </div>
+                  )}
+
                   <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-zinc-900">
                     <div className="font-mono text-[10px] text-zinc-400 truncate max-w-sm">
-                      Firma Criptográfica: {reconciliation.pazYSalvoHash}
+                      Firma SHA-256 (BD): {reconciliation.pazYSalvoHash || '—'}
                     </div>
-                    <ExportPdfButton
-                      label="Exportar a PDF"
-                      documentTitle={`Paz y Salvo Oficial - ${activeReq.requestCode}`}
-                      onExportPdf={() => exportContraloriaPdf(activeReq, reconciliation, requests)}
-                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isSavingFinancial}
+                        onClick={() => void handleVerifyPazYSalvoServer()}
+                        className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-emerald-300 border border-emerald-700/50 text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        Verificar SHA-256
+                      </button>
+                      <ExportPdfButton
+                        label="Exportar a PDF"
+                        documentTitle={`Paz y Salvo Oficial - ${activeReq.requestCode}`}
+                        onExportPdf={() => exportContraloriaPdf(activeReq, reconciliation, requests)}
+                      />
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -960,11 +1200,19 @@ export const ContraloriaView: React.FC = () => {
                     className="w-full px-3 py-2 rounded-lg bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
                   />
                   <button
-                    onClick={handleIssuePazYSalvo}
-                    className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-red-950/60 flex items-center justify-center gap-2 transition"
+                    type="button"
+                    disabled={isSavingFinancial || !isContraloriaOrAdmin}
+                    onClick={() => void handleIssuePazYSalvo()}
+                    className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-red-950/60 flex items-center justify-center gap-2 transition"
                   >
-                    <Lock className="w-4 h-4" />
-                    Emitir "Paz y Salvo" y Sellar Cierre de Solicitud {activeReq.requestCode}
+                    {isSavingFinancial ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Lock className="w-4 h-4" />
+                    )}
+                    {isSavingFinancial
+                      ? 'Calculando SHA-256 y Sellando en PostgreSQL...'
+                      : `Emitir "Paz y Salvo" y Sellar Cierre de Solicitud ${activeReq.requestCode}`}
                   </button>
                 </div>
               )}
@@ -973,6 +1221,306 @@ export const ContraloriaView: React.FC = () => {
         </div>
       )}
         </>
+      )}
+
+      {/* Vista 3: Campañas Trade, Presupuestos y Tarifario Oficial de Costos en BD */}
+      {activeSubTab === 'presupuestos_tarifario' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Campañas Trade */}
+            <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="flex items-center gap-2 border-b border-zinc-900 pb-3">
+                <FolderKanban className="w-5 h-5 text-red-500" />
+                <div>
+                  <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                    Campañas Trade Marketing (`campanas_trade`)
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Registro multi-sucursal persistido en PostgreSQL
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveCampanaSubmit} className="grid grid-cols-2 gap-2.5 text-xs">
+                <input
+                  type="text"
+                  required
+                  placeholder="Código (ej. CAMP-2026-Q4)"
+                  value={campCodigo}
+                  onChange={(e) => setCampCodigo(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white font-mono"
+                />
+                <select
+                  value={campMarca}
+                  onChange={(e) =>
+                    setCampMarca(e.target.value as 'ASTURIAS' | 'VENCAMPO' | 'GENERAL')
+                  }
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white"
+                >
+                  <option value="ASTURIAS">ASTURIAS</option>
+                  <option value="VENCAMPO">VENCAMPO</option>
+                  <option value="GENERAL">GENERAL</option>
+                </select>
+                <input
+                  type="text"
+                  required
+                  placeholder="Nombre de la campaña"
+                  value={campNombre}
+                  onChange={(e) => setCampNombre(e.target.value)}
+                  className="col-span-2 px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white"
+                />
+                <input
+                  type="date"
+                  required
+                  value={campInicio}
+                  onChange={(e) => setCampInicio(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white font-mono"
+                />
+                <input
+                  type="date"
+                  required
+                  value={campFin}
+                  onChange={(e) => setCampFin(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white font-mono"
+                />
+                <button
+                  type="submit"
+                  disabled={isSavingFinancial}
+                  className="col-span-2 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black uppercase text-xs"
+                >
+                  Guardar Campaña en BD
+                </button>
+              </form>
+
+              <div className="space-y-2 max-h-52 overflow-y-auto">
+                {campanasTrade.length === 0 ? (
+                  <p className="text-xs text-zinc-500 text-center py-4">
+                    Sin campañas registradas aún.
+                  </p>
+                ) : (
+                  campanasTrade.map((c) => (
+                    <div
+                      key={c.id}
+                      className="p-2.5 rounded-lg bg-black border border-zinc-900 flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <span className="font-mono font-bold text-red-400">{c.codigo}</span>{' '}
+                        <span className="text-white font-semibold">{c.nombre}</span>
+                        <div className="text-[10px] text-zinc-500 font-mono">
+                          {c.marca} · {c.fecha_inicio} → {c.fecha_fin} · {c.sucursal || 'SEDE'}
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-zinc-900 text-zinc-300 text-[10px] font-mono">
+                        {c.estado}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Presupuestos Trade */}
+            <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="flex items-center gap-2 border-b border-zinc-900 pb-3">
+                <DollarSign className="w-5 h-5 text-red-500" />
+                <div>
+                  <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                    Presupuestos Mensuales (`presupuestos_trade`)
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Autorización exclusiva de Contraloría Interna / Super Admin
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSavePresupuestoSubmit} className="grid grid-cols-2 gap-2.5 text-xs">
+                <input
+                  type="month"
+                  required
+                  value={presPeriodo}
+                  onChange={(e) => setPresPeriodo(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white font-mono"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  required
+                  placeholder="Asignado USD"
+                  value={presMonto}
+                  onChange={(e) => setPresMonto(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white font-mono"
+                />
+                <input
+                  type="text"
+                  required
+                  placeholder="Partida / Categoría"
+                  value={presCategoria}
+                  onChange={(e) => setPresCategoria(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white"
+                />
+                <select
+                  value={presCampanaId}
+                  onChange={(e) => setPresCampanaId(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-black border border-zinc-800 text-white"
+                >
+                  <option value="">Sin campaña específica</option>
+                  {campanasTrade.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.codigo} - {c.nombre}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="submit"
+                  disabled={isSavingFinancial || !isContraloriaOrAdmin}
+                  className="col-span-2 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-45 text-white font-black uppercase text-xs"
+                >
+                  Guardar Partida Presupuestaria
+                </button>
+              </form>
+
+              <div className="space-y-2 max-h-52 overflow-y-auto">
+                {presupuestosTrade.length === 0 ? (
+                  <p className="text-xs text-zinc-500 text-center py-4">
+                    Sin partidas presupuestarias registradas aún.
+                  </p>
+                ) : (
+                  presupuestosTrade.map((p) => (
+                    <div
+                      key={p.id}
+                      className="p-2.5 rounded-lg bg-black border border-zinc-900 flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <span className="font-mono text-zinc-400">{p.periodo_ym}</span> ·{' '}
+                        <span className="text-white font-bold">{p.categoria}</span>
+                        <div className="text-[10px] text-zinc-500 font-mono">
+                          Ejecutado: ${p.monto_ejecutado_usd.toFixed(2)} / Comprometido: $
+                          {p.monto_comprometido_usd.toFixed(2)}
+                        </div>
+                      </div>
+                      <span className="font-mono font-black text-emerald-400">
+                        ${p.monto_asignado_usd.toFixed(2)}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Tarifario Dinámico de Costos */}
+          <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-900 pb-3">
+              <div>
+                <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                  Tarifario Oficial de Costos de Degustación (`tarifario_costos_trade`)
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  Alimenta dinámicamente el motor de factibilidad BTL (`tastingFeasibility.ts`) sin costos fijos en código.
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-zinc-800 text-zinc-400 uppercase text-[10px]">
+                    <th className="py-2 px-3">Línea / Producto</th>
+                    <th className="py-2 px-3">Marca</th>
+                    <th className="py-2 px-3">Sede</th>
+                    <th className="py-2 px-3 text-right">Costo Degustación (USD)</th>
+                    <th className="py-2 px-3 text-right">Precio Ref. Anaquel (USD)</th>
+                    <th className="py-2 px-3 text-right">Acción</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-900">
+                  {tarifarioCostos.map((t) => {
+                    const isEditing = editingTarifaId === t.id;
+                    return (
+                      <tr key={t.id} className="hover:bg-zinc-900/40">
+                        <td className="py-2.5 px-3 font-semibold text-white">
+                          {t.etiqueta}
+                          <span className="block text-[10px] font-mono text-zinc-500">
+                            {t.line_id} · {t.unidad_medida}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 font-mono text-zinc-300">{t.marca}</td>
+                        <td className="py-2.5 px-3 font-mono text-zinc-400">{t.sucursal || '—'}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              value={editingTarifaCost}
+                              onChange={(e) => setEditingTarifaCost(e.target.value)}
+                              className="w-24 px-2 py-1 rounded bg-black border border-red-500 text-right text-white"
+                            />
+                          ) : (
+                            <span className="text-red-400 font-bold">
+                              ${t.costo_unitario_usd.toFixed(2)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono">
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={editingTarifaPrice}
+                              onChange={(e) => setEditingTarifaPrice(e.target.value)}
+                              className="w-24 px-2 py-1 rounded bg-black border border-red-500 text-right text-white"
+                            />
+                          ) : (
+                            <span className="text-zinc-200">
+                              ${t.precio_referencia_usd.toFixed(2)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          {isEditing ? (
+                            <div className="inline-flex gap-1.5">
+                              <button
+                                type="button"
+                                disabled={isSavingFinancial}
+                                onClick={() => void handleSaveTarifaRow(t)}
+                                className="px-2.5 py-1 rounded bg-red-600 text-white text-[10px] font-bold"
+                              >
+                                Guardar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingTarifaId(null)}
+                                className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 text-[10px]"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={!isContraloriaOrAdmin}
+                              onClick={() => {
+                                setEditingTarifaId(t.id);
+                                setEditingTarifaCost(String(t.costo_unitario_usd));
+                                setEditingTarifaPrice(String(t.precio_referencia_usd));
+                              }}
+                              className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40 text-zinc-200 border border-zinc-800 text-[10px] font-bold"
+                            >
+                              Editar Costo
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Modal: Radicar Nueva Requisición Oficial */}
@@ -1228,19 +1776,40 @@ export const ContraloriaView: React.FC = () => {
                 />
               </div>
 
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Archivo de Factura (PDF, JPEG, PNG o WebP · máx. 10 MB)
+                </label>
+                <input
+                  type="file"
+                  accept="application/pdf,image/jpeg,image/png,image/webp"
+                  onChange={(e) => setInvoiceFile(e.target.files?.[0] || null)}
+                  className="w-full px-3 py-2 rounded-lg bg-black border border-zinc-800 text-xs text-zinc-300 file:mr-3 file:px-2.5 file:py-1 file:rounded file:border-0 file:bg-red-600 file:text-white file:text-[11px] file:font-bold"
+                />
+                <p className="text-[10px] text-zinc-500 mt-1">
+                  El servidor verifica los bytes mágicos reales y guarda el soporte en el bucket privado `contraloria-facturas`.
+                </p>
+              </div>
+
               <div className="flex justify-end gap-3 pt-3">
                 <button
                   type="button"
-                  onClick={() => setIsReceiptModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-zinc-900 text-zinc-300 text-xs font-bold"
+                  disabled={isSavingFinancial}
+                  onClick={() => {
+                    setInvoiceFile(null);
+                    setIsReceiptModalOpen(false);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-zinc-900 text-zinc-300 text-xs font-bold disabled:opacity-40"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black uppercase tracking-wider"
+                  disabled={isSavingFinancial}
+                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider inline-flex items-center gap-1.5"
                 >
-                  Validar y Guardar
+                  {isSavingFinancial && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{isSavingFinancial ? 'Validando y Guardando...' : 'Validar y Guardar'}</span>
                 </button>
               </div>
             </form>

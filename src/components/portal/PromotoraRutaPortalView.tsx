@@ -28,7 +28,25 @@ import {
   verifyActivePromotoraPortalAccess,
   type VerifiedAuthProfile,
 } from '../../services/authService';
-import { registerPromotoraRouteStep } from '../../services/promotoraRutaPortalService';
+import {
+  fetchPortalPdvGeofences,
+  matchRutaPdvGeofence,
+  submitPromotoraRouteExecution,
+  type PortalPdvGeofenceRef,
+} from '../../services/promotoraRutaPortalService';
+import {
+  enqueuePortalAction,
+  flushPortalOfflineQueue,
+  isTransientOfflineOrNetworkError,
+  listPendingPortalActions,
+  type QueuedPortalAction,
+} from '../../services/portalOfflineQueueService';
+import {
+  captureBrowserGeolocation,
+  evaluateGeofenceCheck,
+  type CapturedGeolocationFix,
+} from '../../utils/geofenceHaversine';
+import type { EjecucionPdvInput } from '../../types/degustacionesPipeline';
 import {
   getSupabaseClient,
   isSupabaseConfigured,
@@ -211,28 +229,239 @@ export const PromotoraRutaPortalView: React.FC = () => {
     setLoginError(null);
   };
 
-  const handleRouteStep = async (item: RutaPromotoraRecord, accion: 'CHECKIN' | 'CHECKOUT') => {
+  // ---- Hito 5 (B-08): GPS + geocerca + ejecución PDV + cola offline ----
+  const [geofenceCatalog, setGeofenceCatalog] = useState<PortalPdvGeofenceRef[]>([]);
+  const [pendingOffline, setPendingOffline] = useState<QueuedPortalAction[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
+  const [geoFeedback, setGeoFeedback] = useState<Record<string, string>>({});
+  const [executionTarget, setExecutionTarget] = useState<RutaPromotoraRecord | null>(null);
+  const [execForm, setExecForm] = useState({
+    lote: '',
+    vencimiento: '',
+    abiertas: '0',
+    muestras: '0',
+    ventas: '0',
+    observaciones: '',
+    motivoFuera: '',
+  });
+  const [execError, setExecError] = useState<string | null>(null);
+  const flushingRef = useRef(false);
+
+  const refreshPending = useCallback(async () => {
+    try {
+      setPendingOffline(await listPendingPortalActions());
+    } catch {
+      setPendingOffline([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!profile) return;
+    let active = true;
+    void fetchPortalPdvGeofences().then((rows) => {
+      if (active) setGeofenceCatalog(rows);
+    });
+    void refreshPending();
+    return () => {
+      active = false;
+    };
+  }, [profile, refreshPending]);
+
+  const flushOfflineQueue = useCallback(
+    async (force = false) => {
+      if (flushingRef.current) return;
+      flushingRef.current = true;
+      try {
+        const result = await flushPortalOfflineQueue(
+          async (action) => {
+            await submitPromotoraRouteExecution({
+              rutaId: action.rutaId,
+              accion: action.accion,
+              clientSubmissionId: action.id,
+              lat: action.lat,
+              lng: action.lng,
+              accuracyMeters: action.accuracyMeters,
+              motivoFueraGeocerca: action.motivoFueraGeocerca,
+              ejecucion: action.ejecucion ?? null,
+            });
+          },
+          { forceIgnoreSchedule: force }
+        );
+        if (result.succeeded > 0) {
+          showBanner(`${result.succeeded} registro(s) offline sincronizado(s).`);
+          void refreshRoutes();
+        }
+        await refreshPending();
+      } finally {
+        flushingRef.current = false;
+      }
+    },
+    [refreshPending, refreshRoutes, showBanner]
+  );
+
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true);
+      void flushOfflineQueue(true);
+    };
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    const timer = window.setInterval(() => {
+      if (navigator.onLine) void flushOfflineQueue(false);
+    }, 30000);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.clearInterval(timer);
+    };
+  }, [flushOfflineQueue]);
+
+  const performRouteStep = async (
+    item: RutaPromotoraRecord,
+    accion: 'CHECKIN' | 'CHECKOUT',
+    ejecucion: EjecucionPdvInput | null,
+    motivoFuera: string
+  ) => {
     if (!item.id || inFlightStepIdsRef.current.has(item.id)) return;
     inFlightStepIdsRef.current.add(item.id);
     setProcessingRutaId(item.id);
     setActionError(null);
 
+    let fix: CapturedGeolocationFix | null = null;
+    let gpsWarning = '';
     try {
-      const updated = await registerPromotoraRouteStep(item.id, accion);
-      applyOptimisticRouteUpdate(updated);
+      fix = await captureBrowserGeolocation();
+    } catch (err) {
+      gpsWarning = err instanceof Error ? err.message : 'GPS no disponible.';
+    }
+
+    const pdv = matchRutaPdvGeofence(item, geofenceCatalog);
+    const evaluation = fix
+      ? evaluateGeofenceCheck({
+          capturedLat: fix.lat,
+          capturedLng: fix.lng,
+          accuracyMeters: fix.accuracyMeters,
+          pdvLat: pdv?.latitud,
+          pdvLng: pdv?.longitud,
+          allowedRadiusMeters: pdv?.radioGeocercaM,
+        })
+      : null;
+
+    if (evaluation?.requiresAuditJustification && !motivoFuera.trim() && accion === 'CHECKIN') {
+      // Se permite continuar, pero queda auditado con motivo por defecto en servidor
+    }
+
+    const feedback = evaluation?.hasPdvCoordinates
+      ? evaluation.insideGeofence
+        ? `Dentro de geocerca (${evaluation.distanceMeters} m / ${evaluation.allowedRadiusMeters} m).`
+        : `FUERA de geocerca: ${evaluation.distanceMeters} m (máx. ${evaluation.allowedRadiusMeters} m). Alerta auditada.`
+      : gpsWarning || 'PDV sin coordenadas maestras: no se valida geocerca.';
+    setGeoFeedback((prev) => ({ ...prev, [item.id]: feedback }));
+
+    const submissionId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    try {
+      const result = await submitPromotoraRouteExecution({
+        rutaId: item.id,
+        accion,
+        clientSubmissionId: submissionId,
+        lat: fix?.lat ?? null,
+        lng: fix?.lng ?? null,
+        accuracyMeters: fix?.accuracyMeters ?? null,
+        motivoFueraGeocerca: motivoFuera,
+        ejecucion,
+      });
+      applyOptimisticRouteUpdate(result.ruta);
       showBanner(
         accion === 'CHECKIN'
           ? `Check-in registrado en ${item.cliente_nombre}.`
-          : `Degustación marcada como completada en ${item.cliente_nombre}.`
+          : `Degustación completada en ${item.cliente_nombre}.`
       );
+      if (accion === 'CHECKOUT') setExecutionTarget(null);
     } catch (err) {
-      setActionError(
-        err instanceof Error ? err.message : 'No se pudo actualizar el estado de la ruta.'
-      );
+      if (isTransientOfflineOrNetworkError(err)) {
+        await enqueuePortalAction({
+          id: submissionId,
+          rutaId: item.id,
+          accion,
+          clienteNombre: item.cliente_nombre,
+          lat: fix?.lat ?? null,
+          lng: fix?.lng ?? null,
+          accuracyMeters: fix?.accuracyMeters ?? null,
+          motivoFueraGeocerca: motivoFuera,
+          ejecucion,
+        });
+        await refreshPending();
+        showBanner('Sin conexión: el registro quedó en cola offline y se sincronizará automáticamente.');
+        if (accion === 'CHECKOUT') setExecutionTarget(null);
+      } else {
+        const message =
+          err instanceof Error ? err.message : 'No se pudo actualizar el estado de la ruta.';
+        setActionError(message);
+        setExecError(message);
+      }
     } finally {
       inFlightStepIdsRef.current.delete(item.id);
       setProcessingRutaId((prev) => (prev === item.id ? null : prev));
     }
+  };
+
+  const handleRouteStep = async (item: RutaPromotoraRecord, accion: 'CHECKIN' | 'CHECKOUT') => {
+    if (accion === 'CHECKOUT') {
+      setExecError(null);
+      setExecForm({
+        lote: '',
+        vencimiento: '',
+        abiertas: '0',
+        muestras: String(item.personas_estimadas || 0),
+        ventas: '0',
+        observaciones: '',
+        motivoFuera: '',
+      });
+      setExecutionTarget(item);
+      return;
+    }
+    await performRouteStep(item, 'CHECKIN', null, '');
+  };
+
+  const handleSubmitExecution = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!executionTarget) return;
+    const abiertas = Number(execForm.abiertas);
+    const muestras = Number(execForm.muestras);
+    const ventas = Number(execForm.ventas);
+    if (![abiertas, muestras, ventas].every((n) => Number.isFinite(n) && n >= 0)) {
+      setExecError('Unidades abiertas, muestras y ventas deben ser números iguales o mayores a 0.');
+      return;
+    }
+    if (execForm.lote.trim().length < 2) {
+      setExecError('Indica el lote del producto degustado.');
+      return;
+    }
+    if (execForm.vencimiento && !/^\d{4}-\d{2}-\d{2}$/.test(execForm.vencimiento)) {
+      setExecError('La fecha de vencimiento no es válida.');
+      return;
+    }
+    setExecError(null);
+    await performRouteStep(
+      executionTarget,
+      'CHECKOUT',
+      {
+        lote_producto: execForm.lote.trim(),
+        fecha_vencimiento: execForm.vencimiento || null,
+        unidades_abiertas: abiertas,
+        muestras_entregadas: Math.trunc(muestras),
+        ventas_asistidas_unidades: Math.trunc(ventas),
+        observaciones: execForm.observaciones.trim(),
+      },
+      execForm.motivoFuera
+    );
   };
 
   if (!isSupabaseConfigured) {

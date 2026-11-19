@@ -27,6 +27,8 @@ export interface EntregasRepository {
   readonly kind: 'supabase' | 'no-configurado';
   /** Arranca la carga inicial, el motor de sincronización y el canal en tiempo real (idempotente). */
   start(): void;
+  /** Detiene suscripciones activas, motor offline y limpia el snapshot en memoria al cerrar sesión. */
+  stop(): void;
   /** Snapshot actual (referencia estable mientras no haya cambios). */
   getSnapshot(): EntregaVista[];
   /** Notifica ante cualquier cambio de datos (carga, realtime, cola) o de estado de sincronización. */

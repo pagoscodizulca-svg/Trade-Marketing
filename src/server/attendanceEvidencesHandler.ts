@@ -36,6 +36,7 @@ export interface StaffProfileLookupResult {
   email: string;
   assignedStore: string;
   address: string;
+  sucursal?: 'ZULIA' | 'VALENCIA' | null;
   active: boolean;
   isMerchandising: boolean;
   masterProfile: PerfilAsistencia;
@@ -58,6 +59,7 @@ export interface AttendancePersistenceGateway {
     perfilAplicado: PerfilAsistencia;
     pdvNombre: string;
     zona: string;
+    sucursal?: 'ZULIA' | 'VALENCIA' | null;
     openedAtServerIso: string;
     openedByUid: string;
   }): Promise<AsistenciaJornadaDbRow>;
@@ -76,6 +78,7 @@ export interface AttendancePersistenceGateway {
     lat: number | null;
     lng: number | null;
     gpsAccuracy: number | null;
+    sucursal?: 'ZULIA' | 'VALENCIA' | null;
     capturadoEnServidorIso: string;
     cargadoPorUid: string;
     cargadoPorRol: 'promotora' | 'coordinadora' | 'admin';
@@ -96,6 +99,7 @@ export interface AttendancePersistenceGateway {
     Array<{
       evidencia: AsistenciaEvidenciaDbRow;
       promotoraId: string;
+      sucursal?: 'ZULIA' | 'VALENCIA' | null;
     }>
   >;
 }
@@ -152,6 +156,24 @@ function decodeMetadataHeader(req: Request): unknown {
   return safeCopy;
 }
 
+function normalizeRegionalSucursal(raw: unknown): 'ZULIA' | 'VALENCIA' | null {
+  const clean = String(raw ?? '').trim().toUpperCase();
+  if (clean === 'ZULIA') return 'ZULIA';
+  if (clean === 'VALENCIA') return 'VALENCIA';
+  return null;
+}
+
+function isCrossBranchViolation(
+  actorSucursal: string | null | undefined,
+  recordSucursal: string | null | undefined
+): boolean {
+  const actorRegional = normalizeRegionalSucursal(actorSucursal);
+  if (!actorRegional) return false; // GLOBAL o entorno previo sin sede explícita
+  const targetRegional = normalizeRegionalSucursal(recordSucursal);
+  if (!targetRegional) return false;
+  return actorRegional !== targetRegional;
+}
+
 function createSupabaseAttendanceGateway(
   authUser: AuthenticatedServerUser
 ): AttendancePersistenceGateway | null {
@@ -165,7 +187,7 @@ function createSupabaseAttendanceGateway(
     async lookupStaffProfile(promotoraId: string): Promise<StaffProfileLookupResult | null> {
       const { data, error } = await client
         .from('staff')
-        .select('id, name, role, email, status')
+        .select('id, name, role, email, status, sucursal')
         .eq('id', promotoraId)
         .maybeSingle();
 
@@ -202,6 +224,7 @@ function createSupabaseAttendanceGateway(
         email: sanitizeAttendanceText(data.email, 160),
         assignedStore: sanitizeAttendanceText(statusObj.assignedLocation, 180),
         address: sanitizeAttendanceText(statusObj.address, 180),
+        sucursal: normalizeRegionalSucursal((data as { sucursal?: unknown }).sucursal),
         active,
         isMerchandising,
         masterProfile,
@@ -235,6 +258,7 @@ function createSupabaseAttendanceGateway(
           perfil_aplicado: params.perfilAplicado,
           pdv_nombre: params.pdvNombre,
           zona: params.zona,
+          ...(params.sucursal ? { sucursal: params.sucursal } : {}),
           opened_at_server: params.openedAtServerIso,
           updated_at_server: params.openedAtServerIso,
           opened_by_uid: params.openedByUid,
@@ -287,6 +311,7 @@ function createSupabaseAttendanceGateway(
             lat: params.lat,
             lng: params.lng,
             gps_accuracy: params.gpsAccuracy,
+            ...(params.sucursal ? { sucursal: params.sucursal } : {}),
             capturado_en_servidor: params.capturadoEnServidorIso,
             cargado_por_uid: params.cargadoPorUid,
             cargado_por_rol: params.cargadoPorRol,
@@ -362,24 +387,38 @@ function createSupabaseAttendanceGateway(
 
       const { data: jornadas, error: jorError } = await client
         .from('asistencias_jornada')
-        .select('id, promotora_id')
+        .select('id, promotora_id, sucursal')
         .in('id', jornadaIds);
 
       if (jorError || !Array.isArray(jornadas)) {
         return [];
       }
 
-      const ownerByJornadaId = new Map<string, string>();
+      const ownerByJornadaId = new Map<
+        string,
+        { promotoraId: string; sucursal: 'ZULIA' | 'VALENCIA' | null }
+      >();
       for (const j of jornadas) {
-        ownerByJornadaId.set(String(j.id), String(j.promotora_id));
+        ownerByJornadaId.set(String(j.id), {
+          promotoraId: String(j.promotora_id),
+          sucursal: normalizeRegionalSucursal((j as { sucursal?: unknown }).sucursal),
+        });
       }
 
-      const joined: Array<{ evidencia: AsistenciaEvidenciaDbRow; promotoraId: string }> = [];
+      const joined: Array<{
+        evidencia: AsistenciaEvidenciaDbRow;
+        promotoraId: string;
+        sucursal?: 'ZULIA' | 'VALENCIA' | null;
+      }> = [];
       for (const rawEv of evidences) {
         const ev = rawEv as AsistenciaEvidenciaDbRow;
-        const ownerId = ownerByJornadaId.get(ev.asistencia_id);
-        if (ownerId) {
-          joined.push({ evidencia: ev, promotoraId: ownerId });
+        const owner = ownerByJornadaId.get(ev.asistencia_id);
+        if (owner) {
+          joined.push({
+            evidencia: ev,
+            promotoraId: owner.promotoraId,
+            sucursal: normalizeRegionalSucursal(ev.sucursal) ?? owner.sucursal,
+          });
         }
       }
       return joined;
@@ -404,6 +443,16 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       res.status(401).json({
         error: 'Autenticación requerida.',
         code: 'AUTH_REQUIRED',
+      });
+      return;
+    }
+
+    // 0. Los roles de supervisión de solo lectura (p. ej. contraloría) jamás cargan ni reemplazan
+    //    evidencias: se rechazan ANTES de procesar el cuerpo binario.
+    if (authUser.isReadOnlyViewer) {
+      res.status(403).json({
+        error: 'Acceso denegado: su rol es de solo lectura y no puede cargar ni reemplazar evidencias.',
+        code: 'READ_ONLY_ROLE',
       });
       return;
     }
@@ -495,12 +544,28 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
         meta.promotoraId
       );
 
+      if (jornada && isCrossBranchViolation(authUser.sucursal, jornada.sucursal)) {
+        res.status(403).json({
+          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede operar jornadas de ${jornada.sucursal}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+
       if (!jornada) {
         const staffProfile = await gateway.lookupStaffProfile(meta.promotoraId);
         if (!staffProfile) {
           res.status(404).json({
             error: 'La promotora indicada no existe en el padrón oficial.',
             code: 'PROMOTORA_NOT_FOUND',
+          });
+          return;
+        }
+
+        if (isCrossBranchViolation(authUser.sucursal, staffProfile.sucursal)) {
+          res.status(403).json({
+            error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede cargar evidencias para personal de ${staffProfile.sucursal}.`,
+            code: 'FORBIDDEN_BRANCH',
           });
           return;
         }
@@ -534,6 +599,8 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           perfilAplicado: staffProfile.masterProfile,
           pdvNombre: meta.pdvNombre || staffProfile.assignedStore || 'PDV',
           zona: meta.zona || staffProfile.address || '',
+          sucursal:
+            staffProfile.sucursal ?? normalizeRegionalSucursal(authUser.sucursal),
           openedAtServerIso: serverNowIso,
           openedByUid: authUser.id,
         });
@@ -591,6 +658,9 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           lat: meta.lat ?? null,
           lng: meta.lng ?? null,
           gpsAccuracy: meta.gpsAccuracy ?? null,
+          sucursal:
+            normalizeRegionalSucursal(jornada.sucursal) ??
+            normalizeRegionalSucursal(authUser.sucursal),
           capturadoEnServidorIso: serverNowIso,
           cargadoPorUid: authUser.id,
           cargadoPorRol: normalizeActorDbRole(authUser.appRole),
@@ -729,8 +799,21 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       const uniqueIds = Array.from(new Set(parsed.data.evidenciaIds));
       const records = await gateway.findEvidencesWithOwnerByIds(uniqueIds);
 
-      // Verificación estricta de propiedad por fila (anti-IDOR)
-      if (!authUser.isCoordinatorOrAdmin) {
+      // Verificación estricta de aislamiento multi-sede (ZULIA / VALENCIA; GLOBAL ve ambas)
+      const crossBranch = records.some((r) =>
+        isCrossBranchViolation(authUser.sucursal, r.sucursal ?? r.evidencia.sucursal)
+      );
+      if (crossBranch) {
+        res.status(403).json({
+          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede consultar evidencias de otra sucursal.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+
+      // Verificación estricta de propiedad por fila (anti-IDOR).
+      // Coordinación/Admin y los visores de solo lectura (contraloría) consultan evidencias de cualquier promotora de su sede.
+      if (!authUser.isCoordinatorOrAdmin && !authUser.isReadOnlyViewer) {
         const unauthorized = records.some((r) => r.promotoraId !== authUser.staffId);
         if (unauthorized) {
           res.status(403).json({

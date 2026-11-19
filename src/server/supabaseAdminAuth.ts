@@ -25,50 +25,118 @@ const ALLOWED_TORRE_VIEWER_ROLES = new Set([
   'contralor',
 ]);
 
+export type ServerSucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
+
 export const CORPORATE_MANAGED_ROLES = new Set([
   'super_admin',
   'coordinacion',
   'contraloria',
-  'supervisor',
   'vendedor',
+  'promotora',
+  'cliente',
+  'chofer',
 ]);
+
+function normalizeServerSucursal(raw: unknown): ServerSucursalCodigo | null {
+  const clean = String(raw ?? '').trim().toUpperCase();
+  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') return 'ZULIA';
+  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') {
+    return 'VALENCIA';
+  }
+  if (clean === 'GLOBAL' || clean === 'NACIONAL' || clean === 'ADMIN_GENERAL') return 'GLOBAL';
+  return null;
+}
+
+function sanitizeSucursalForServerRole(
+  role: string,
+  rawSucursal: unknown
+): ServerSucursalCodigo | null {
+  const cleanRole = String(role || '').trim().toLowerCase();
+  const isStrictAdmin =
+    cleanRole === 'super_admin' ||
+    cleanRole === 'superadmin' ||
+    cleanRole === 'admin' ||
+    cleanRole === 'gerencia' ||
+    cleanRole === 'gerente_admin';
+  if (isStrictAdmin) return 'GLOBAL';
+
+  const normalized = normalizeServerSucursal(rawSucursal);
+  if (!normalized) return null;
+
+  const isContraloria =
+    cleanRole === 'contraloria' ||
+    cleanRole === 'analista_contraloria' ||
+    cleanRole === 'contralor';
+  if (normalized === 'GLOBAL' && !isContraloria) {
+    return null;
+  }
+  return normalized;
+}
 
 async function resolveEffectiveServerAppRole(
   userId: string,
   accessToken: string,
-  jwtAppRole: string
-): Promise<{ role: string; isActive: boolean }> {
+  jwtAppRole: string,
+  jwtSucursal?: unknown
+): Promise<{ role: string; isActive: boolean; sucursal: ServerSucursalCodigo | null }> {
   const lookup = getAdminSupabaseClient() || createUserScopedSupabaseClient(accessToken);
   if (lookup && UUID_REGEX.test(userId)) {
     try {
       const { data, error } = await lookup
         .from('profiles')
-        .select('role, is_active')
+        .select('role, is_active, sucursal')
         .eq('id', userId)
         .maybeSingle();
 
       if (!error && data) {
         if (data.is_active === false) {
-          return { role: '', isActive: false };
+          return { role: '', isActive: false, sucursal: null };
         }
-        const profileRole = String(data.role ?? '').trim().toLowerCase();
+        const rawProfileRole = String(data.role ?? '').trim().toLowerCase();
+        const profileRole =
+          rawProfileRole === 'supervisor' ||
+          rawProfileRole === 'supervisora' ||
+          rawProfileRole === 'supervisor_trade'
+            ? 'coordinacion'
+            : rawProfileRole;
         if (profileRole) {
-          return { role: profileRole, isActive: true };
+          const sucursal =
+            sanitizeSucursalForServerRole(
+              profileRole,
+              (data as { sucursal?: unknown }).sucursal
+            ) ?? sanitizeSucursalForServerRole(profileRole, jwtSucursal);
+          return { role: profileRole, isActive: true, sucursal };
         }
       }
     } catch {
       // Fallback al rol firmado en app_metadata cuando public.profiles aún no existe
     }
   }
-  return { role: jwtAppRole, isActive: true };
+  const normalizedJwtRole =
+    jwtAppRole === 'supervisor' ||
+    jwtAppRole === 'supervisora' ||
+    jwtAppRole === 'supervisor_trade'
+      ? 'coordinacion'
+      : jwtAppRole;
+  return {
+    role: normalizedJwtRole,
+    isActive: true,
+    sucursal: sanitizeSucursalForServerRole(normalizedJwtRole, jwtSucursal),
+  };
 }
 
 export interface AuthenticatedServerUser {
   id: string;
   email: string;
   appRole: string;
+  sucursal?: ServerSucursalCodigo | null;
   staffId?: string | null;
   isCoordinatorOrAdmin?: boolean;
+  /**
+   * Verdadero para roles de supervisión de solo lectura (p. ej. `contraloria`): pueden consultar
+   * evidencias pero jamás cargarlas ni reemplazarlas.
+   */
+  isReadOnlyViewer?: boolean;
   accessToken?: string;
 }
 
@@ -88,7 +156,14 @@ export function getSupabaseProjectUrl(): string {
 }
 
 export function getSupabaseAnonKey(): string {
-  return (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+  // Prioriza la Publishable Key (`sb_publishable_*`) y conserva compatibilidad con la variable anon previa.
+  return (
+    process.env.SUPABASE_PUBLISHABLE_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
 }
 
 export function getSupabaseServiceRoleKey(): string {
@@ -159,6 +234,300 @@ export function isCoordinatorOrAdminRole(rawRole: string): boolean {
 
 export function isTorreViewerRole(rawRole: string): boolean {
   return ALLOWED_TORRE_VIEWER_ROLES.has(String(rawRole || '').trim().toLowerCase());
+}
+
+export function isFdvIngestionRole(rawRole: string): boolean {
+  const clean = String(rawRole || '').trim().toLowerCase();
+  return clean === 'vendedor' || ALLOWED_COORDINATOR_ROLES.has(clean);
+}
+
+/**
+ * Middleware Zero Trust para ingesta de Fuerza de Ventas (`POST /api/fdv/solicitudes-degustacion`):
+ * - Valida criptográficamente el Bearer JWT contra Supabase Auth (cero acceso `anon`).
+ * - Consulta `public.profiles` para verificar cuenta activa, rol autorizado (`vendedor`,
+ *   `coordinacion`, `super_admin`) y sucursal asignada (`ZULIA`, `VALENCIA`, `GLOBAL`).
+ */
+export async function requireFdvOrTradeAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
+      .trim()
+      .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal
+    );
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
+
+    if (!isFdvIngestionRole(appRole)) {
+      res.status(403).json({
+        error:
+          'Acceso denegado: solo vendedores, coordinación o administración pueden registrar solicitudes de degustación.',
+        code: 'FORBIDDEN_ROLE',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: String(data.user.email || '').trim().toLowerCase(),
+      appRole,
+      sucursal: effective.sucursal,
+      isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
+}
+
+export function isIncidenciaActorRole(rawRole: string): boolean {
+  const clean = String(rawRole || '').trim().toLowerCase();
+  return (
+    isTorreViewerRole(clean) ||
+    clean === 'promotora' ||
+    clean === 'vendedor'
+  );
+}
+
+/**
+ * Middleware Zero Trust para evidencias privadas de incidencias en PDV (`M-01`):
+ * - Acepta `super_admin`, `coordinacion`, `contraloria` (solo lectura de URLs firmadas),
+ *   `promotora` y `vendedor`.
+ */
+export async function requireIncidenciaActorAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
+      .trim()
+      .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal
+    );
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
+
+    if (!isIncidenciaActorRole(appRole)) {
+      res.status(403).json({
+        error:
+          'Acceso denegado: tu rol no cuenta con permisos sobre incidencias operativas en PDV.',
+        code: 'FORBIDDEN_ROLE',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: String(data.user.email || '').trim().toLowerCase(),
+      appRole,
+      sucursal: effective.sucursal,
+      isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
+}
+
+/**
+ * Middleware Zero Trust para endpoints financieros de Contraloría y Torre de Control:
+ * - Valida el Bearer JWT contra Supabase Auth y consulta `public.profiles`.
+ * - Acepta únicamente roles autorizados de Torre/Contraloría (`super_admin`, `coordinacion`, `contraloria`).
+ */
+export async function requireTorreControlAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
+      .trim()
+      .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal
+    );
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
+
+    if (!isTorreViewerRole(appRole)) {
+      res.status(403).json({
+        error:
+          'Acceso denegado: solo Contraloría Interna, Coordinación Trade o Administración pueden gestionar comprobantes fiscales.',
+        code: 'FORBIDDEN_ROLE',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: String(data.user.email || '').trim().toLowerCase(),
+      appRole,
+      sucursal: effective.sucursal,
+      isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
 }
 
 function normalizeStaffLoginEmail(rawEmail: string, staffName: string, staffId: string): string {
@@ -262,7 +631,12 @@ export async function requireCoordinatorOrAdminAuth(
     const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
       .trim()
       .toLowerCase();
-    const effective = await resolveEffectiveServerAppRole(data.user.id, token, jwtAppRole);
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal
+    );
     const appRole = effective.role;
 
     if (!effective.isActive || !ALLOWED_COORDINATOR_ROLES.has(appRole)) {
@@ -277,6 +651,7 @@ export async function requireCoordinatorOrAdminAuth(
       id: data.user.id,
       email: String(data.user.email || ''),
       appRole,
+      sucursal: effective.sucursal,
       isCoordinatorOrAdmin: true,
       accessToken: token,
     };
@@ -341,7 +716,12 @@ export async function requireAttendanceActorAuth(
     const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
       .trim()
       .toLowerCase();
-    const effective = await resolveEffectiveServerAppRole(data.user.id, token, jwtAppRole);
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal
+    );
     const appRole = effective.role;
 
     if (!effective.isActive) {
@@ -357,11 +737,29 @@ export async function requireAttendanceActorAuth(
         id: data.user.id,
         email: String(data.user.email || ''),
         appRole,
+        sucursal: effective.sucursal,
         staffId:
           typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id)
             ? appMeta.staff_id
             : null,
         isCoordinatorOrAdmin: true,
+        accessToken: token,
+      };
+      next();
+      return;
+    }
+
+    // Roles de supervisión de solo lectura (p. ej. `contraloria`): consultan evidencias,
+    // pero el handler les niega cualquier carga o reemplazo (`READ_ONLY_ROLE`).
+    if (isTorreViewerRole(appRole)) {
+      req.authUser = {
+        id: data.user.id,
+        email: String(data.user.email || ''),
+        appRole,
+        sucursal: effective.sucursal,
+        staffId: null,
+        isCoordinatorOrAdmin: false,
+        isReadOnlyViewer: true,
         accessToken: token,
       };
       next();
@@ -387,9 +785,10 @@ export async function requireAttendanceActorAuth(
     }
 
     let resolvedStaffId: string | null = null;
+    let resolvedStaffSucursal: ServerSucursalCodigo | null = effective.sucursal;
     const { data: linkedStaff } = await lookupClient
       .from('staff')
-      .select('id, role, status, auth_user_id')
+      .select('id, role, status, auth_user_id, sucursal')
       .eq('auth_user_id', data.user.id)
       .maybeSingle();
 
@@ -402,7 +801,7 @@ export async function requireAttendanceActorAuth(
     if (!staffRecord && candidateClaimId) {
       const { data: claimStaff } = await lookupClient
         .from('staff')
-        .select('id, role, status, auth_user_id')
+        .select('id, role, status, auth_user_id, sucursal')
         .eq('id', candidateClaimId)
         .maybeSingle();
       if (claimStaff && (!claimStaff.auth_user_id || claimStaff.auth_user_id === data.user.id)) {
@@ -411,6 +810,10 @@ export async function requireAttendanceActorAuth(
     }
 
     if (staffRecord && UUID_REGEX.test(String(staffRecord.id || ''))) {
+      const rowSuc = normalizeServerSucursal((staffRecord as { sucursal?: unknown }).sucursal);
+      if (rowSuc === 'ZULIA' || rowSuc === 'VALENCIA') {
+        resolvedStaffSucursal = resolvedStaffSucursal ?? rowSuc;
+      }
       let memberStatus = 'Activo';
       let category = '';
       if (typeof staffRecord.status === 'string' && staffRecord.status.trim().startsWith('{')) {
@@ -444,6 +847,7 @@ export async function requireAttendanceActorAuth(
       id: data.user.id,
       email: String(data.user.email || ''),
       appRole: 'promotora',
+      sucursal: resolvedStaffSucursal,
       staffId: resolvedStaffId,
       isCoordinatorOrAdmin: false,
       accessToken: token,
@@ -522,7 +926,7 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
   try {
     const { data: staffRow, error: staffFetchErr } = await admin
       .from('staff')
-      .select('id, name, email, status, auth_user_id')
+      .select('id, name, email, status, auth_user_id, sucursal')
       .eq('id', staffId)
       .maybeSingle();
 
@@ -534,6 +938,56 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       return;
     }
 
+    const callerRegionalSucursal =
+      req.authUser?.sucursal === 'ZULIA' || req.authUser?.sucursal === 'VALENCIA'
+        ? req.authUser.sucursal
+        : null;
+    const existingStaffSucursal = normalizeServerSucursal(
+      (staffRow as { sucursal?: unknown }).sucursal
+    );
+
+    if (
+      callerRegionalSucursal &&
+      existingStaffSucursal &&
+      existingStaffSucursal !== 'GLOBAL' &&
+      existingStaffSucursal !== callerRegionalSucursal
+    ) {
+      res.status(403).json({
+        error: `Cruce de sede bloqueado: tu perfil pertenece a ${callerRegionalSucursal} y no puede aprovisionar personal de ${existingStaffSucursal}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
+    const requestedSucursal = normalizeServerSucursal(body.sucursal);
+    if (
+      callerRegionalSucursal &&
+      requestedSucursal &&
+      requestedSucursal !== callerRegionalSucursal
+    ) {
+      res.status(403).json({
+        error: `Cruce de sede bloqueado: no puedes asignar sucursal ${requestedSucursal} desde ${callerRegionalSucursal}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
+    const effectiveProfileRole =
+      requestedRole === 'admin'
+        ? 'super_admin'
+        : requestedRole === 'coordinadora'
+          ? 'coordinacion'
+          : 'promotora';
+    const effectiveSucursal: ServerSucursalCodigo =
+      effectiveProfileRole === 'super_admin'
+        ? 'GLOBAL'
+        : callerRegionalSucursal ||
+          (existingStaffSucursal && existingStaffSucursal !== 'GLOBAL'
+            ? existingStaffSucursal
+            : null) ||
+          (requestedSucursal && requestedSucursal !== 'GLOBAL' ? requestedSucursal : null) ||
+          'ZULIA';
+
     const loginEmail = normalizeStaffLoginEmail(
       rawEmail || String(staffRow.email || ''),
       name || String(staffRow.name || ''),
@@ -541,7 +995,9 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
     );
 
     const appMetadata = {
-      app_role: requestedRole,
+      role: effectiveProfileRole,
+      app_role: effectiveProfileRole,
+      sucursal: effectiveSucursal,
       staff_id: staffId,
       display_name: name,
     };
@@ -608,14 +1064,29 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
         auth_user_id: authUserId,
         email: loginEmail,
         status: sanitizedStatusText,
+        ...(effectiveSucursal !== 'GLOBAL' ? { sucursal: effectiveSucursal } : {}),
       })
       .eq('id', staffId);
 
-      res.status(200).json({
-        ok: true,
-        authUserId,
-        loginEmail,
-      });
+    // Mantener sincronizada la fuente única `public.profiles`
+    await admin.from('profiles').upsert(
+      {
+        id: authUserId,
+        email: loginEmail,
+        full_name: name,
+        role: effectiveProfileRole,
+        sucursal: effectiveSucursal,
+        is_active: active,
+      },
+      { onConflict: 'id' }
+    );
+
+    res.status(200).json({
+      ok: true,
+      authUserId,
+      loginEmail,
+      sucursal: effectiveSucursal,
+    });
     } catch {
       res.status(500).json({
         error: 'Error interno procesando el aprovisionamiento de credenciales.',
@@ -699,6 +1170,7 @@ export async function requireSuperAdminAuth(
       id: data.user.id,
       email: String(data.user.email || '').trim().toLowerCase(),
       appRole: 'super_admin',
+      sucursal: 'GLOBAL',
       isCoordinatorOrAdmin: true,
       accessToken: token,
     };
@@ -767,10 +1239,51 @@ export async function handleCreateCorporateUser(req: Request, res: Response): Pr
   if (!CORPORATE_MANAGED_ROLES.has(role)) {
     res.status(400).json({
       error:
-        'Rol inválido. Valores permitidos: super_admin, coordinacion, contraloria, supervisor, vendedor.',
+        'Rol inválido. Valores permitidos: super_admin, coordinacion, contraloria, vendedor, promotora, cliente, chofer.',
       code: 'INVALID_CORPORATE_ROLE',
     });
     return;
+  }
+
+  let resolvedSucursal: ServerSucursalCodigo | null = null;
+  const rawSucursal = body.sucursal;
+  if (role === 'super_admin') {
+    if (
+      rawSucursal !== undefined &&
+      rawSucursal !== null &&
+      String(rawSucursal).trim() !== '' &&
+      normalizeServerSucursal(rawSucursal) !== 'GLOBAL'
+    ) {
+      res.status(400).json({
+        error: 'El rol super_admin requiere obligatoriamente sucursal GLOBAL.',
+        code: 'INVALID_SUCURSAL_FOR_ROLE',
+      });
+      return;
+    }
+    resolvedSucursal = 'GLOBAL';
+  } else if (role === 'contraloria') {
+    if (rawSucursal === undefined || rawSucursal === null || String(rawSucursal).trim() === '') {
+      resolvedSucursal = 'GLOBAL';
+    } else {
+      resolvedSucursal = normalizeServerSucursal(rawSucursal);
+      if (!resolvedSucursal) {
+        res.status(400).json({
+          error: 'Sucursal inválida. Valores permitidos para contraloria: GLOBAL, ZULIA, VALENCIA.',
+          code: 'INVALID_SUCURSAL_FOR_ROLE',
+        });
+        return;
+      }
+    }
+  } else {
+    const candidate = normalizeServerSucursal(rawSucursal);
+    if (candidate !== 'ZULIA' && candidate !== 'VALENCIA') {
+      res.status(400).json({
+        error: `El rol ${role} requiere asignar explícitamente sucursal ZULIA o VALENCIA (GLOBAL está reservado para roles nacionales).`,
+        code: 'INVALID_SUCURSAL_FOR_ROLE',
+      });
+      return;
+    }
+    resolvedSucursal = candidate;
   }
 
   if (password.trim().length === 0 || password.length < MIN_CORPORATE_PASSWORD_LENGTH) {
@@ -791,6 +1304,7 @@ export async function handleCreateCorporateUser(req: Request, res: Response): Pr
       app_metadata: {
         role,
         app_role: role,
+        sucursal: resolvedSucursal,
         display_name: fullName,
         is_active: true,
         must_change_password: mustChangePassword,
@@ -820,6 +1334,7 @@ export async function handleCreateCorporateUser(req: Request, res: Response): Pr
         p_full_name: fullName,
         p_role: role,
         p_must_change_password: mustChangePassword,
+        p_sucursal: resolvedSucursal,
       }
     );
 

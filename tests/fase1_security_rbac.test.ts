@@ -26,13 +26,15 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
       .sort();
 
     assert.ok(
-      migrationFiles.includes('001_blindaje_trade_sucursales.sql'),
-      'Debe incluir 001_blindaje_trade_sucursales.sql'
+      migrationFiles.includes('20261118000200_blindaje_trade_sucursales.sql'),
+      'Debe incluir 20261118000200_blindaje_trade_sucursales.sql'
+    );
+    assert.ok(
+      !migrationFiles.some((f) => /^\d{1,6}_/.test(f)),
+      'Toda migración debe usar prefijo timestamp (14 dígitos); ninguna puede ordenarse antes del baseline'
     );
 
-    const timestampMigrations = migrationFiles.filter(
-      (f) => f !== '001_blindaje_trade_sucursales.sql'
-    );
+    const timestampMigrations = migrationFiles;
 
     assert.equal(
       timestampMigrations[0],
@@ -49,10 +51,19 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
       '20261001000200_rls_y_rpc_sync.sql',
       'rls_y_rpc_sync debe tener prefijo timestamp estándar'
     );
-    assert.equal(
-      timestampMigrations[timestampMigrations.length - 1],
-      '20261118000100_fase1_lockdown_rls_rbac_and_fixes.sql',
-      'La migración de cierre Fase 1 debe ejecutarse al final'
+    const lockdownIdx = timestampMigrations.indexOf(
+      '20261118000100_fase1_lockdown_rls_rbac_and_fixes.sql'
+    );
+    const blindajeIdx = timestampMigrations.indexOf('20261118000200_blindaje_trade_sucursales.sql');
+    const hito0Idx = timestampMigrations.indexOf(
+      '20261118000300_hito0_surveys_privacidad_y_lectura_contraloria.sql'
+    );
+    const hito1Idx = timestampMigrations.indexOf(
+      '20261118000400_hito1_identidad_unica_y_aislamiento_sucursales.sql'
+    );
+    assert.ok(
+      lockdownIdx >= 0 && blindajeIdx > lockdownIdx && hito0Idx > blindajeIdx && hito1Idx > hito0Idx,
+      'Orden cronológico estricto: lockdown -> blindaje -> hito0 -> hito1'
     );
     assert.ok(
       !migrationFiles.some((f) => /^0[12]_/.test(f)),
@@ -170,8 +181,10 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
       'super_admin',
       'contraloria',
       'coordinacion',
-      'supervisor',
       'vendedor',
+      'promotora',
+      'cliente',
+      'chofer',
     ]);
     assert.equal(userMgmt.MIN_SUPABASE_PASSWORD_LENGTH, 8);
 
@@ -182,6 +195,7 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
       app_metadata: {
         role: 'contraloria',
         app_role: 'contraloria',
+        sucursal: 'GLOBAL',
         display_name: 'Analista Contraloría',
         must_change_password: true,
       },
@@ -193,28 +207,31 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
     assert.ok(contraloriaProfile);
     assert.equal(contraloriaProfile.appRole, 'contraloria');
     assert.equal(contraloriaProfile.iamRole, 'contraloria');
+    assert.equal(contraloriaProfile.sucursal, 'GLOBAL');
     assert.equal(contraloriaProfile.legacyRole, 'analista_contraloria');
     assert.equal(contraloriaProfile.isCoordinatorOrAdmin, false);
     assert.equal(contraloriaProfile.canAccessTorreControl, true);
     assert.equal(contraloriaProfile.mustChangePassword, true);
 
-    // Verificar extracción de perfil Supervisor
-    const supervisorProfile = authSvc.extractVerifiedProfileFromAuthUser({
+    // D6: los tokens legados `supervisor` se normalizan a `coordinacion` con su sucursal regional
+    const supervisorLegacyProfile = authSvc.extractVerifiedProfileFromAuthUser({
       id: '44444444-4444-4444-8444-444444444444',
       email: 'supervisor@codizulca.com',
       app_metadata: {
         role: 'supervisor',
+        sucursal: 'ZULIA',
         display_name: 'Supervisor Zulia',
       },
       user_metadata: {},
     } as any);
 
-    assert.ok(supervisorProfile);
-    assert.equal(supervisorProfile.appRole, 'supervisor');
-    assert.equal(supervisorProfile.iamRole, 'supervisor');
-    assert.equal(supervisorProfile.isCoordinatorOrAdmin, true);
-    assert.equal(supervisorProfile.canAccessTorreControl, true);
-    assert.equal(supervisorProfile.mustChangePassword, false);
+    assert.ok(supervisorLegacyProfile);
+    assert.equal(supervisorLegacyProfile.appRole, 'coordinadora');
+    assert.equal(supervisorLegacyProfile.iamRole, 'coordinacion');
+    assert.equal(supervisorLegacyProfile.sucursal, 'ZULIA');
+    assert.equal(supervisorLegacyProfile.isCoordinatorOrAdmin, true);
+    assert.equal(supervisorLegacyProfile.canAccessTorreControl, true);
+    assert.equal(supervisorLegacyProfile.mustChangePassword, false);
 
     // Verificar Segregación de Módulos en Header / App
     const rolesMatrix = headerMod.MODULE_ALLOWED_ROLES;
@@ -222,7 +239,7 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
     assert.ok(!rolesMatrix.llenado_cronograma.includes('contraloria'));
     assert.ok(rolesMatrix.contraloria.includes('contraloria'));
     assert.ok(rolesMatrix.kpis_trazabilidad.includes('contraloria'));
-    assert.ok(!rolesMatrix.contraloria.includes('supervisor'));
+    assert.ok(!rolesMatrix.contraloria.includes('vendedor'));
     assert.deepEqual(rolesMatrix.gestion_usuarios, ['super_admin']);
   });
 
@@ -470,7 +487,7 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
       });
       assert.equal(suspendedRes.status, 403);
 
-      // Caso D: Validación de rol no permitido y contraseña débil -> 400
+      // Caso D: Validación de rol no permitido, sucursal faltante en rol regional y contraseña débil -> 400
       const invalidRoleRes = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -478,13 +495,28 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
           Authorization: `Bearer ${superAdminToken}`,
         },
         body: JSON.stringify({
-          fullName: 'Portal Externo',
-          email: 'cliente@codizulca.local',
+          fullName: 'Portal Desconocido',
+          email: 'desconocido@codizulca.local',
+          password: 'PasswordSegura123!',
+          role: 'visitante_externo',
+        }),
+      });
+      assert.equal(invalidRoleRes.status, 400);
+
+      const missingSucursalRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${superAdminToken}`,
+        },
+        body: JSON.stringify({
+          fullName: 'Cliente Sin Sede',
+          email: 'cliente.sinsede@codizulca.local',
           password: 'PasswordSegura123!',
           role: 'cliente',
         }),
       });
-      assert.equal(invalidRoleRes.status, 400);
+      assert.equal(missingSucursalRes.status, 400);
 
       const shortPassRes = await fetch(endpoint, {
         method: 'POST',
@@ -496,7 +528,8 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
           fullName: 'Clave Corta',
           email: 'corta@codizulca.local',
           password: '1234567',
-          role: 'supervisor',
+          role: 'coordinacion',
+          sucursal: 'ZULIA',
         }),
       });
       assert.equal(shortPassRes.status, 400);
@@ -561,7 +594,8 @@ test('FASE 1 (MVP-01, MVP-02, MVP-03) — Certificación Integral de Blindaje RL
           fullName: 'Usuario Rollback',
           email: 'rollback@codizulca.local',
           password: 'PasswordSegura123!',
-          role: 'supervisor',
+          role: 'coordinacion',
+          sucursal: 'ZULIA',
         }),
       });
       assert.equal(rollbackRes.status, 400);

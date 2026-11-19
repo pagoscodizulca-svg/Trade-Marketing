@@ -134,6 +134,7 @@ export interface AsistenciaJornadaDbRow {
   perfil_aplicado: PerfilAsistencia;
   pdv_nombre: string;
   zona: string;
+  sucursal?: 'ZULIA' | 'VALENCIA' | null;
   opened_at_server: string;
   updated_at_server: string;
   opened_by_uid: string | null;
@@ -154,6 +155,7 @@ export interface AsistenciaEvidenciaDbRow {
   lat: number | null;
   lng: number | null;
   gps_accuracy: number | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | null;
   capturado_en_servidor: string;
   cargado_por_uid: string | null;
   cargado_por_rol: 'promotora' | 'coordinadora' | 'admin';

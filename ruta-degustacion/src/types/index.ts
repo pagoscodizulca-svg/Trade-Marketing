@@ -6,6 +6,17 @@ export type Turno = (typeof TURNOS)[number];
 
 export type AppMode = 'chofer' | 'oficina';
 
+export type RutaAppRole = 'super_admin' | 'coordinacion' | 'chofer';
+export type SucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
+
+export interface RutaAuthUser {
+  id: string;
+  email: string;
+  fullName: string;
+  role: RutaAppRole;
+  sucursal: SucursalCodigo;
+}
+
 export interface Entrega {
   id: string;
   /** Ej. "JUEVES 05", "VIERNES 06", "SÁBADO 07" */

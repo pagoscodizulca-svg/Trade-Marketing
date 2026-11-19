@@ -8,6 +8,7 @@ import {
   BarChart3,
   ChevronRight,
   ShieldCheck,
+  Database,
 } from 'lucide-react';
 import { GlobalExportPdfModal } from './GlobalExportPdfModal';
 import { RoleGuard } from '../auth/RoleGuard';
@@ -17,15 +18,17 @@ import type { ManagedUserRole } from '../../services/userManagementService';
 export type MainNavTab =
   | 'promotoras'
   | 'llenado_cronograma'
+  | 'maestros'
   | 'contraloria'
   | 'kpis_trazabilidad'
   | 'gestion_usuarios';
 
 export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]> = {
-  promotoras: ['super_admin', 'coordinacion', 'supervisor'],
-  llenado_cronograma: ['super_admin', 'coordinacion', 'supervisor'],
+  promotoras: ['super_admin', 'coordinacion'],
+  llenado_cronograma: ['super_admin', 'coordinacion'],
+  maestros: ['super_admin', 'coordinacion'],
   contraloria: ['super_admin', 'contraloria', 'coordinacion'],
-  kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion', 'supervisor'],
+  kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion'],
   gestion_usuarios: ['super_admin'],
 };
 
@@ -55,6 +58,12 @@ export const Header: React.FC<HeaderProps> = ({
       label: 'Cronograma de Productos',
       subtitle: 'Matriz de Llenado e Insumos',
       icon: <Calendar className="w-4 h-4" />,
+    },
+    {
+      id: 'maestros',
+      label: 'Maestros (PDVs y Zonas)',
+      subtitle: 'Clientes, Cadenas & FDV',
+      icon: <Database className="w-4 h-4" />,
     },
     {
       id: 'contraloria',

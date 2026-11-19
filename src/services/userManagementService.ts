@@ -9,27 +9,57 @@ const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 export const MIN_SUPABASE_PASSWORD_LENGTH = 8;
 
+/**
+ * Dominio único de roles en `public.profiles` (Hito 1 · N-02 / D6):
+ *  - Los antiguos `supervisor` se normalizan y migran a `coordinacion`.
+ *  - Incluye `promotora`, `cliente` y el rol técnico `chofer` (solo entregas).
+ */
 export type ManagedUserRole =
   | 'super_admin'
   | 'contraloria'
   | 'coordinacion'
-  | 'supervisor'
-  | 'vendedor';
+  | 'vendedor'
+  | 'promotora'
+  | 'cliente'
+  | 'chofer';
 
 export const MANAGED_USER_ROLES: readonly ManagedUserRole[] = [
   'super_admin',
   'contraloria',
   'coordinacion',
-  'supervisor',
   'vendedor',
+  'promotora',
+  'cliente',
+  'chofer',
 ] as const;
 
 export const MANAGED_USER_ROLE_LABELS: Record<ManagedUserRole, string> = {
   super_admin: 'Administrador General',
   contraloria: 'Contraloría Interna',
   coordinacion: 'Coordinación Trade',
-  supervisor: 'Supervisor de Campo',
   vendedor: 'Vendedor (FDV)',
+  promotora: 'Promotora de Campo',
+  cliente: 'Portal Cliente',
+  chofer: 'Chofer / Logística',
+};
+
+/**
+ * Código oficial de sede (Hito 1 · D7):
+ *  - `GLOBAL` solo permitido para roles nacionales autorizados (`super_admin`, `contraloria`).
+ *  - Los roles regionales exigen obligatoriamente `ZULIA` o `VALENCIA`.
+ */
+export type SucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
+
+export const SUCURSAL_CODIGOS: readonly SucursalCodigo[] = [
+  'ZULIA',
+  'VALENCIA',
+  'GLOBAL',
+] as const;
+
+export const SUCURSAL_LABELS: Record<SucursalCodigo, string> = {
+  ZULIA: 'Sucursal Zulia',
+  VALENCIA: 'Sucursal Valencia',
+  GLOBAL: 'Global · Nacional',
 };
 
 export interface ManagedUserProfile {
@@ -37,6 +67,7 @@ export interface ManagedUserProfile {
   email: string;
   fullName: string;
   role: ManagedUserRole;
+  sucursal: SucursalCodigo;
   isActive: boolean;
   mustChangePassword: boolean;
   createdAt: string;
@@ -48,6 +79,7 @@ export interface CreateManagedUserInput {
   email: string;
   password: string;
   role: ManagedUserRole;
+  sucursal?: SucursalCodigo;
   mustChangePassword?: boolean;
 }
 
@@ -55,6 +87,7 @@ export interface UpdateManagedUserAccessInput {
   targetUserId: string;
   fullName: string;
   role: ManagedUserRole;
+  sucursal?: SucursalCodigo | null;
   isActive: boolean;
   mustChangePassword?: boolean | null;
 }
@@ -74,6 +107,7 @@ interface RawProfileRow {
   email: unknown;
   full_name: unknown;
   role: unknown;
+  sucursal?: unknown;
   is_active: unknown;
   must_change_password: unknown;
   created_at: unknown;
@@ -95,9 +129,82 @@ export function isManagedUserRole(value: unknown): value is ManagedUserRole {
     value === 'super_admin' ||
     value === 'contraloria' ||
     value === 'coordinacion' ||
-    value === 'supervisor' ||
-    value === 'vendedor'
+    value === 'vendedor' ||
+    value === 'promotora' ||
+    value === 'cliente' ||
+    value === 'chofer'
   );
+}
+
+export function normalizeManagedUserRole(rawRole: unknown): ManagedUserRole | null {
+  const clean = String(rawRole ?? '').trim().toLowerCase();
+  if (isManagedUserRole(clean)) return clean;
+  if (
+    clean === 'superadmin' ||
+    clean === 'admin_general' ||
+    clean === 'admin' ||
+    clean === 'gerencia' ||
+    clean === 'gerente_admin'
+  ) {
+    return 'super_admin';
+  }
+  if (clean === 'analista_contraloria' || clean === 'contralor') {
+    return 'contraloria';
+  }
+  if (
+    clean === 'coordinadora' ||
+    clean === 'coordinadora_trade' ||
+    clean === 'jefe_trade' ||
+    clean === 'supervisor' ||
+    clean === 'supervisora' ||
+    clean === 'supervisor_trade'
+  ) {
+    return 'coordinacion';
+  }
+  if (clean === 'fdv' || clean === 'fuerza_ventas') {
+    return 'vendedor';
+  }
+  return null;
+}
+
+export function normalizeSucursalCodigo(raw: unknown): SucursalCodigo | null {
+  const clean = String(raw ?? '').trim().toUpperCase();
+  if (!clean) return null;
+  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') {
+    return 'ZULIA';
+  }
+  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') {
+    return 'VALENCIA';
+  }
+  if (clean === 'GLOBAL' || clean === 'NACIONAL' || clean === 'ADMIN_GENERAL') {
+    return 'GLOBAL';
+  }
+  return null;
+}
+
+export function getAllowedSucursalesForRole(role: ManagedUserRole): readonly SucursalCodigo[] {
+  if (role === 'super_admin') {
+    return ['GLOBAL'];
+  }
+  if (role === 'contraloria') {
+    return ['GLOBAL', 'ZULIA', 'VALENCIA'];
+  }
+  return ['ZULIA', 'VALENCIA'];
+}
+
+export function isSucursalValidForRole(
+  role: ManagedUserRole,
+  sucursal: SucursalCodigo | null | undefined
+): sucursal is SucursalCodigo {
+  if (!sucursal) return false;
+  return getAllowedSucursalesForRole(role).includes(sucursal);
+}
+
+export function resolveDefaultSucursalForRole(role: ManagedUserRole): SucursalCodigo {
+  if (role === 'super_admin' || role === 'contraloria') {
+    return 'GLOBAL';
+  }
+  return 'ZULIA';
 }
 
 export function normalizeManagedUserEmail(rawEmail: string): string {
@@ -120,10 +227,6 @@ function getCryptoRandomInt(maxExclusive: number): number {
   return Math.floor(Math.random() * maxExclusive);
 }
 
-/**
- * Genera una contraseña inicial criptográficamente aleatoria compatible con Supabase Auth
- * (mínimo 6 caracteres; por defecto 12 caracteres sin glifos ambiguos como 0/O o l/1).
- */
 export function generateSecureInitialPassword(length = 12): string {
   const safeLength = Math.max(MIN_SUPABASE_PASSWORD_LENGTH, Math.min(Math.trunc(length) || 12, 32));
   const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -170,13 +273,40 @@ function validateEmail(rawEmail: string): string {
 }
 
 function validateRole(rawRole: unknown): ManagedUserRole {
-  const clean = String(rawRole ?? '').trim().toLowerCase();
-  if (!isManagedUserRole(clean)) {
+  const normalized = normalizeManagedUserRole(rawRole);
+  if (!normalized) {
     throw new Error(
-      'Rol inválido. Selecciona super_admin, contraloria, coordinacion, supervisor o vendedor.'
+      'Rol inválido. Selecciona super_admin, contraloria, coordinacion, vendedor, promotora, cliente o chofer.'
     );
   }
-  return clean;
+  return normalized;
+}
+
+function validateSucursalForRole(
+  role: ManagedUserRole,
+  rawSucursal: unknown,
+  options?: { allowImplicitDefault?: boolean }
+): SucursalCodigo {
+  if (role === 'super_admin') {
+    return 'GLOBAL';
+  }
+
+  if (rawSucursal === undefined || rawSucursal === null || String(rawSucursal).trim() === '') {
+    if (role === 'contraloria' || options?.allowImplicitDefault) {
+      return resolveDefaultSucursalForRole(role);
+    }
+    throw new Error(`Debes seleccionar una sucursal (ZULIA o VALENCIA) para el rol ${role}.`);
+  }
+
+  const normalized = normalizeSucursalCodigo(rawSucursal);
+  if (!normalized || !isSucursalValidForRole(role, normalized)) {
+    throw new Error(
+      normalized === 'GLOBAL'
+        ? `La sucursal GLOBAL está reservada únicamente para super_admin y contraloria.`
+        : 'Sucursal inválida. Selecciona ZULIA, VALENCIA o GLOBAL.'
+    );
+  }
+  return normalized;
 }
 
 function validateUuid(rawId: string, fieldLabel: string): string {
@@ -188,14 +318,19 @@ function validateUuid(rawId: string, fieldLabel: string): string {
 }
 
 function mapProfileRow(row: RawProfileRow): ManagedUserProfile {
-  const rawRole = String(row.role ?? 'vendedor').trim().toLowerCase();
-  const role: ManagedUserRole = isManagedUserRole(rawRole) ? rawRole : 'vendedor';
+  const role: ManagedUserRole = normalizeManagedUserRole(row.role) ?? 'vendedor';
+  const rawSucursal = normalizeSucursalCodigo(row.sucursal);
+  const sucursal: SucursalCodigo =
+    rawSucursal && isSucursalValidForRole(role, rawSucursal)
+      ? rawSucursal
+      : resolveDefaultSucursalForRole(role);
 
   return {
     id: String(row.id ?? ''),
     email: normalizeManagedUserEmail(String(row.email ?? '')),
     fullName: String(row.full_name ?? '').trim(),
     role,
+    sucursal,
     isActive: Boolean(row.is_active),
     mustChangePassword: Boolean(row.must_change_password),
     createdAt: String(row.created_at ?? ''),
@@ -221,7 +356,10 @@ function mapAuditRow(row: RawAuditRow): UserManagementAuditEntry {
   };
 }
 
-function formatSupabaseRpcError(error: { message?: string; code?: string } | null, fallback: string): string {
+function formatSupabaseRpcError(
+  error: { message?: string; code?: string } | null,
+  fallback: string
+): string {
   const msg = String(error?.message ?? '').trim();
   const code = String(error?.code ?? '').trim().toLowerCase();
   if (!msg) return fallback;
@@ -287,9 +425,6 @@ async function requireAuthenticatedSuperAdminSessionId(): Promise<string> {
   return session.userId;
 }
 
-/**
- * Obtiene el perfil IAM propio del usuario autenticado actual desde `public.profiles`.
- */
 export async function getCurrentUserAccessProfile(): Promise<ManagedUserProfile | null> {
   if (!isSupabaseConfigured) return null;
   const client = getSupabaseClient();
@@ -301,7 +436,9 @@ export async function getCurrentUserAccessProfile(): Promise<ManagedUserProfile 
 
   const { data, error } = await client
     .from('profiles')
-    .select('id, email, full_name, role, is_active, must_change_password, created_at, updated_at')
+    .select(
+      'id, email, full_name, role, sucursal, is_active, must_change_password, created_at, updated_at'
+    )
     .eq('id', authData.user.id)
     .maybeSingle();
 
@@ -312,10 +449,6 @@ export async function getCurrentUserAccessProfile(): Promise<ManagedUserProfile 
   return mapProfileRow(data as RawProfileRow);
 }
 
-/**
- * Verifica contra PostgreSQL (`public.is_active_super_admin()`) si el usuario actual
- * posee rol `super_admin` con `is_active = true`.
- */
 export async function isCurrentUserActiveSuperAdmin(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   const client = getSupabaseClient();
@@ -324,10 +457,6 @@ export async function isCurrentUserActiveSuperAdmin(): Promise<boolean> {
   return data === true;
 }
 
-/**
- * Lista todos los usuarios gestionados mediante la RPC `public.admin_list_profiles()`
- * (ordenada por jerarquía de rol y nombre completo).
- */
 export async function listManagedUsers(): Promise<ManagedUserProfile[]> {
   await requireAuthenticatedSuperAdminSessionId();
   const client = getSupabaseClient();
@@ -346,11 +475,6 @@ export async function listManagedUsers(): Promise<ManagedUserProfile[]> {
   return (data as RawProfileRow[]).map(mapProfileRow);
 }
 
-/**
- * Crea un usuario corporativo activo y confirmado exclusivamente a través del backend
- * administrativo (`POST /api/admin/corporate-users`), eliminando el uso de `auth.signUp()`
- * público en el navegador y permitiendo mantener cerrado el registro abierto en Supabase Auth.
- */
 export async function createManagedUser(
   input: CreateManagedUserInput
 ): Promise<ManagedUserProfile> {
@@ -359,6 +483,7 @@ export async function createManagedUser(
   const fullName = validateFullName(input.fullName);
   const email = validateEmail(input.email);
   const role = validateRole(input.role);
+  const sucursal = validateSucursalForRole(role, input.sucursal);
   const password = String(input.password ?? '');
   const mustChangePassword = input.mustChangePassword === true;
 
@@ -379,6 +504,7 @@ export async function createManagedUser(
       email,
       password,
       role,
+      sucursal,
       mustChangePassword,
     }),
   });
@@ -402,10 +528,6 @@ export async function createManagedUser(
   return mapProfileRow(payload.profile);
 }
 
-/**
- * Actualiza el nombre completo, rol (`super_admin` | `coordinacion` | `vendedor`),
- * estado (`is_active`) y bandera opcional `must_change_password` de un usuario existente.
- */
 export async function updateManagedUserAccess(
   input: UpdateManagedUserAccessInput
 ): Promise<ManagedUserProfile> {
@@ -417,8 +539,13 @@ export async function updateManagedUserAccess(
   const isActive = Boolean(input.isActive);
   const mustChangePassword =
     typeof input.mustChangePassword === 'boolean' ? input.mustChangePassword : null;
+  const sucursal =
+    input.sucursal !== undefined && input.sucursal !== null
+      ? validateSucursalForRole(role, input.sucursal)
+      : role === 'super_admin'
+        ? 'GLOBAL'
+        : null;
 
-  // Pre-validación de cortesía en cliente (la regla autoritativa reside en PostgreSQL)
   if (targetUserId === actorUserId) {
     if (!isActive) {
       throw new Error(
@@ -439,6 +566,7 @@ export async function updateManagedUserAccess(
     p_role: role,
     p_is_active: isActive,
     p_must_change_password: mustChangePassword,
+    ...(sucursal ? { p_sucursal: sucursal } : {}),
   });
 
   if (error) {
@@ -455,10 +583,6 @@ export async function updateManagedUserAccess(
   return mapProfileRow(row);
 }
 
-/**
- * Consulta la bitácora de auditoría IAM (`public.user_management_audit`).
- * Protegida por RLS de lectura exclusivo para `super_admin` activo.
- */
 export async function listUserManagementAudit(
   limit = 50
 ): Promise<UserManagementAuditEntry[]> {
@@ -485,10 +609,6 @@ export async function listUserManagementAudit(
   return (data as RawAuditRow[]).map(mapAuditRow);
 }
 
-/**
- * Permite al usuario autenticado cambiar su propia contraseña cuando tenga activa
- * la bandera opcional `must_change_password` y limpiar dicha bandera en `public.profiles`.
- */
 export async function completeOwnPasswordChange(newPassword: string): Promise<void> {
   assertSupabaseConfigured();
   const cleanPassword = String(newPassword ?? '');

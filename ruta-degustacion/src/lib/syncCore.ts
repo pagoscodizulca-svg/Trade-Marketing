@@ -20,6 +20,9 @@ export const TABLE = 'entregas_degustacion';
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
 const MENSAJE_SIN_CONFIG = 'Sin conexión configurada: faltan las credenciales públicas de Supabase.';
+const MENSAJE_SIN_SESION =
+  'Sesión requerida para sincronizar entregas con el servidor. Inicie sesión para enviar cambios pendientes.';
+export const AUTH_TOKEN_META_KEY = 'auth_access_token';
 
 export interface SyncConfig {
   url: string;
@@ -33,7 +36,15 @@ export interface FlushOptions {
   force?: boolean;
 }
 
-export type FlushStatus = 'idle' | 'ok' | 'offline' | 'backoff' | 'error' | 'locked' | 'sin-config';
+export type FlushStatus =
+  | 'idle'
+  | 'ok'
+  | 'offline'
+  | 'backoff'
+  | 'error'
+  | 'locked'
+  | 'sin-config'
+  | 'auth-required';
 
 export interface FlushResult {
   status: FlushStatus;
@@ -53,11 +64,26 @@ export async function readConfig(): Promise<SyncConfig | null> {
   return cfg && cfg.url && cfg.anonKey ? cfg : null;
 }
 
+export async function saveAuthToken(token: string | null): Promise<void> {
+  await setMeta(AUTH_TOKEN_META_KEY, token ? String(token).trim() : null);
+}
+
+export async function clearAuthToken(): Promise<void> {
+  await saveAuthToken(null);
+}
+
+export async function readAuthToken(): Promise<string | null> {
+  const token = await getMeta<string | null>(AUTH_TOKEN_META_KEY);
+  const clean = typeof token === 'string' ? token.trim() : '';
+  return clean.length > 0 ? clean : null;
+}
+
 const backoffMs = (retryCount: number) => Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, retryCount));
 
 type SendOutcome =
   | { kind: 'ok' }
   | { kind: 'dropped'; message: string }
+  | { kind: 'auth'; message: string }
   | { kind: 'network'; message: string }
   | { kind: 'transient'; message: string }
   | { kind: 'permanent'; message: string };
@@ -72,12 +98,26 @@ async function fetchConTiempo(url: string, init: RequestInit, timeoutMs: number)
   }
 }
 
-const cabeceras = (cfg: SyncConfig, extra?: Record<string, string>): Record<string, string> => ({
-  apikey: cfg.anonKey,
-  Authorization: `Bearer ${cfg.anonKey}`,
-  'Content-Type': 'application/json',
-  ...extra,
-});
+/**
+ * Construye cabeceras Zero-Trust para PostgREST: `apikey` usa la llave pública del proyecto,
+ * mientras `Authorization` usa SIEMPRE el Bearer JWT del usuario autenticado (jamás `anonKey`).
+ */
+export function buildOutboxHeaders(
+  cfg: SyncConfig,
+  accessToken: string,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const cleanToken = String(accessToken || '').trim();
+  if (!cleanToken || cleanToken === cfg.anonKey) {
+    throw new Error('Token de sesión ausente o inválido para sincronización autenticada.');
+  }
+  return {
+    apikey: cfg.anonKey,
+    Authorization: `Bearer ${cleanToken}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+}
 
 const esErrorDeColumna = (status: number, texto: string) =>
   status === 400 && /PGRST204|42703|hora_entrega_real|actualizado_chofer_at/i.test(texto);
@@ -87,11 +127,16 @@ const esErrorDeColumna = (status: number, texto: string) =>
  * Con las columnas opcionales de la migración, además protege el «gana el último»:
  * solo actualiza si el servidor no tiene un cambio del chofer más reciente.
  */
-async function sendOperation(cfg: SyncConfig, item: OutboxItem, timeoutMs: number): Promise<SendOutcome> {
+async function sendOperation(
+  cfg: SyncConfig,
+  accessToken: string,
+  item: OutboxItem,
+  timeoutMs: number,
+): Promise<SendOutcome> {
   const base = cfg.url.replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
   const idFiltro = `id=eq.${encodeURIComponent(item.delivery_id)}`;
 
-  const intentar = async (conExtra: boolean): Promise<SendOutcome | { kind: 'columnas'; } > => {
+  const intentar = async (conExtra: boolean): Promise<SendOutcome | { kind: 'columnas' }> => {
     const iso = encodeURIComponent(item.created_at_iso);
     const filtro = conExtra
       ? `${idFiltro}&or=(actualizado_chofer_at.is.null,actualizado_chofer_at.lte.${iso})`
@@ -102,7 +147,7 @@ async function sendOperation(cfg: SyncConfig, item: OutboxItem, timeoutMs: numbe
         `${base}/rest/v1/${TABLE}?${filtro}`,
         {
           method: 'PATCH',
-          headers: cabeceras(cfg, { Prefer: 'return=representation' }),
+          headers: buildOutboxHeaders(cfg, accessToken, { Prefer: 'return=representation' }),
           body: JSON.stringify(construirCuerpoServidor(item.payload, item.created_at_iso, conExtra)),
         },
         timeoutMs,
@@ -128,9 +173,12 @@ async function sendOperation(cfg: SyncConfig, item: OutboxItem, timeoutMs: numbe
         try {
           const existe = await fetchConTiempo(
             `${base}/rest/v1/${TABLE}?${idFiltro}&select=id`,
-            { method: 'GET', headers: cabeceras(cfg) },
+            { method: 'GET', headers: buildOutboxHeaders(cfg, accessToken) },
             timeoutMs,
           );
+          if (existe.status === 401 || existe.status === 403) {
+            return { kind: 'auth', message: MENSAJE_SIN_SESION };
+          }
           if (existe.ok) {
             const r = (await existe.json()) as unknown[];
             if (Array.isArray(r) && r.length > 0) {
@@ -142,6 +190,13 @@ async function sendOperation(cfg: SyncConfig, item: OutboxItem, timeoutMs: numbe
         }
       }
       return { kind: 'dropped', message: 'La entrega ya no existe en el servidor (el cronograma fue reemplazado).' };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        kind: 'auth',
+        message: 'Sesión expirada o sin permisos para actualizar esta entrega. Inicie sesión nuevamente.',
+      };
     }
 
     const texto = await res.text().catch(() => '');
@@ -201,6 +256,14 @@ async function ejecutar(opts: FlushOptions): Promise<FlushResult> {
     return result;
   }
 
+  const accessToken = await readAuthToken();
+  if (!accessToken || accessToken === cfg.anonKey) {
+    result.remaining = await countOutbox();
+    result.status = result.remaining > 0 ? 'auth-required' : 'idle';
+    result.lastError = result.remaining > 0 ? MENSAJE_SIN_SESION : null;
+    return result;
+  }
+
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const bloqueadas = new Set<string>(); // entregas que no deben avanzar en esta pasada
   const intentadas = new Set<string>();
@@ -224,7 +287,7 @@ async function ejecutar(opts: FlushOptions): Promise<FlushResult> {
       continue;
     }
 
-    const out = await sendOperation(cfg, tomada, timeoutMs);
+    const out = await sendOperation(cfg, accessToken, tomada, timeoutMs);
     if (out.kind === 'ok') {
       await ackOperation(tomada.operation_id, tomada.delivery_id);
       result.sent += 1;
@@ -232,6 +295,16 @@ async function ejecutar(opts: FlushOptions): Promise<FlushResult> {
       await dropOperation(tomada.operation_id, tomada.delivery_id);
       result.dropped += 1;
       result.droppedMessages.push(out.message);
+    } else if (out.kind === 'auth') {
+      // Se conserva la operación intacta en cola hasta que el usuario renueve su sesión.
+      await releaseOperation(tomada.operation_id, {
+        last_error: out.message,
+        next_attempt_at: Date.now() + BACKOFF_BASE_MS,
+        bumpRetry: false,
+      });
+      result.status = 'auth-required';
+      result.lastError = out.message;
+      break;
     } else if (out.kind === 'network') {
       await releaseOperation(tomada.operation_id, {
         last_error: out.message,

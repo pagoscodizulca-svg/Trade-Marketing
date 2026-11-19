@@ -62,6 +62,9 @@ self.addEventListener('sync', (event: SwSyncEvent) => {
   event.waitUntil(
     (async () => {
       const res = await flushOutbox({ timeoutMs: 20_000, force: true });
+      // Si se requiere volver a iniciar sesión, no forzar bucle infinito en background;
+      // la cola queda preservada hasta que el chofer renueve sesión en primer plano.
+      if (res.status === 'auth-required') return;
       // Si quedaron operaciones por un fallo recuperable, se lanza un error para que el navegador reprograme el sync.
       if (res.remaining > 0 && (res.status === 'offline' || res.status === 'error' || (await countOutbox()) > 0)) {
         throw new Error(`Cola pendiente (${res.remaining}): ${res.lastError ?? res.status}`);

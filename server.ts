@@ -16,12 +16,24 @@ import {
   handleProvisionStaffAuth,
   requireAttendanceActorAuth,
   requireCoordinatorOrAdminAuth,
+  requireFdvOrTradeAuth,
+  requireIncidenciaActorAuth,
   requireSuperAdminAuth,
+  requireTorreControlAuth,
 } from './src/server/supabaseAdminAuth';
 import {
   handleBatchAttendanceSignedUrls,
   handleUploadAttendanceEvidence,
 } from './src/server/attendanceEvidencesHandler';
+import {
+  handleBatchFiscalReceiptSignedUrls,
+  handleUploadFiscalReceipt,
+} from './src/server/contraloriaInvoicesHandler';
+import {
+  handleBatchIncidenciaSignedUrls,
+  handleUploadIncidenciaEvidence,
+} from './src/server/incidenciasEvidencesHandler';
+import { handleCreateFdvSolicitudDegustacion } from './src/server/fdvSolicitudesHandler';
 import {
   handleWeeklyTastingCutoffCron,
   requireCronSecretAuth,
@@ -258,6 +270,91 @@ app.post(
   requireAttendanceActorAuth,
   attendanceSignedUrlRateLimiter,
   handleBatchAttendanceSignedUrls
+);
+
+// ============================================================================
+// 1.F. INGESTA AUTENTICADA DE SOLICITUDES FDV (ZERO-ANON + ZOD + IDEMPOTENCIA ATÓMICA)
+// ============================================================================
+const fdvSolicitudesRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 30,
+});
+
+app.post(
+  '/api/fdv/solicitudes-degustacion',
+  requireFdvOrTradeAuth,
+  fdvSolicitudesRateLimiter,
+  handleCreateFdvSolicitudDegustacion
+);
+
+// ============================================================================
+// 1.G. FACTURAS FISCALES PRIVADAS DE CONTRALORÍA (MAGIC BYTES PDF/IMG + STORAGE PRIVADO)
+// ============================================================================
+const contraloriaInvoiceUploadRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 30,
+});
+
+const contraloriaInvoiceSignedUrlRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+app.post(
+  '/api/contraloria/facturas/upload',
+  requireTorreControlAuth,
+  contraloriaInvoiceUploadRateLimiter,
+  express.raw({
+    type: [
+      'application/pdf',
+      'application/x-pdf',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'application/octet-stream',
+      '*/*',
+    ],
+    limit: '11mb',
+  }),
+  handleUploadFiscalReceipt
+);
+
+app.post(
+  '/api/contraloria/facturas/signed-urls',
+  requireTorreControlAuth,
+  contraloriaInvoiceSignedUrlRateLimiter,
+  handleBatchFiscalReceiptSignedUrls
+);
+
+// ============================================================================
+// 1.H. EVIDENCIAS FOTOGRÁFICAS PRIVADAS DE INCIDENCIAS EN PDV (`M-01`)
+// ============================================================================
+const incidenciaUploadRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 30,
+});
+
+const incidenciaSignedUrlRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+app.post(
+  '/api/incidencias/evidencias',
+  requireIncidenciaActorAuth,
+  incidenciaUploadRateLimiter,
+  express.raw({
+    type: ['image/jpeg', 'image/png', 'image/webp', 'application/octet-stream', '*/*'],
+    limit: '6mb',
+  }),
+  handleUploadIncidenciaEvidence
+);
+
+app.post(
+  '/api/incidencias/evidencias/signed-urls',
+  requireIncidenciaActorAuth,
+  incidenciaSignedUrlRateLimiter,
+  handleBatchIncidenciaSignedUrls
 );
 
 // ============================================================================

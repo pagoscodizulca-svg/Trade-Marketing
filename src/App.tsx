@@ -33,6 +33,11 @@ const UserManagementView = lazy(() =>
     default: m.UserManagementView,
   }))
 );
+const MasterDataManagementView = lazy(() =>
+  import('./components/masters/MasterDataManagementView').then((m) => ({
+    default: m.MasterDataManagementView,
+  }))
+);
 
 function isPromotoraPortalPath(pathname?: string): boolean {
   const rawPath =
@@ -119,6 +124,7 @@ const MainAppContent: React.FC<{
   const activeModuleTitle: Record<MainNavTab, { title: string; badge: string }> = {
     promotoras: { title: 'Módulo 1 · Promotoras y Fuerza de Ventas (FDV)', badge: 'Campo & Merchandising' },
     llenado_cronograma: { title: 'Módulo 2 · Cronograma y Matriz de Productos', badge: 'Llenado por Lote' },
+    maestros: { title: 'Data Maestra · Clientes, Cadenas Comerciales y Zonas', badge: 'Fuente Única' },
     contraloria: { title: 'Módulo 3 · Contraloría y Auditoría Interna', badge: 'Conciliación & Paz y Salvo' },
     kpis_trazabilidad: { title: 'Módulo 4 · KPIs y Trazabilidad Ejecutiva', badge: 'Torre de Control' },
     gestion_usuarios: { title: 'Seguridad IAM · Gestión de Usuarios Corporativos', badge: 'Super Admin' },
@@ -271,6 +277,19 @@ const MainAppContent: React.FC<{
                 onReturnHome={() => setActiveTab(defaultHomeTab)}
               >
                 <ScheduleMatrixView />
+              </RoleGuard>
+            )}
+
+            {/* Data Maestra: Clientes / PDVs, Cadenas Comerciales, Zonas y FDV */}
+            {activeTab === 'maestros' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.maestros}
+                variant="route"
+                deniedTitle="Módulo de Gestión de Maestros"
+                deniedDescription="La administración de clientes, cadenas comerciales, zonas y vendedores está reservada para Coordinación Trade y Super Admin."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <MasterDataManagementView />
               </RoleGuard>
             )}
 

@@ -4,8 +4,10 @@ import type { OpcionesSincronizacionMaestra } from '../services/masterDataSyncSe
 import {
   invalidarCacheMaestros,
   mapearClienteMaestroAStore,
+  obtenerCadenasComerciales,
   obtenerClientesMaestros,
   obtenerVendedoresMaestros,
+  obtenerZonasComerciales,
   sincronizarArchivoMaestroTrade,
   suscribirInvalidacionCacheMaestros,
 } from '../services/masterDataSyncService';
@@ -14,11 +16,13 @@ import {
   isMasterDataSupabaseConfigured,
 } from '../services/supabaseClient';
 import type {
+  CadenaComercial,
   ClienteConVendedor,
   FiltrosConsultaClientes,
   FiltrosConsultaVendedores,
   ResultadoSincronizacion,
   Vendedor,
+  ZonaComercial,
 } from '../types/masterData';
 
 export interface UseMasterDataOptions {
@@ -26,6 +30,8 @@ export interface UseMasterDataOptions {
   filtrosVendedores?: FiltrosConsultaVendedores;
   cargarVendedores?: boolean;
   cargarClientes?: boolean;
+  cargarCadenas?: boolean;
+  cargarZonas?: boolean;
   suscribirCambiosRealtime?: boolean;
   deshabilitado?: boolean;
 }
@@ -33,6 +39,8 @@ export interface UseMasterDataOptions {
 export interface UseMasterDataResult {
   vendedores: Vendedor[];
   clientes: ClienteConVendedor[];
+  cadenas: CadenaComercial[];
+  zonas: ZonaComercial[];
   stores: Store[];
   cargando: boolean;
   sincronizando: boolean;
@@ -47,7 +55,7 @@ export interface UseMasterDataResult {
 
 /**
  * Hook reactivo para consultar y mantener sincronizada en toda la app Trade Marketing
- * la Fuente Única de Verdad de Vendedores y Clientes (`activo = true` por defecto).
+ * la Fuente Única de Verdad de Vendedores, Clientes, Cadenas Comerciales y Zonas (`activo = true` por defecto).
  */
 export function useMasterData(options: UseMasterDataOptions = {}): UseMasterDataResult {
   const {
@@ -55,12 +63,16 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
     filtrosVendedores,
     cargarVendedores = true,
     cargarClientes = true,
+    cargarCadenas = true,
+    cargarZonas = true,
     suscribirCambiosRealtime = false,
     deshabilitado = false,
   } = options;
 
   const [vendedores, setVendedores] = useState<Vendedor[]>([]);
   const [clientes, setClientes] = useState<ClienteConVendedor[]>([]);
+  const [cadenas, setCadenas] = useState<CadenaComercial[]>([]);
+  const [zonas, setZonas] = useState<ZonaComercial[]>([]);
   const [cargando, setCargando] = useState<boolean>(false);
   const [sincronizando, setSincronizando] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,18 +92,24 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       setCargando(true);
       setError(null);
       try {
-        const promesas: [Promise<Vendedor[]>, Promise<ClienteConVendedor[]>] = [
+        const [resVend, resCli, resCad, resZon] = await Promise.all([
           cargarVendedores
             ? obtenerVendedoresMaestros({ ...(filtrosVendedores ?? {}), forzarRefresco })
             : Promise.resolve([]),
           cargarClientes
             ? obtenerClientesMaestros({ ...(filtrosClientes ?? {}), forzarRefresco })
             : Promise.resolve([]),
-        ];
-
-        const [resVend, resCli] = await Promise.all(promesas);
+          cargarCadenas
+            ? obtenerCadenasComerciales({ soloActivos: false, forzarRefresco }).catch(() => [])
+            : Promise.resolve([]),
+          cargarZonas
+            ? obtenerZonasComerciales({ soloActivos: false, forzarRefresco }).catch(() => [])
+            : Promise.resolve([]),
+        ]);
         if (cargarVendedores) setVendedores(resVend);
         if (cargarClientes) setClientes(resCli);
+        if (cargarCadenas) setCadenas(resCad);
+        if (cargarZonas) setZonas(resZon);
         setUltimaActualizacionIso(new Date().toISOString());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Error consultando Data Maestra.');
@@ -104,6 +122,8 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       deshabilitado,
       cargarVendedores,
       cargarClientes,
+      cargarCadenas,
+      cargarZonas,
       claveFiltrosClientes,
       claveFiltrosVendedores,
     ]
@@ -141,6 +161,8 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       .channel('master-data-trade-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'vendedores' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cadenas_comerciales' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zonas' }, programarRefresco)
       .subscribe();
 
     return () => {
@@ -190,14 +212,22 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
     []
   );
 
-  const stores = useMemo(
-    () => clientes.map((cliente) => mapearClienteMaestroAStore(cliente)),
-    [clientes]
-  );
+  const stores = useMemo(() => {
+    const cadenasById = new Map(cadenas.map((c) => [c.id, c]));
+    const zonasById = new Map(zonas.map((z) => [z.id, z]));
+    return clientes.map((cliente) =>
+      mapearClienteMaestroAStore(cliente, {
+        cadenaNombre: cliente.cadena_id ? cadenasById.get(cliente.cadena_id)?.nombre : undefined,
+        zonaNombre: cliente.zona_id ? zonasById.get(cliente.zona_id)?.nombre : undefined,
+      })
+    );
+  }, [clientes, cadenas, zonas]);
 
   return {
     vendedores,
     clientes,
+    cadenas,
+    zonas,
     stores,
     cargando,
     sincronizando,

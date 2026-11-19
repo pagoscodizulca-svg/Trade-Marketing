@@ -1,13 +1,15 @@
 import { createSupabaseRepository } from './supabaseRepository';
 import { createUnconfiguredRepository } from './unconfiguredRepository';
+import { resolveRutaSupabaseConfig } from './supabaseAuth';
 import type { EntregasRepository } from './entregasRepository';
 
-const url = (import.meta.env?.VITE_SUPABASE_URL as string | undefined)?.trim();
-const key = (import.meta.env?.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+const { config, configError } = resolveRutaSupabaseConfig();
 
 /**
- * Repositorio único de la app: Supabase. Sin credenciales NO se usa ningún respaldo ni dato inventado:
- * se expone un repositorio "no configurado" (estado `error`, lista vacía).
+ * Repositorio único de la app: Supabase autenticado. Sin credenciales públicas válidas NO se usa
+ * ningún respaldo ni dato inventado: se expone un repositorio "no configurado" (estado `error`, lista vacía).
  */
 export const entregasRepo: EntregasRepository =
-  url && key ? createSupabaseRepository(url, key) : createUnconfiguredRepository();
+  config && !configError
+    ? createSupabaseRepository(config.url, config.publicKey)
+    : createUnconfiguredRepository(configError);

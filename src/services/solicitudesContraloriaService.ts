@@ -461,9 +461,40 @@ function emitSolicitudRealtimeBridge(
   }
 }
 
-function isDedicatedTableMissing(status: number, bodyText: string): boolean {
+export function resetSolicitudesBackendModeForTests(): void {
+  detectedBackendMode = 'unknown';
+}
+
+/**
+ * Determina de forma estricta si la tabla dedicada `public.solicitudes_contraloria`
+ * no existe en PostgREST/PostgreSQL.
+ * NUNCA retorna `true` en conflictos de unicidad (`409` / `23505`), errores RLS (`403`)
+ * ni errores de autenticación (`401`), cerrando el bug Split-Brain (`P-05`).
+ */
+export function isDedicatedTableMissing(status: number, bodyText: string): boolean {
+  if (status === 409 || status === 401 || status === 403 || status === 400 || status === 422 || status >= 500) {
+    return false;
+  }
+  const cleanBody = String(bodyText || '');
+  if (status === 404) {
+    if (!cleanBody.trim()) return true;
+    return /PGRST205|42P01|could not find the table|relation .* does not exist/i.test(cleanBody);
+  }
+  return /\bPGRST205\b|\b42P01\b|could not find the table ['"]?(?:public\.)?solicitudes_contraloria['"]?|relation ["']?(?:public\.)?solicitudes_contraloria["']? does not exist/i.test(
+    cleanBody
+  );
+}
+
+function isRpcNotFoundError(status: number, bodyText: string): boolean {
   if (status === 404) return true;
-  return /solicitudes_contraloria|PGRST205|42P01|relation .* does not exist/i.test(bodyText);
+  return /\bPGRST202\b|\b42883\b|could not find the function|function .* does not exist/i.test(
+    String(bodyText || '')
+  );
+}
+
+function isUniqueCorrelativeCollision(status: number, bodyText: string): boolean {
+  if (status === 409) return true;
+  return /\b23505\b|duplicate key value violates unique constraint/i.test(String(bodyText || ''));
 }
 
 function sortAndDeduplicateSolicitudes(
@@ -567,47 +598,112 @@ export async function createSolicitudContraloriaInSupabase(
     throw new Error(validation.error || 'Datos de solicitud inválidos.');
   }
 
-  // Consultar estado actual en BD para evitar colisión de código correlativo MP-07-XXXX
-  // Sin respaldo local: si no se puede verificar el correlativo en el servidor, no se crea la solicitud.
-  const currentRemote: SolicitudProductoContraloria[] = await fetchSolicitudesContraloriaFromSupabase();
-
-  const existingCodes = new Set(
-    currentRemote.map((s) => s.codigoCorrelativo.trim().toUpperCase())
-  );
-
-  let finalCode = (input.codigoCorrelativo || '').trim().toUpperCase();
-  if (!finalCode || existingCodes.has(finalCode)) {
-    finalCode = computeNextSolicitudCorrelativeCode(currentRemote);
-  }
-
   const nowIso = new Date().toISOString();
   const fechaIso = input.fechaIso ? ddMmYyyyToIso(input.fechaIso) : getTodayVenezuelaIso();
   const fechaSolicitud = input.fechaSolicitud
     ? isoToDdMmYyyy(input.fechaSolicitud)
     : isoToDdMmYyyy(fechaIso);
 
-  const newSolicitud: SolicitudProductoContraloria = {
-    id: generateUuidV4(),
-    codigoCorrelativo: finalCode,
-    fechaSolicitud,
-    fechaIso,
-    dirigidoA: validation.normalizedDirigidoA,
-    paraSerUtilizado: validation.normalizedParaSerUtilizado,
-    items: validation.validItems,
-    totalUnidades: validation.totalUnidades,
-    observacion: validation.normalizedObservacion,
-    solicitadoPor: (input.solicitadoPor || '').trim() || 'Jefatura Trade Marketing',
-    firmaDigitalTexto: (input.firmaDigitalTexto || input.solicitadoPor || '').trim(),
-    firmaDigitalImagen: input.firmaDigitalImagen || undefined,
-    departamentoSolicitante:
-      (input.departamentoSolicitante || 'MERCADEO Y PUBLICIDAD').trim().toUpperCase(),
-    estado: 'PENDIENTE_APROBACION',
-    leidoContraloria: false,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  };
+  const solicitedBy = (input.solicitadoPor || '').trim() || 'Jefatura Trade Marketing';
+  const firmaDigitalTexto = (input.firmaDigitalTexto || input.solicitadoPor || '').trim();
+  const departamentoSolicitante = (
+    input.departamentoSolicitante || 'MERCADEO Y PUBLICIDAD'
+  )
+    .trim()
+    .toUpperCase();
 
+  // 1) Vía principal (Hito 4 / P-05): RPC atómica respaldada por secuencia PostgreSQL `seq_mp07_correlativo`
   if (detectedBackendMode !== 'surveys_envelope') {
+    const rpcRes = await fetchWithRetry(`${SUPABASE_REST_URL}/rpc/rpc_crear_solicitud_contraloria`, {
+      method: 'POST',
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        p_payload: {
+          fecha_solicitud: fechaSolicitud,
+          fecha_iso: fechaIso,
+          dirigido_a: validation.normalizedDirigidoA,
+          para_ser_utilizado: validation.normalizedParaSerUtilizado,
+          items: validation.validItems,
+          total_unidades: validation.totalUnidades,
+          observacion: validation.normalizedObservacion,
+          solicitado_por: solicitedBy,
+          firma_digital_texto: firmaDigitalTexto || null,
+          firma_digital_imagen: input.firmaDigitalImagen || null,
+          departamento_solicitante: departamentoSolicitante,
+        },
+      }),
+    });
+
+    if (rpcRes.ok) {
+      detectedBackendMode = 'dedicated_table';
+      const rawRpcData = (await rpcRes.json()) as RawDedicatedSolicitudRow | RawDedicatedSolicitudRow[];
+      const rowObj = Array.isArray(rawRpcData) ? rawRpcData[0] : rawRpcData;
+      const confirmed = parseDedicatedSolicitudRow(rowObj);
+      if (confirmed) {
+        emitSolicitudRealtimeBridge('INSERT', confirmed);
+        return confirmed;
+      }
+    } else {
+      const rpcErr = await rpcRes.text().catch(() => '');
+      if (!isRpcNotFoundError(rpcRes.status, rpcErr)) {
+        throw new Error(
+          `No se pudo radicar la solicitud mediante RPC (${rpcRes.status}): ${rpcErr}`
+        );
+      }
+    }
+  }
+
+  // 2) Respaldo compatible sobre tabla dedicada con reintento ante colisión 409/23505 (CERO degradación a surveys)
+  const MAX_CORRELATIVE_RETRIES = 6;
+  let lastAttemptedSeq: number | null = null;
+  let finalSolicitudForSurveyFallback: SolicitudProductoContraloria | null = null;
+
+  for (let attempt = 0; attempt < MAX_CORRELATIVE_RETRIES; attempt++) {
+    const currentRemote: SolicitudProductoContraloria[] =
+      await fetchSolicitudesContraloriaFromSupabase();
+
+    const existingCodes = new Set(
+      currentRemote.map((s) => s.codigoCorrelativo.trim().toUpperCase())
+    );
+
+    let finalCode = attempt === 0 ? (input.codigoCorrelativo || '').trim().toUpperCase() : '';
+    if (!finalCode || existingCodes.has(finalCode)) {
+      finalCode = computeNextSolicitudCorrelativeCode(currentRemote);
+    }
+    const candidateSeq = parseMp07SequenceNumber(finalCode);
+    if (lastAttemptedSeq !== null && candidateSeq !== null && candidateSeq <= lastAttemptedSeq) {
+      const bumped: number = lastAttemptedSeq + 1;
+      finalCode = `${CORRELATIVE_PREFIX}${String(bumped).padStart(4, '0')}`;
+      lastAttemptedSeq = bumped;
+    } else if (candidateSeq !== null) {
+      lastAttemptedSeq = candidateSeq;
+    }
+
+    const newSolicitud: SolicitudProductoContraloria = {
+      id: generateUuidV4(),
+      codigoCorrelativo: finalCode,
+      fechaSolicitud,
+      fechaIso,
+      dirigidoA: validation.normalizedDirigidoA,
+      paraSerUtilizado: validation.normalizedParaSerUtilizado,
+      items: validation.validItems,
+      totalUnidades: validation.totalUnidades,
+      observacion: validation.normalizedObservacion,
+      solicitadoPor: solicitedBy,
+      firmaDigitalTexto,
+      firmaDigitalImagen: input.firmaDigitalImagen || undefined,
+      departamentoSolicitante,
+      estado: 'PENDIENTE_APROBACION',
+      leidoContraloria: false,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    finalSolicitudForSurveyFallback = newSolicitud;
+
+    if (detectedBackendMode === 'surveys_envelope') {
+      break;
+    }
+
     const dedicatedPayload = {
       id: newSolicitud.id,
       codigo_correlativo: newSolicitud.codigoCorrelativo,
@@ -642,14 +738,25 @@ export async function createSolicitudContraloriaInSupabase(
     }
 
     const errText = await dedicatedRes.text().catch(() => '');
+    if (isUniqueCorrelativeCollision(dedicatedRes.status, errText)) {
+      if (attempt < MAX_CORRELATIVE_RETRIES - 1) {
+        continue;
+      }
+      throw new Error(
+        `Colisión concurrente persistente al generar correlativo MP-07-XXXX tras ${MAX_CORRELATIVE_RETRIES} intentos.`
+      );
+    }
+
     if (isDedicatedTableMissing(dedicatedRes.status, errText)) {
       detectedBackendMode = 'surveys_envelope';
-    } else {
-      throw new Error(`No se pudo radicar la solicitud (${dedicatedRes.status}): ${errText}`);
+      break;
     }
+
+    throw new Error(`No se pudo radicar la solicitud (${dedicatedRes.status}): ${errText}`);
   }
 
-  // Persistencia en vivo sobre `public.surveys` con `type = 'SolicitudContraloria'`
+  // Persistencia de compatibilidad en `public.surveys` ÚNICAMENTE cuando `solicitudes_contraloria` no existe (404/PGRST205/42P01)
+  const newSolicitud = finalSolicitudForSurveyFallback!;
   const envelopePayload = buildSurveyEnvelopePayload(newSolicitud);
   const surveyRes = await fetchWithRetry(`${SUPABASE_REST_URL}/surveys`, {
     method: 'POST',

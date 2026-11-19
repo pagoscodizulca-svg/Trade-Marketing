@@ -6,15 +6,18 @@ export const APP_CLEAN_SYNC_VERSION = 'production-v1';
 
 const VERSION_KEY = 'rutadegustacion:clean_sync_version';
 const PREFIJO_PROPIO = 'rutadegustacion:v1:';
-/** Claves de sesión de Supabase Auth que se conservan. */
-const esClaveAuth = (k: string) => k.startsWith('sb-');
+/** Claves de sesión de Supabase Auth y perfil corporativo que se conservan siempre. */
+export const esClaveAuth = (k: string) =>
+  k.startsWith('sb-') || k.startsWith('codizulca.') || k.startsWith('codizulca_');
 /**
  * Bases IndexedDB que se conservan: autenticación y la base OFFLINE del chofer, que solo contiene datos reales
  * (copia del servidor + acciones pendientes de subir). Borrarla haría perder entregas aún no sincronizadas.
  */
 export const BASE_OFFLINE = 'rutadegustacion-offline';
-const esBaseAuth = (nombre: string) =>
-  nombre === BASE_OFFLINE || /^(sb-|supabase)/i.test(nombre) || /auth/i.test(nombre);
+export const esBaseAuth = (nombre: string) =>
+  nombre === BASE_OFFLINE ||
+  /^(sb-|supabase|codizulca|trade-)/i.test(nombre) ||
+  /auth/i.test(nombre);
 
 function borrarPrefijo(storage: Storage) {
   const claves: string[] = [];

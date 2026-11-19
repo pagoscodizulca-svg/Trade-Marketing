@@ -1,7 +1,17 @@
-import type { Session, User as SupabaseAuthUser } from '@supabase/supabase-js';
+import type { Session, SupabaseClient, User as SupabaseAuthUser } from '@supabase/supabase-js';
 import type { UserRole } from '../types';
-import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
-import { isManagedUserRole, type ManagedUserRole } from './userManagementService';
+import {
+  UNIFIED_SUPABASE_STORAGE_KEY,
+  getSupabaseClient,
+  isSupabaseConfigured,
+} from './supabaseClient';
+import {
+  isSucursalValidForRole,
+  normalizeManagedUserRole,
+  normalizeSucursalCodigo,
+  type ManagedUserRole,
+  type SucursalCodigo,
+} from './userManagementService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -9,14 +19,17 @@ const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 export const GENERIC_INVALID_CREDENTIALS_MESSAGE = 'Correo o contraseña incorrectos';
 export const PORTAL_UNAUTHORIZED_ACCESS_MESSAGE =
   'Acceso no habilitado: tu correo no figura como promotora activa en el registro de Personal.';
+export const MENSAJE_PERFIL_NO_ACTIVO =
+  'Tu correo no tiene perfil activo asignado. Contacta al Administrador General';
 
 export type CanonicalAppRole =
   | 'admin'
   | 'contraloria'
   | 'coordinadora'
-  | 'supervisor'
   | 'promotora'
-  | 'fdv';
+  | 'fdv'
+  | 'cliente'
+  | 'chofer';
 
 export interface VerifiedAuthProfile {
   userId: string;
@@ -24,6 +37,7 @@ export interface VerifiedAuthProfile {
   displayName: string;
   appRole: CanonicalAppRole | null;
   iamRole: ManagedUserRole | null;
+  sucursal: SucursalCodigo | null;
   rawAppRole: string;
   legacyRole: UserRole;
   staffId: string | null;
@@ -32,25 +46,107 @@ export interface VerifiedAuthProfile {
   mustChangePassword: boolean;
 }
 
-/**
- * Normaliza estrictamente un correo electrónico (`email.trim().toLowerCase()`).
- */
+export interface SesionPerfilUnificado {
+  userId: string;
+  email: string;
+  rol: ManagedUserRole;
+  sucursal: SucursalCodigo;
+  nombreCompleto: string;
+  staffId: string | null;
+  etiquetaSede: string;
+}
+
 export function normalizePortalEmail(rawEmail: string): string {
   return String(rawEmail ?? '').trim().toLowerCase();
 }
 
-/**
- * Valida formato sintáctico seguro de correo electrónico antes de invocar red.
- */
 export function isValidPortalEmailFormat(rawEmail: string): boolean {
   const normalized = normalizePortalEmail(rawEmail);
   return normalized.length >= 5 && normalized.length <= 254 && STRICT_EMAIL_REGEX.test(normalized);
 }
 
+export function esUuidValido(valor: unknown): boolean {
+  return UUID_REGEX.test(String(valor ?? '').trim());
+}
+
+export function sanitizarTextoEntrada(texto: unknown, maxLongitud = 500): string {
+  const limite = Math.max(1, Math.min(Math.trunc(maxLongitud) || 500, 4000));
+  return String(texto ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim()
+    .slice(0, limite);
+}
+
+/**
+ * Etiqueta de sede oficial para el encabezado e insignias DOM seguras.
+ */
+export function obtenerEtiquetaSede(
+  rol: ManagedUserRole | string,
+  sucursal: SucursalCodigo | string | null | undefined
+): string {
+  const cleanRole = normalizeManagedUserRole(rol);
+  const cleanSucursal = normalizeSucursalCodigo(sucursal);
+
+  if (cleanRole === 'super_admin') {
+    return 'Administración General - Nacional';
+  }
+  if (cleanSucursal === 'GLOBAL' && cleanRole === 'contraloria') {
+    return 'Contraloría Nacional - Global';
+  }
+  if (cleanSucursal === 'ZULIA') {
+    return 'Sucursal Zulia';
+  }
+  if (cleanSucursal === 'VALENCIA') {
+    return 'Sucursal Valencia';
+  }
+  throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+}
+
+/**
+ * Renderiza la insignia de sede activa en el DOM usando exclusivamente `createElement` y `textContent`
+ * (cero sumideros de inyección HTML / cero XSS).
+ */
+export function renderizarInsigniaSedeSegura(
+  nodoContenedor: HTMLElement,
+  sesionPerfil: {
+    rol: ManagedUserRole | string;
+    sucursal: SucursalCodigo | string | null;
+    nombreCompleto: string;
+  }
+): void {
+  if (!nodoContenedor || typeof nodoContenedor.replaceChildren !== 'function') {
+    throw new Error('Se requiere un nodo DOM válido para pintar la etiqueta de sede.');
+  }
+
+  const doc = nodoContenedor.ownerDocument;
+  const rolNorm = normalizeManagedUserRole(sesionPerfil.rol);
+  if (!rolNorm) {
+    throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+  }
+  const sucursalNorm =
+    rolNorm === 'super_admin' ? 'GLOBAL' : normalizeSucursalCodigo(sesionPerfil.sucursal);
+  if (!sucursalNorm || !isSucursalValidForRole(rolNorm, sucursalNorm)) {
+    throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+  }
+
+  const textoSede = obtenerEtiquetaSede(rolNorm, sucursalNorm);
+
+  const badgeSede = doc.createElement('span');
+  badgeSede.className = 'trade-sede-badge';
+  badgeSede.dataset.rol = rolNorm;
+  badgeSede.dataset.sucursal = sucursalNorm;
+  badgeSede.textContent = textoSede;
+
+  const etiquetaUsuario = doc.createElement('strong');
+  etiquetaUsuario.className = 'trade-usuario-nombre';
+  etiquetaUsuario.textContent = sanitizarTextoEntrada(sesionPerfil.nombreCompleto, 160);
+
+  nodoContenedor.replaceChildren(badgeSede, doc.createTextNode(' · '), etiquetaUsuario);
+}
+
 /**
  * Detecta de forma síncrona si el navegador almacena un token de sesión de Supabase Auth
- * (`sb-*-auth-token`), permitiendo a los Route Guards retener el renderizado administrativo
- * en el frame 0 mientras se verifica criptográficamente el rol de la sesión.
+ * (`codizulca.supabase.auth.v1` o `sb-*-auth-token`).
  */
 export function hasStoredSupabaseAuthToken(): boolean {
   if (typeof window === 'undefined') return false;
@@ -58,7 +154,7 @@ export function hasStoredSupabaseAuthToken(): boolean {
     const storage = window.localStorage;
     for (let i = 0; i < storage.length; i += 1) {
       const key = storage.key(i);
-      if (key && (key === 'codizulca.supabase.auth.v1' || /^sb-.*-auth-token$/i.test(key))) {
+      if (key && (key === UNIFIED_SUPABASE_STORAGE_KEY || /^sb-.*-auth-token$/i.test(key))) {
         const val = storage.getItem(key);
         if (val && val.trim().length > 2) {
           return true;
@@ -71,12 +167,6 @@ export function hasStoredSupabaseAuthToken(): boolean {
   return false;
 }
 
-/**
- * Normaliza un identificador de acceso administrativo/corporativo:
- * - Si contiene `@`, conserva el correo electrónico en minúsculas.
- * - Si es un identificador corporativo sin `@`, genera el correo sintético determinista
- *   `<slug>@promotoras.codizulca.local` usado en el aprovisionamiento interno.
- */
 export function normalizeAuthLoginIdentifier(rawInput: string): string {
   const trimmed = String(rawInput || '').trim().toLowerCase();
   if (!trimmed) return '';
@@ -92,37 +182,15 @@ export function normalizeAuthLoginIdentifier(rawInput: string): string {
 }
 
 export function normalizeCanonicalAppRole(rawRole: unknown): CanonicalAppRole | null {
-  const clean = String(rawRole ?? '').trim().toLowerCase();
-  if (!clean) return null;
-  if (
-    clean === 'super_admin' ||
-    clean === 'admin' ||
-    clean === 'gerencia' ||
-    clean === 'gerente_admin' ||
-    clean === 'superadmin'
-  ) {
-    return 'admin';
-  }
-  if (clean === 'contraloria' || clean === 'analista_contraloria' || clean === 'contralor') {
-    return 'contraloria';
-  }
-  if (
-    clean === 'coordinacion' ||
-    clean === 'coordinadora' ||
-    clean === 'coordinadora_trade' ||
-    clean === 'jefe_trade'
-  ) {
-    return 'coordinadora';
-  }
-  if (clean === 'supervisor' || clean === 'supervisora' || clean === 'supervisor_trade') {
-    return 'supervisor';
-  }
-  if (clean === 'promotora') {
-    return 'promotora';
-  }
-  if (clean === 'fdv' || clean === 'vendedor' || clean === 'fuerza_ventas') {
-    return 'fdv';
-  }
+  const iamRole = normalizeManagedUserRole(rawRole);
+  if (!iamRole) return null;
+  if (iamRole === 'super_admin') return 'admin';
+  if (iamRole === 'contraloria') return 'contraloria';
+  if (iamRole === 'coordinacion') return 'coordinadora';
+  if (iamRole === 'promotora') return 'promotora';
+  if (iamRole === 'vendedor') return 'fdv';
+  if (iamRole === 'cliente') return 'cliente';
+  if (iamRole === 'chofer') return 'chofer';
   return null;
 }
 
@@ -130,62 +198,35 @@ function mapToLegacyUserRole(rawRole: string, canonical: CanonicalAppRole | null
   if (canonical === 'contraloria' || rawRole === 'analista_contraloria') {
     return 'analista_contraloria';
   }
-  if (canonical === 'supervisor' || rawRole === 'supervisor') {
-    return 'supervisor';
-  }
   if (canonical === 'admin') return 'gerente_admin';
   if (canonical === 'coordinadora') return 'jefe_trade';
   return 'promotora';
 }
 
-function resolveFallbackIamRole(rawAppRole: string): ManagedUserRole | null {
-  const clean = String(rawAppRole ?? '').trim().toLowerCase();
-  if (isManagedUserRole(clean)) {
-    return clean;
-  }
-  if (
-    clean === 'superadmin' ||
-    clean === 'admin' ||
-    clean === 'gerencia' ||
-    clean === 'gerente_admin'
-  ) {
-    return 'super_admin';
-  }
-  if (clean === 'analista_contraloria' || clean === 'contralor') {
-    return 'contraloria';
-  }
-  if (
-    clean === 'coordinadora' ||
-    clean === 'coordinadora_trade' ||
-    clean === 'jefe_trade'
-  ) {
-    return 'coordinacion';
-  }
-  if (clean === 'supervisora' || clean === 'supervisor_trade') {
-    return 'supervisor';
-  }
-  if (clean === 'fdv' || clean === 'fuerza_ventas') {
-    return 'vendedor';
+function isTradeCoordinatorOrAdminCanonical(role: CanonicalAppRole | null): boolean {
+  return role === 'admin' || role === 'coordinadora';
+}
+
+function canCanonicalRoleAccessTorre(role: CanonicalAppRole | null): boolean {
+  return role === 'admin' || role === 'contraloria' || role === 'coordinadora';
+}
+
+function resolveSucursalForIamRole(
+  iamRole: ManagedUserRole | null,
+  rawSucursal: unknown
+): SucursalCodigo | null {
+  if (!iamRole) return null;
+  if (iamRole === 'super_admin') return 'GLOBAL';
+  const normalized = normalizeSucursalCodigo(rawSucursal);
+  if (normalized && isSucursalValidForRole(iamRole, normalized)) {
+    return normalized;
   }
   return null;
 }
 
-function isTradeCoordinatorOrAdminCanonical(role: CanonicalAppRole | null): boolean {
-  return role === 'admin' || role === 'coordinadora' || role === 'supervisor';
-}
-
-function canCanonicalRoleAccessTorre(role: CanonicalAppRole | null): boolean {
-  return (
-    role === 'admin' ||
-    role === 'contraloria' ||
-    role === 'coordinadora' ||
-    role === 'supervisor'
-  );
-}
-
 /**
  * Extrae el perfil verificado EXCLUSIVAMENTE desde `app_metadata` (`raw_app_meta_data` firmado en servidor).
- * REGLA DE SEGURIDAD: Jamás lee roles ni `staff_id` desde `user_metadata` (editable por el cliente).
+ * REGLA DE SEGURIDAD: Jamás lee roles, sucursal ni `staff_id` desde `user_metadata`.
  */
 export function extractVerifiedProfileFromAuthUser(
   user: SupabaseAuthUser | null | undefined
@@ -196,13 +237,14 @@ export function extractVerifiedProfileFromAuthUser(
   const rawAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
     .trim()
     .toLowerCase();
+  const iamRole = normalizeManagedUserRole(rawAppRole);
   const appRole = normalizeCanonicalAppRole(rawAppRole);
+  const sucursal = resolveSucursalForIamRole(iamRole, appMeta.sucursal);
 
   const rawStaffId = String(appMeta.staff_id ?? '').trim();
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
 
   const email = normalizePortalEmail(user.email || '');
-  const iamRole = resolveFallbackIamRole(rawAppRole);
   const safeNameFromMeta = String(appMeta.display_name ?? '').trim();
   const displayName =
     safeNameFromMeta ||
@@ -214,6 +256,7 @@ export function extractVerifiedProfileFromAuthUser(
     displayName,
     appRole,
     iamRole,
+    sucursal,
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
@@ -227,12 +270,9 @@ interface ActivePromotoraStaffMatch {
   staffId: string;
   name: string;
   email: string;
+  sucursal: SucursalCodigo | null;
 }
 
-/**
- * Verifica en `public.staff` (Pestaña de Personal) que exista una promotora ACTIVA
- * para el correo normalizado (o `auth_user_id` con correo activo coincidente).
- */
 async function findActivePromotoraInStaff(
   userId: string,
   normalizedEmail: string
@@ -244,7 +284,7 @@ async function findActivePromotoraInStaff(
     try {
       const { data: rows, error: emailError } = await client
         .from('staff')
-        .select('id, name, email, role, status')
+        .select('id, name, email, role, status, sucursal')
         .ilike('email', normalizedEmail)
         .limit(5);
 
@@ -266,6 +306,7 @@ async function findActivePromotoraInStaff(
             staffId: String(matched.id),
             name: String(matched.name || '').trim(),
             email: normalizedEmail,
+            sucursal: normalizeSucursalCodigo((matched as { sucursal?: unknown }).sucursal),
           };
         }
       }
@@ -278,7 +319,7 @@ async function findActivePromotoraInStaff(
     try {
       const { data, error } = await client
         .from('staff')
-        .select('id, name, email, role, status')
+        .select('id, name, email, role, status, sucursal')
         .eq('auth_user_id', userId)
         .maybeSingle();
 
@@ -292,6 +333,7 @@ async function findActivePromotoraInStaff(
             staffId: String(data.id),
             name: String(data.name || '').trim(),
             email: rowEmail || normalizedEmail,
+            sucursal: normalizeSucursalCodigo((data as { sucursal?: unknown }).sucursal),
           };
         }
       }
@@ -304,10 +346,8 @@ async function findActivePromotoraInStaff(
 }
 
 /**
- * Resuelve el perfil verificado vinculando contra `public.staff`:
- * - Para `coordinadora`, `admin` o `fdv`, respeta el rol firmado en `app_metadata`.
- * - Para cuentas de campo / promotoras, verifica siempre estado activo en `public.staff`
- *   para impedir acceso de registros marcados como `Inactivo`.
+ * Resuelve el perfil verificado desde la fuente única `public.profiles` (con respaldo a
+ * `public.staff` para promotoras activas en `/portal`).
  */
 export async function resolveVerifiedProfileWithStaffFallback(
   session: Session | null
@@ -321,7 +361,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
     const client = getSupabaseClient();
     const { data: iamProfile, error: iamError } = await client
       .from('profiles')
-      .select('role, full_name, is_active, must_change_password')
+      .select('role, sucursal, full_name, is_active, must_change_password')
       .eq('id', base.userId)
       .maybeSingle();
 
@@ -330,17 +370,41 @@ export async function resolveVerifiedProfileWithStaffFallback(
         return null;
       }
       const rawIamRole = String(iamProfile.role ?? '').trim().toLowerCase();
+      const iamRole = normalizeManagedUserRole(rawIamRole);
       const iamCanonical = normalizeCanonicalAppRole(rawIamRole);
-      if (iamCanonical) {
+      if (iamCanonical && iamRole) {
         const iamFullName = String(iamProfile.full_name ?? '').trim();
+        const sucursal =
+          resolveSucursalForIamRole(iamRole, (iamProfile as { sucursal?: unknown }).sucursal) ??
+          base.sucursal;
+
+        if (iamRole === 'promotora') {
+          const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
+          return {
+            ...base,
+            email: activeStaff?.email || normalizedEmail,
+            displayName: iamFullName || activeStaff?.name || base.displayName,
+            appRole: 'promotora',
+            iamRole: 'promotora',
+            sucursal: sucursal ?? activeStaff?.sucursal ?? null,
+            rawAppRole: 'promotora',
+            legacyRole: 'promotora',
+            staffId: activeStaff?.staffId ?? base.staffId,
+            isCoordinatorOrAdmin: false,
+            canAccessTorreControl: false,
+            mustChangePassword: Boolean(iamProfile.must_change_password),
+          };
+        }
+
         return {
           ...base,
           email: normalizedEmail,
           displayName: iamFullName || base.displayName,
           appRole: iamCanonical,
-          iamRole: resolveFallbackIamRole(rawIamRole),
-          rawAppRole: rawIamRole,
-          legacyRole: mapToLegacyUserRole(rawIamRole, iamCanonical),
+          iamRole,
+          sucursal,
+          rawAppRole: iamRole,
+          legacyRole: mapToLegacyUserRole(iamRole, iamCanonical),
           isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(iamCanonical),
           canAccessTorreControl: canCanonicalRoleAccessTorre(iamCanonical),
           mustChangePassword: Boolean(iamProfile.must_change_password),
@@ -351,7 +415,12 @@ export async function resolveVerifiedProfileWithStaffFallback(
     // Si public.profiles aún no está disponible, continúa con verificación JWT/staff
   }
 
-  if (base.canAccessTorreControl || base.appRole === 'fdv') {
+  if (
+    base.canAccessTorreControl ||
+    base.appRole === 'fdv' ||
+    base.appRole === 'cliente' ||
+    base.appRole === 'chofer'
+  ) {
     return { ...base, email: normalizedEmail };
   }
 
@@ -361,6 +430,8 @@ export async function resolveVerifiedProfileWithStaffFallback(
       ...base,
       email: activeStaff.email || normalizedEmail,
       appRole: 'promotora',
+      iamRole: 'promotora',
+      sucursal: activeStaff.sucursal ?? base.sucursal,
       rawAppRole: base.rawAppRole || 'promotora',
       legacyRole: 'promotora',
       staffId: activeStaff.staffId,
@@ -371,7 +442,6 @@ export async function resolveVerifiedProfileWithStaffFallback(
     };
   }
 
-  // Si tenía rol promotora en JWT pero ya no existe o fue desactivada en Personal, limpia staffId
   return {
     ...base,
     email: normalizedEmail,
@@ -380,10 +450,133 @@ export async function resolveVerifiedProfileWithStaffFallback(
 }
 
 /**
- * Valida post-login que la sesión activa en `/portal` pertenezca estrictamente a una promotora
- * cuyo correo normalizado exista y esté activo en el registro de Personal (`public.staff`).
- * Si el usuario no está autorizado o está inactivo, cierra la sesión de forma controlada.
+ * Guardia unificada de autenticación contra `public.profiles` (Hito 1 · N-02 / N-03):
+ *  - Autentica por correo y contraseña usando el cliente único TS.
+ *  - Verifica que exista fila activa en `public.profiles` con `sucursal` válida para el rol.
+ *  - Si el usuario no tiene perfil en `public.profiles`, está suspendido (`is_active = false`) o
+ *    carece de sede válida, ejecuta `signOut()` inmediatamente y falla de forma segura.
  */
+export async function iniciarSesionPorCorreo(
+  rawEmail: string,
+  rawPassword: string,
+  opciones: { client?: SupabaseClient } = {}
+): Promise<SesionPerfilUnificado> {
+  const email = normalizePortalEmail(rawEmail);
+  if (!isValidPortalEmailFormat(email)) {
+    throw new Error('Ingresa un correo electrónico válido.');
+  }
+
+  const clave = String(rawPassword ?? '');
+  if (clave.trim().length === 0 || clave.length > 256) {
+    throw new Error('Ingresa tu contraseña para continuar.');
+  }
+
+  const client = opciones.client ?? getSupabaseClient();
+  const { data: authData, error: authError } = await client.auth.signInWithPassword({
+    email,
+    password: clave,
+  });
+
+  if (authError || !authData?.user?.id || !esUuidValido(authData.user.id)) {
+    throw new Error(GENERIC_INVALID_CREDENTIALS_MESSAGE);
+  }
+
+  try {
+    const { data: filaPerfil, error: perfilError } = await client
+      .from('profiles')
+      .select('id, email, full_name, role, sucursal, is_active')
+      .eq('id', authData.user.id)
+      .maybeSingle();
+
+    if (perfilError || !filaPerfil || filaPerfil.is_active !== true) {
+      await client.auth.signOut();
+      throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+    }
+
+    const rol = normalizeManagedUserRole(filaPerfil.role);
+    const sucursal =
+      rol === 'super_admin'
+        ? 'GLOBAL'
+        : normalizeSucursalCodigo((filaPerfil as { sucursal?: unknown }).sucursal);
+
+    if (!rol || !sucursal || !isSucursalValidForRole(rol, sucursal)) {
+      await client.auth.signOut();
+      throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+    }
+
+    const rawStaffId = String(
+      ((authData.user.app_metadata ?? {}) as Record<string, unknown>).staff_id ?? ''
+    ).trim();
+    const staffId = esUuidValido(rawStaffId) ? rawStaffId : null;
+    const nombreCompleto =
+      sanitizarTextoEntrada(filaPerfil.full_name, 160) || 'Usuario Trade Marketing';
+
+    return {
+      userId: authData.user.id,
+      email: normalizePortalEmail(String(filaPerfil.email || email)),
+      rol,
+      sucursal,
+      nombreCompleto,
+      staffId,
+      etiquetaSede: obtenerEtiquetaSede(rol, sucursal),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message === MENSAJE_PERFIL_NO_ACTIVO) {
+      throw err;
+    }
+    await client.auth.signOut().catch(() => {});
+    throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
+  }
+}
+
+export async function verificarSesionActiva(
+  opciones: { client?: SupabaseClient } = {}
+): Promise<SesionPerfilUnificado | null> {
+  const client = opciones.client ?? getSupabaseClient();
+  const { data: userData, error: userErr } = await client.auth.getUser();
+
+  if (userErr || !userData?.user?.id || !esUuidValido(userData.user.id)) {
+    return null;
+  }
+
+  const { data: filaPerfil, error: perfilError } = await client
+    .from('profiles')
+    .select('id, email, full_name, role, sucursal, is_active')
+    .eq('id', userData.user.id)
+    .maybeSingle();
+
+  if (perfilError || !filaPerfil || filaPerfil.is_active !== true) {
+    await client.auth.signOut().catch(() => {});
+    return null;
+  }
+
+  const rol = normalizeManagedUserRole(filaPerfil.role);
+  const sucursal =
+    rol === 'super_admin'
+      ? 'GLOBAL'
+      : normalizeSucursalCodigo((filaPerfil as { sucursal?: unknown }).sucursal);
+
+  if (!rol || !sucursal || !isSucursalValidForRole(rol, sucursal)) {
+    await client.auth.signOut().catch(() => {});
+    return null;
+  }
+
+  const rawStaffId = String(
+    ((userData.user.app_metadata ?? {}) as Record<string, unknown>).staff_id ?? ''
+  ).trim();
+
+  return {
+    userId: userData.user.id,
+    email: normalizePortalEmail(String(filaPerfil.email || userData.user.email || '')),
+    rol,
+    sucursal,
+    nombreCompleto:
+      sanitizarTextoEntrada(filaPerfil.full_name, 160) || 'Usuario Trade Marketing',
+    staffId: esUuidValido(rawStaffId) ? rawStaffId : null,
+    etiquetaSede: obtenerEtiquetaSede(rol, sucursal),
+  };
+}
+
 export async function verifyActivePromotoraPortalAccess(session: Session | null): Promise<{
   profile: VerifiedAuthProfile | null;
   unauthorizedReason: string | null;
@@ -417,7 +610,8 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
       ...base,
       email: activeStaff.email || normalizedEmail,
       appRole: 'promotora',
-      iamRole: null,
+      iamRole: 'promotora',
+      sucursal: activeStaff.sucursal ?? base.sucursal,
       rawAppRole: 'promotora',
       legacyRole: 'promotora',
       staffId: activeStaff.staffId,
@@ -430,15 +624,6 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
   };
 }
 
-/**
- * Autenticación exclusiva y blindada para `/portal` (App de Promotoras):
- * 1. Normaliza correo con `email.trim().toLowerCase()` y valida formato antes de invocar red.
- * 2. Autentica únicamente vía `supabase.auth.signInWithPassword({ email, password })`.
- * 3. Previene enumeración de usuarios respondiendo siempre `"Correo o contraseña incorrectos"`
- *    ante cualquier fallo de credenciales.
- * 4. Verifica que el correo exista y esté activo en `public.staff` (Personal); de lo contrario,
- *    cierra la sesión (`signOut`) de forma controlada e informa acceso no habilitado.
- */
 export async function signInPromotoraPortalWithPassword(
   rawEmail: string,
   rawPassword: string
@@ -514,17 +699,13 @@ export async function getActiveAccessToken(): Promise<string | null> {
   return data.session?.access_token ?? null;
 }
 
-/**
- * Solicita al backend seguro (`POST /api/admin/staff-auth`) aprovisionar o actualizar
- * la credencial de una promotora/coordinadora en `auth.users` con `app_metadata` inmutable,
- * sin almacenar contraseñas en texto plano dentro de `public.staff`.
- */
 export async function provisionStaffAuthAccountViaBackend(params: {
   staffId: string;
   name: string;
   email?: string;
   password?: string;
   appRole?: 'promotora' | 'coordinadora' | 'admin';
+  sucursal?: 'ZULIA' | 'VALENCIA';
   active?: boolean;
 }): Promise<{ authUserId: string; loginEmail: string }> {
   const token = await getActiveAccessToken();
@@ -544,6 +725,7 @@ export async function provisionStaffAuthAccountViaBackend(params: {
       email: params.email || '',
       password: params.password || '',
       appRole: params.appRole || 'promotora',
+      ...(params.sucursal ? { sucursal: params.sucursal } : {}),
       active: params.active !== false,
     }),
   });

@@ -76,29 +76,34 @@ export async function seedQaEnvironment() {
     },
   });
 
+  const qaSucursal = 'ZULIA';
   const actorSpecs = [
     {
       key: 'qa_vendedor',
       email: `qa_vendedor.${hexLower}@qa-sync.codizulca.internal`,
       appRole: 'vendedor',
+      sucursal: qaSucursal,
       fullName: `${tagPrefix} VENDEDOR FICTICIO QA`,
     },
     {
       key: 'qa_planificador',
       email: `qa_planificador.${hexLower}@qa-sync.codizulca.internal`,
-      appRole: 'coordinadora',
+      appRole: 'coordinacion',
+      sucursal: qaSucursal,
       fullName: `${tagPrefix} PLANIFICADOR TRADE QA`,
     },
     {
       key: 'qa_promotora_a',
       email: `qa_promotora_a.${hexLower}@qa-sync.codizulca.internal`,
       appRole: 'promotora',
+      sucursal: qaSucursal,
       fullName: `${tagPrefix} PROMOTORA A QA`,
     },
     {
       key: 'qa_promotora_b',
       email: `qa_promotora_b.${hexLower}@qa-sync.codizulca.internal`,
       appRole: 'promotora',
+      sucursal: qaSucursal,
       fullName: `${tagPrefix} PROMOTORA B QA`,
     },
   ];
@@ -117,6 +122,7 @@ export async function seedQaEnvironment() {
       app_metadata: {
         app_role: spec.appRole,
         role: spec.appRole,
+        sucursal: spec.sucursal,
         qa_run_id: runId,
       },
       user_metadata: {
@@ -139,14 +145,68 @@ export async function seedQaEnvironment() {
       pk_column: 'id',
       id: data.user.id,
       run_id: runId,
-      meta: { actor: spec.key, email: spec.email },
+      meta: { actor: spec.key, email: spec.email, sucursal: spec.sucursal },
     });
+
+    // Aprovisionar fuente única de identidad en `public.profiles` (Hito 1)
+    let profileRes = await adminClient
+      .from('profiles')
+      .upsert(
+        {
+          id: data.user.id,
+          email: spec.email,
+          full_name: spec.fullName,
+          role: spec.appRole,
+          sucursal: spec.sucursal,
+          is_active: true,
+        },
+        { onConflict: 'id' }
+      )
+      .select('id')
+      .maybeSingle();
+
+    if (profileRes.error && isMissingTableOrColError(profileRes.error)) {
+      // Compatibilidad con esquemas previos a la columna `sucursal` en `profiles`
+      profileRes = await adminClient
+        .from('profiles')
+        .upsert(
+          {
+            id: data.user.id,
+            email: spec.email,
+            full_name: spec.fullName,
+            role: spec.appRole,
+            is_active: true,
+          },
+          { onConflict: 'id' }
+        )
+        .select('id')
+        .maybeSingle();
+    }
+
+    if (!profileRes.error && profileRes.data?.id) {
+      recordLedgerEntry({
+        resource_type: 'db_row',
+        schema: 'public',
+        table_or_bucket: 'profiles',
+        pk_column: 'id',
+        id: profileRes.data.id,
+        run_id: runId,
+        meta: { actor: spec.key, role: spec.appRole, sucursal: spec.sucursal },
+      });
+    } else if (profileRes.error && !isMissingTableOrColError(profileRes.error)) {
+      throw new Error(
+        `Error aprovisionando public.profiles para ${spec.key}: ${redactSensitive(
+          profileRes.error.message
+        )}`
+      );
+    }
 
     usersInMemory[spec.key] = {
       id: data.user.id,
       email: spec.email,
       password,
       appRole: spec.appRole,
+      sucursal: spec.sucursal,
       fullName: spec.fullName,
       staffId: null,
     };
@@ -175,9 +235,25 @@ export async function seedQaEnvironment() {
         email: actor.email,
         status: statusJson,
         auth_user_id: actor.id,
+        sucursal: qaSucursal,
       })
       .select('id')
       .single();
+
+    if (staffRes.error && isMissingTableOrColError(staffRes.error)) {
+      staffRes = await adminClient
+        .from('staff')
+        .insert({
+          id: staffUuid,
+          name: actor.fullName,
+          role: 'Promotora Fija',
+          email: actor.email,
+          status: statusJson,
+          auth_user_id: actor.id,
+        })
+        .select('id')
+        .single();
+    }
 
     if (staffRes.error && isMissingTableOrColError(staffRes.error)) {
       staffRes = await adminClient
@@ -219,7 +295,7 @@ export async function seedQaEnvironment() {
   let vendedorRowId = null;
 
   await pacer.pace();
-  const vendRes = await adminClient
+  let vendRes = await adminClient
     .from('vendedores')
     .insert({
       codigo_vendedor: sellerCode,
@@ -227,11 +303,28 @@ export async function seedQaEnvironment() {
       zona: 'ZONA QA',
       telefono: '+584120000000',
       email: usersInMemory.qa_vendedor.email,
+      sucursal: qaSucursal,
       activo: true,
       metadata: { qa_run_id: runId, tag: tagPrefix },
     })
     .select('id, codigo_vendedor')
     .single();
+
+  if (vendRes.error && isMissingTableOrColError(vendRes.error)) {
+    vendRes = await adminClient
+      .from('vendedores')
+      .insert({
+        codigo_vendedor: sellerCode,
+        nombre_completo: usersInMemory.qa_vendedor.fullName,
+        zona: 'ZONA QA',
+        telefono: '+584120000000',
+        email: usersInMemory.qa_vendedor.email,
+        activo: true,
+        metadata: { qa_run_id: runId, tag: tagPrefix },
+      })
+      .select('id, codigo_vendedor')
+      .single();
+  }
 
   if (!vendRes.error && vendRes.data?.id) {
     vendedorRowId = vendRes.data.id;
@@ -257,7 +350,7 @@ export async function seedQaEnvironment() {
   let clienteRowId = null;
 
   await pacer.pace();
-  const cliRes = await adminClient
+  let cliRes = await adminClient
     .from('clientes')
     .insert({
       codigo_cliente: clientCode,
@@ -269,11 +362,32 @@ export async function seedQaEnvironment() {
       direccion: `${tagPrefix} AVENIDA PRUEBA NO DESPACHAR`,
       zona: 'ZONA QA MARACAIBO',
       ruta: 'RUTA QA 99',
+      sucursal: qaSucursal,
       activo: true,
       metadata: { qa_run_id: runId, synthetic_only: true },
     })
     .select('id, codigo_cliente, razon_social')
     .single();
+
+  if (cliRes.error && isMissingTableOrColError(cliRes.error)) {
+    cliRes = await adminClient
+      .from('clientes')
+      .insert({
+        codigo_cliente: clientCode,
+        razon_social: clientName,
+        rif: `J-0000${hexUpper.slice(0, 4)}-0`,
+        vendedor_id: vendedorRowId,
+        codigo_vendedor: sellerCode,
+        telefono: '+584140009999',
+        direccion: `${tagPrefix} AVENIDA PRUEBA NO DESPACHAR`,
+        zona: 'ZONA QA MARACAIBO',
+        ruta: 'RUTA QA 99',
+        activo: true,
+        metadata: { qa_run_id: runId, synthetic_only: true },
+      })
+      .select('id, codigo_cliente, razon_social')
+      .single();
+  }
 
   if (!cliRes.error && cliRes.data?.id) {
     clienteRowId = cliRes.data.id;

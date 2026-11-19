@@ -170,9 +170,44 @@ export interface RutaPromotoraRecord {
   estado_ruta: EstadoRutaPromotora;
   checkin_at: string | null;
   checkout_at: string | null;
+  checkin_lat?: number | null;
+  checkin_lng?: number | null;
+  checkin_accuracy_m?: number | null;
+  checkin_distancia_m?: number | null;
+  checkin_dentro_geocerca?: boolean | null;
+  checkout_lat?: number | null;
+  checkout_lng?: number | null;
+  checkout_accuracy_m?: number | null;
+  checkout_distancia_m?: number | null;
+  checkout_dentro_geocerca?: boolean | null;
+  pdv_lat_referencia?: number | null;
+  pdv_lng_referencia?: number | null;
+  pdv_radio_geocerca_m?: number | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'GLOBAL' | null;
   aprobado_por: string | null;
   asignado_at: string;
   updated_at: string;
+}
+
+/**
+ * Datos operativos de ejecución en PDV capturados en `/portal` al cerrar una degustación (`B-08`).
+ */
+export interface EjecucionPdvInput {
+  lote_producto: string;
+  fecha_vencimiento?: string | null;
+  unidades_abiertas: number;
+  muestras_entregadas: number;
+  ventas_asistidas_unidades: number;
+  observaciones: string;
+}
+
+export interface ResultadoEjecucionRutaPromotora {
+  ok: boolean;
+  ruta: RutaPromotoraRecord;
+  distancia_m: number | null;
+  radio_geocerca_m: number;
+  dentro_geocerca: boolean | null;
+  alerta_geocerca_registrada: boolean;
 }
 
 /**

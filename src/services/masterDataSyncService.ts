@@ -3,8 +3,11 @@ import * as XLSX from 'xlsx';
 import { z } from 'zod';
 import type { Store } from '../types';
 import type {
+  CadenaComercial,
+  CadenaComercialInput,
   Cliente,
   ClienteConVendedor,
+  ClienteCrudInput,
   ClienteSincronizacionInput,
   EntidadSincronizacion,
   ErrorFilaSincronizacion,
@@ -17,13 +20,19 @@ import type {
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
   Vendedor,
+  VendedorCrudInput,
   VendedorSincronizacionInput,
+  ZonaComercial,
+  ZonaComercialInput,
 } from '../types/masterData';
 import { getMasterDataSupabaseClient } from './supabaseClient';
 
 export type {
+  CadenaComercial,
+  CadenaComercialInput,
   Cliente,
   ClienteConVendedor,
+  ClienteCrudInput,
   ClienteSincronizacionInput,
   EntidadSincronizacion,
   ErrorFilaSincronizacion,
@@ -35,7 +44,10 @@ export type {
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
   Vendedor,
+  VendedorCrudInput,
   VendedorSincronizacionInput,
+  ZonaComercial,
+  ZonaComercialInput,
 } from '../types/masterData';
 
 /** Tamaño óptimo de lote para Supabase Plan Gratuito (entre 300 y 500 registros por RPC). */
@@ -1139,11 +1151,15 @@ interface EntradaCache<T> {
 
 const cacheVendedores = new Map<string, EntradaCache<Vendedor[]>>();
 const cacheClientes = new Map<string, EntradaCache<ClienteConVendedor[]>>();
+const cacheCadenas = new Map<string, EntradaCache<CadenaComercial[]>>();
+const cacheZonas = new Map<string, EntradaCache<ZonaComercial[]>>();
 const suscriptoresLocales = new Set<() => void>();
 
 export function invalidarCacheMaestros(): void {
   cacheVendedores.clear();
   cacheClientes.clear();
+  cacheCadenas.clear();
+  cacheZonas.clear();
   for (const listener of suscriptoresLocales) {
     try {
       listener();
@@ -1343,10 +1359,372 @@ export async function obtenerHistorialLotesSincronizacion(
   return (data ?? []) as unknown as LoteSincronizacion[];
 }
 
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const CadenaComercialCrudSchema = z.object({
+  id: z.string().regex(UUID_V4_REGEX).optional(),
+  codigo: z
+    .string()
+    .transform((v) => normalizarCodigoMaestro(v))
+    .refine((v) => v.length >= 2 && v.length <= 40, {
+      message: 'El código de cadena debe tener entre 2 y 40 caracteres.',
+    }),
+  nombre: z
+    .string()
+    .transform((v) => limpiarCeldaTexto(v))
+    .refine((v) => v.length >= 2 && v.length <= 160, {
+      message: 'El nombre de la cadena comercial es obligatorio (2-160 caracteres).',
+    }),
+  tipo_canal: z
+    .string()
+    .optional()
+    .default('Supermercado')
+    .transform((v) => limpiarCeldaTexto(v) || 'Supermercado'),
+  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  activo: z.boolean().optional().default(true),
+});
+
+export const ZonaComercialCrudSchema = z.object({
+  id: z.string().regex(UUID_V4_REGEX).optional(),
+  codigo: z
+    .string()
+    .transform((v) => normalizarCodigoMaestro(v))
+    .refine((v) => v.length >= 2 && v.length <= 40, {
+      message: 'El código de zona debe tener entre 2 y 40 caracteres.',
+    }),
+  nombre: z
+    .string()
+    .transform((v) => limpiarCeldaTexto(v))
+    .refine((v) => v.length >= 2 && v.length <= 160, {
+      message: 'El nombre de la zona es obligatorio (2-160 caracteres).',
+    }),
+  ciudad: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => limpiarCeldaTexto(v) || null),
+  estado: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => limpiarCeldaTexto(v) || null),
+  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  activo: z.boolean().optional().default(true),
+});
+
+export const ClienteCrudSchema = ClienteSincronizacionSchema.extend({
+  id: z.string().regex(UUID_V4_REGEX).optional(),
+  vendedor_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
+  cadena_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
+  zona_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
+  radio_geocerca_m: z.coerce
+    .number()
+    .int()
+    .min(25, 'El radio de geocerca mínimo es 25 m.')
+    .max(5000, 'El radio de geocerca máximo es 5000 m.')
+    .optional()
+    .default(150),
+  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  activo: z.boolean().optional().default(true),
+});
+
+export const VendedorCrudSchema = VendedorSincronizacionSchema.extend({
+  id: z.string().regex(UUID_V4_REGEX).optional(),
+  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  activo: z.boolean().optional().default(true),
+});
+
+export interface FiltrosCatalogoSimple {
+  soloActivos?: boolean;
+  busqueda?: string;
+  forzarRefresco?: boolean;
+}
+
+export async function obtenerCadenasComerciales(
+  filtros: FiltrosCatalogoSimple = {},
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<CadenaComercial[]> {
+  const soloActivos = filtros.soloActivos !== false;
+  const claveCache = JSON.stringify({
+    soloActivos,
+    busqueda: filtros.busqueda?.trim().toUpperCase() || '',
+  });
+  if (!filtros.forzarRefresco) {
+    const cached = cacheCadenas.get(claveCache);
+    if (cached && cached.expiraEn > Date.now()) return cached.datos;
+  }
+
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  let query = client
+    .from('cadenas_comerciales')
+    .select('*')
+    .order('nombre', { ascending: true });
+
+  if (soloActivos) query = query.eq('activo', true);
+  if (filtros.busqueda?.trim()) {
+    const term = sanitizarTerminoIlike(filtros.busqueda);
+    if (term) query = query.or(`codigo.ilike.%${term}%,nombre.ilike.%${term}%`);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Error consultando cadenas comerciales: ${error.message}`);
+  }
+  const rows = (data ?? []) as unknown as CadenaComercial[];
+  cacheCadenas.set(claveCache, { expiraEn: Date.now() + CACHE_TTL_MS, datos: rows });
+  return rows;
+}
+
+export async function guardarCadenaComercial(
+  input: CadenaComercialInput,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<CadenaComercial> {
+  const parsed = CadenaComercialCrudSchema.parse(input);
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const payload = {
+    codigo: parsed.codigo,
+    nombre: parsed.nombre,
+    tipo_canal: parsed.tipo_canal,
+    activo: parsed.activo,
+    ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+  };
+
+  const res = parsed.id
+    ? await client
+        .from('cadenas_comerciales')
+        .update(payload)
+        .eq('id', parsed.id)
+        .select('*')
+        .single()
+    : await client.from('cadenas_comerciales').insert(payload).select('*').single();
+
+  if (res.error || !res.data) {
+    throw new Error(res.error?.message || 'No se pudo guardar la cadena comercial.');
+  }
+  invalidarCacheMaestros();
+  return res.data as unknown as CadenaComercial;
+}
+
+export async function cambiarEstadoCadenaComercial(
+  id: string,
+  activo: boolean,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<CadenaComercial> {
+  if (!UUID_V4_REGEX.test(id)) throw new Error('Identificador de cadena inválido.');
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const { data, error } = await client
+    .from('cadenas_comerciales')
+    .update({ activo })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error || !data) {
+    throw new Error(error?.message || 'No se pudo actualizar el estado de la cadena comercial.');
+  }
+  invalidarCacheMaestros();
+  return data as unknown as CadenaComercial;
+}
+
+export async function obtenerZonasComerciales(
+  filtros: FiltrosCatalogoSimple = {},
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<ZonaComercial[]> {
+  const soloActivos = filtros.soloActivos !== false;
+  const claveCache = JSON.stringify({
+    soloActivos,
+    busqueda: filtros.busqueda?.trim().toUpperCase() || '',
+  });
+  if (!filtros.forzarRefresco) {
+    const cached = cacheZonas.get(claveCache);
+    if (cached && cached.expiraEn > Date.now()) return cached.datos;
+  }
+
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  let query = client.from('zonas').select('*').order('nombre', { ascending: true });
+
+  if (soloActivos) query = query.eq('activo', true);
+  if (filtros.busqueda?.trim()) {
+    const term = sanitizarTerminoIlike(filtros.busqueda);
+    if (term) query = query.or(`codigo.ilike.%${term}%,nombre.ilike.%${term}%,ciudad.ilike.%${term}%`);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Error consultando zonas: ${error.message}`);
+  }
+  const rows = (data ?? []) as unknown as ZonaComercial[];
+  cacheZonas.set(claveCache, { expiraEn: Date.now() + CACHE_TTL_MS, datos: rows });
+  return rows;
+}
+
+export async function guardarZonaComercial(
+  input: ZonaComercialInput,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<ZonaComercial> {
+  const parsed = ZonaComercialCrudSchema.parse(input);
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const payload = {
+    codigo: parsed.codigo,
+    nombre: parsed.nombre,
+    ciudad: parsed.ciudad,
+    estado: parsed.estado,
+    activo: parsed.activo,
+    ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+  };
+
+  const res = parsed.id
+    ? await client.from('zonas').update(payload).eq('id', parsed.id).select('*').single()
+    : await client.from('zonas').insert(payload).select('*').single();
+
+  if (res.error || !res.data) {
+    throw new Error(res.error?.message || 'No se pudo guardar la zona comercial.');
+  }
+  invalidarCacheMaestros();
+  return res.data as unknown as ZonaComercial;
+}
+
+export async function cambiarEstadoZonaComercial(
+  id: string,
+  activo: boolean,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<ZonaComercial> {
+  if (!UUID_V4_REGEX.test(id)) throw new Error('Identificador de zona inválido.');
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const { data, error } = await client
+    .from('zonas')
+    .update({ activo })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error || !data) {
+    throw new Error(error?.message || 'No se pudo actualizar el estado de la zona.');
+  }
+  invalidarCacheMaestros();
+  return data as unknown as ZonaComercial;
+}
+
+export async function guardarClienteMaestro(
+  input: ClienteCrudInput,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<Cliente> {
+  const parsed = ClienteCrudSchema.parse({
+    ...input,
+    latitud: input.latitud ?? null,
+    longitud: input.longitud ?? null,
+  });
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+
+  const payload = {
+    codigo_cliente: parsed.codigo_cliente,
+    rif: parsed.rif ?? null,
+    razon_social: parsed.razon_social,
+    nombre_comercial: parsed.nombre_comercial ?? null,
+    canal: parsed.canal ?? null,
+    segmento: parsed.segmento ?? null,
+    zona: parsed.zona ?? null,
+    ruta: parsed.ruta ?? null,
+    direccion: parsed.direccion ?? null,
+    ciudad: parsed.ciudad ?? null,
+    estado: parsed.estado ?? null,
+    telefono: parsed.telefono ?? null,
+    latitud: parsed.latitud ?? null,
+    longitud: parsed.longitud ?? null,
+    cadena_id: parsed.cadena_id ?? null,
+    zona_id: parsed.zona_id ?? null,
+    radio_geocerca_m: parsed.radio_geocerca_m,
+    vendedor_id: parsed.vendedor_id ?? null,
+    codigo_vendedor: parsed.codigo_vendedor ?? null,
+    activo: parsed.activo,
+    ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+  };
+
+  const res = parsed.id
+    ? await client.from('clientes').update(payload).eq('id', parsed.id).select('*').single()
+    : await client.from('clientes').insert(payload).select('*').single();
+
+  if (res.error || !res.data) {
+    throw new Error(res.error?.message || 'No se pudo guardar el cliente / PDV.');
+  }
+  invalidarCacheMaestros();
+  return res.data as unknown as Cliente;
+}
+
+export async function cambiarEstadoClienteMaestro(
+  id: string,
+  activo: boolean,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<Cliente> {
+  if (!UUID_V4_REGEX.test(id)) throw new Error('Identificador de cliente inválido.');
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const { data, error } = await client
+    .from('clientes')
+    .update({ activo })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error || !data) {
+    throw new Error(error?.message || 'No se pudo actualizar el estado del cliente.');
+  }
+  invalidarCacheMaestros();
+  return data as unknown as Cliente;
+}
+
+export async function guardarVendedorMaestro(
+  input: VendedorCrudInput,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<Vendedor> {
+  const parsed = VendedorCrudSchema.parse(input);
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const payload = {
+    codigo_vendedor: parsed.codigo_vendedor,
+    nombre_completo: parsed.nombre_completo,
+    documento_identidad: parsed.documento_identidad ?? null,
+    telefono: parsed.telefono ?? null,
+    email: parsed.email ?? null,
+    zona: parsed.zona ?? null,
+    supervisor: parsed.supervisor ?? null,
+    activo: parsed.activo,
+    ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+  };
+
+  const res = parsed.id
+    ? await client.from('vendedores').update(payload).eq('id', parsed.id).select('*').single()
+    : await client.from('vendedores').insert(payload).select('*').single();
+
+  if (res.error || !res.data) {
+    throw new Error(res.error?.message || 'No se pudo guardar el vendedor.');
+  }
+  invalidarCacheMaestros();
+  return res.data as unknown as Vendedor;
+}
+
+export async function cambiarEstadoVendedorMaestro(
+  id: string,
+  activo: boolean,
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<Vendedor> {
+  if (!UUID_V4_REGEX.test(id)) throw new Error('Identificador de vendedor inválido.');
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const { data, error } = await client
+    .from('vendedores')
+    .update({ activo })
+    .eq('id', id)
+    .select('*')
+    .single();
+  if (error || !data) {
+    throw new Error(error?.message || 'No se pudo actualizar el estado del vendedor.');
+  }
+  invalidarCacheMaestros();
+  return data as unknown as Vendedor;
+}
+
 /**
  * Adaptador directo desde `ClienteConVendedor` hacia el tipo `Store` usado en vistas operativas.
  */
-export function mapearClienteMaestroAStore(cliente: Cliente | ClienteConVendedor): Store {
+export function mapearClienteMaestroAStore(
+  cliente: Cliente | ClienteConVendedor,
+  extras?: { cadenaNombre?: string; zonaNombre?: string }
+): Store {
   const conVend = cliente as ClienteConVendedor;
   const canalNormalizado = (() => {
     const c = (cliente.canal ?? '').trim().toLowerCase();
@@ -1357,17 +1735,29 @@ export function mapearClienteMaestroAStore(cliente: Cliente | ClienteConVendedor
     return '';
   })();
 
+  const radioConfigurado =
+    typeof cliente.radio_geocerca_m === 'number' &&
+    Number.isFinite(cliente.radio_geocerca_m) &&
+    cliente.radio_geocerca_m >= 25
+      ? Math.round(cliente.radio_geocerca_m)
+      : 150;
+
   return {
     id: cliente.id,
     name: cliente.nombre_comercial || cliente.razon_social,
     clientCode: cliente.codigo_cliente,
     address: cliente.direccion || '',
-    zone: cliente.zona || conVend.vendedor?.zona || '',
+    zone: extras?.zonaNombre || cliente.zona || conVend.vendedor?.zona || '',
     city: cliente.ciudad || '',
     latitude: cliente.latitud,
     longitude: cliente.longitud,
-    geofenceRadiusMeters: cliente.latitud !== null && cliente.longitud !== null ? 150 : 0,
+    geofenceRadiusMeters:
+      cliente.latitud !== null && cliente.longitud !== null ? radioConfigurado : 0,
     sellerName: conVend.vendedor?.nombre_completo || cliente.codigo_vendedor || '',
     channel: canalNormalizado,
+    cadenaId: cliente.cadena_id ?? null,
+    cadenaName: extras?.cadenaNombre || conVend.cadena?.nombre,
+    zonaId: cliente.zona_id ?? null,
+    sucursal: cliente.sucursal ?? null,
   };
 }

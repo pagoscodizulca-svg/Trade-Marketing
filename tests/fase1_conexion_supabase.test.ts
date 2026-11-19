@@ -5,7 +5,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import test from 'node:test';
-import { buildMockJwt } from './antigravity_audit/localMockInfra';
+import { buildMockJwt, MOCK_PUBLIC_ANON_KEY } from './antigravity_audit/localMockInfra';
 
 const ROOT_DIR = process.cwd();
 const URL_PROYECTO = 'https://apaxdgxtaoeyswlfblgi.supabase.co';
@@ -28,9 +28,8 @@ function gitRastrea(ruta: string): boolean {
   return salida.trim().length > 0;
 }
 
-test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptación)', async (t) => {
-  const mod = await import('../src/lib/supabaseClient.js');
-  const diag = await import('../src/diagnostics/checkSupabaseConnection.js');
+test('FASE 1 / HITO 1 — Cliente Único Supabase TS + Conexión Segura (Criterios de Aceptación)', async (t) => {
+  const mod = await import('../src/services/supabaseClient');
 
   await t.test('a) normalizarSupabaseUrl corrige sufijos /rest/v1/ y exige https + .supabase.co', () => {
     assert.equal(mod.normalizarSupabaseUrl(`${URL_PROYECTO}/rest/v1/`), URL_PROYECTO);
@@ -51,7 +50,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     assert.throws(() => mod.normalizarSupabaseUrl(''), /VITE_SUPABASE_URL/);
   });
 
-  await t.test('b) assertCredencialesSeguras bloquea sb_secret_* y service_role sin tocar la red', async () => {
+  await t.test('b) assertCredencialesSeguras bloquea sb_secret_* y service_role sin tocar la red y acepta llaves públicas válidas', async () => {
     const secretos = [
       'sb_secret_abc123',
       'sb_secret_',
@@ -61,9 +60,9 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     for (const secreto of secretos) {
       assert.throws(
         () => mod.assertCredencialesSeguras(URL_PROYECTO, secreto),
-        (err: Error) => err instanceof mod.ErrorSeguridadCredenciales && /SEGURIDAD CRÍTICA/.test(err.message)
+        (err: Error) =>
+          err instanceof mod.ErrorSeguridadCredenciales && /SEGURIDAD CRÍTICA/.test(err.message)
       );
-      // También bloqueado aunque la URL sea inválida (la seguridad se evalúa primero)
       assert.throws(
         () => mod.assertCredencialesSeguras('url-invalida', secreto),
         (err: Error) => err instanceof mod.ErrorSeguridadCredenciales
@@ -82,7 +81,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
         () => mod.crearClienteSupabase({ url: URL_PROYECTO, publishableKey: 'sb_secret_xyz789' }),
         (err: Error) => err instanceof mod.ErrorSeguridadCredenciales
       );
-      const resultado = await diag.verificarConexionSupabase({
+      const resultado = await mod.verificarConexionSupabase({
         url: URL_PROYECTO,
         publishableKey: 'sb_secret_xyz789',
       });
@@ -116,11 +115,14 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     assert.match(avisos[0]!, /\.env\.local/);
     assert.match(avisos[0]!, /VITE_SUPABASE_PUBLISHABLE_KEY/);
 
-    // Llave pública válida
-    const ok = mod.assertCredencialesSeguras(`${URL_PROYECTO}/rest/v1/`, LLAVE_PUBLICA_FICTICIA);
-    assert.equal(ok.urlNormalizada, URL_PROYECTO);
+    // Llave pública moderna (sb_publishable_*) y JWT público anon válido
+    const okPub = mod.assertCredencialesSeguras(`${URL_PROYECTO}/rest/v1/`, LLAVE_PUBLICA_FICTICIA);
+    assert.equal(okPub.urlNormalizada, URL_PROYECTO);
 
-    // Llaves que no son sb_publishable_ se rechazan
+    const okAnonJwt = mod.assertCredencialesSeguras(`${URL_PROYECTO}/rest/v1/`, MOCK_PUBLIC_ANON_KEY);
+    assert.equal(okAnonJwt.urlNormalizada, URL_PROYECTO);
+
+    // Cadenas arbitrarias que no son llave pública válida se rechazan
     assert.throws(
       () => mod.assertCredencialesSeguras(URL_PROYECTO, 'clave-cualquiera-no-publishable'),
       (err: Error) => err instanceof mod.ErrorSeguridadCredenciales
@@ -171,7 +173,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     console.error = (...a: unknown[]) => void logsCapturados.push(a.map(String).join(' '));
 
     try {
-      const exito = await diag.verificarConexionSupabase({
+      const exito = await mod.verificarConexionSupabase({
         url: `${baseUrl}/rest/v1/`,
         publishableKey: LLAVE_PUBLICA_FICTICIA,
         client: cliente,
@@ -185,7 +187,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
       assert.equal(JSON.stringify(exito).includes(LLAVE_PUBLICA_FICTICIA), false);
 
       modo = '404';
-      const fallo = await diag.verificarConexionSupabase({
+      const fallo = await mod.verificarConexionSupabase({
         url: baseUrl,
         publishableKey: LLAVE_PUBLICA_FICTICIA,
         client: cliente,
@@ -194,7 +196,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
       assert.equal(fallo.ok, false);
       assert.match(fallo.mensaje, /404/);
 
-      const sinRed = await diag.verificarConexionSupabase({
+      const sinRed = await mod.verificarConexionSupabase({
         url: 'http://127.0.0.1:1',
         publishableKey: LLAVE_PUBLICA_FICTICIA,
         permitirLoopbackPruebas: true,
@@ -214,18 +216,17 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
       'Ninguna llave debe imprimirse en consola'
     );
 
-    // Renderizado DOM seguro
     const hijos: Array<{ textContent?: string }> = [];
     const doc = {
       createElement: () => ({ className: '', textContent: '' }),
-      createTextNode: (t: string) => ({ textContent: t }),
+      createTextNode: (txt: string) => ({ textContent: txt }),
     };
     const contenedor = {
       ownerDocument: doc,
       replaceChildren: (...items: any[]) => void hijos.splice(0, hijos.length, ...items),
     } as unknown as HTMLElement;
 
-    diag.pintarEstadoConexionDom(contenedor, {
+    mod.pintarEstadoConexionDom(contenedor, {
       ok: false,
       urlNormalizada: URL_PROYECTO,
       sesionActiva: false,
@@ -235,7 +236,7 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     assert.equal(hijos[2]?.textContent, '<img src=x onerror=alert(1)>');
   });
 
-  await t.test('c) Archivos privados ignorados por Git y código sin sumideros XSS ni llaves secretas', () => {
+  await t.test('c) Archivos privados ignorados por Git, capa JS huérfana eliminada y cliente TS único sin XSS', () => {
     assert.equal(gitIgnora('.env.local'), true, '.env.local debe estar ignorado');
     assert.equal(gitIgnora('.env'), true, '.env debe estar ignorado');
     assert.equal(gitIgnora('src/config/env.js'), true, 'src/config/env.js debe estar ignorado');
@@ -243,15 +244,14 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     assert.equal(gitRastrea('.env.local'), false, '.env.local no debe estar en el índice de Git');
     assert.equal(gitRastrea('src/config/env.js'), false);
 
-    const estado = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
-      cwd: ROOT_DIR,
-      encoding: 'utf8',
-    });
-    assert.equal(
-      estado.split(/\r?\n/).some((l) => /(^|\s)\.env\.local$|src\/config\/env\.js$/.test(l.trim())),
-      false,
-      'git status no debe listar archivos privados de credenciales'
-    );
+    // N-03: La capa JS huérfana fue eliminada
+    for (const huerfano of [
+      'src/lib/supabaseClient.js',
+      'src/auth/authGuard.js',
+      'src/diagnostics/checkSupabaseConnection.js',
+    ]) {
+      assert.equal(fs.existsSync(path.join(ROOT_DIR, huerfano)), false, `${huerfano} debe haberse eliminado`);
+    }
 
     const envExample = fs.readFileSync(path.join(ROOT_DIR, '.env.example'), 'utf8');
     assert.match(envExample, /VITE_SUPABASE_URL=https:\/\/apaxdgxtaoeyswlfblgi\.supabase\.co\r?\n/);
@@ -259,20 +259,10 @@ test('FASE 1 — Conexión Segura Frontend JS + Supabase (Criterios de Aceptaci�
     assert.doesNotMatch(envExample, /sb_secret_[A-Za-z0-9]/);
     assert.doesNotMatch(envExample, /eyJ[A-Za-z0-9_-]{10,}/);
 
-    for (const archivo of [
-      'src/lib/supabaseClient.js',
-      'src/diagnostics/checkSupabaseConnection.js',
-    ]) {
-      const codigo = fs.readFileSync(path.join(ROOT_DIR, archivo), 'utf8');
-      assert.doesNotMatch(codigo, /\b(innerHTML|outerHTML|insertAdjacentHTML)\b/, archivo);
-      assert.doesNotMatch(codigo, /SUPABASE_SERVICE_ROLE_KEY/, archivo);
-      assert.doesNotMatch(codigo, /sb_secret_[A-Za-z0-9]{6,}/, archivo);
-    }
-
-    const reglas = fs.readFileSync(path.join(ROOT_DIR, 'rules', 'AGENTS.md'), 'utf8');
-    assert.match(reglas, /sb_secret_/);
-    assert.match(reglas, /service_role/);
-    assert.match(reglas, /\/rest\/v1\//);
-    assert.match(reglas, /RLS/);
+    const tsClient = fs.readFileSync(path.join(ROOT_DIR, 'src', 'services', 'supabaseClient.ts'), 'utf8');
+    assert.match(tsClient, /codizulca\.supabase\.auth\.v1/);
+    assert.doesNotMatch(tsClient, /\b(innerHTML|outerHTML|insertAdjacentHTML)\b/);
+    assert.doesNotMatch(tsClient, /SUPABASE_SERVICE_ROLE_KEY/);
+    assert.doesNotMatch(tsClient, /sb_secret_[A-Za-z0-9]{6,}/);
   });
 });

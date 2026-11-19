@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   User,
   UserRole,
@@ -19,6 +19,7 @@ import {
   UseDegustacionesNotificationsResult,
 } from '../hooks/useDegustacionesNotifications';
 import { useCronogramaRealtimeSync } from '../hooks/useCronogramaRealtimeSync';
+import { useMasterData, type UseMasterDataResult } from '../hooks/useMasterData';
 import { FEATURE_FLAGS } from '../config/featureFlags';
 import {
   useSolicitudesContraloria,
@@ -35,6 +36,17 @@ import {
   isRemovedOrInactivePromoterToken,
 } from '../services/supabaseModule1';
 import {
+  buildBatchFillPlan,
+  buildMatrixUpsertRowFromVisit,
+  classifyVisitsForLogicalCancel,
+  isRealUuid,
+  mergeMasterStoresWithFallback,
+  persistMatrixLogicalCancel,
+  persistMatrixUpsertBatch,
+  resolveRealPromotoraForMatrix,
+} from '../services/scheduleMatrixService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
+import {
   calculateProductionSupplies,
   normalizeProductionShift,
   ProductionSuppliesResult,
@@ -46,7 +58,32 @@ import {
   MAX_SAFE_TIMEOUT_MS,
 } from '../utils/caracasWeekCycle';
 import { isStrictAdminRole } from '../services/degustacionesWeeklyCycleService';
-import type { ManagedUserRole } from '../services/userManagementService';
+import type { ManagedUserRole, SucursalCodigo } from '../services/userManagementService';
+import type {
+  CampanaTrade,
+  CampanaTradeInput,
+  CertificadoPazYSalvo,
+  PazYSalvoVerificationResult,
+  PresupuestoTrade,
+  PresupuestoTradeInput,
+  TarifarioCostoTrade,
+  TarifarioCostoTradeInput,
+} from '../types/contraloriaFinancial';
+import {
+  createFiscalReceiptMetadataInSupabase,
+  createRequisitionInSupabase,
+  fetchContraloriaFinancialBundle,
+  fetchFiscalReceiptSignedUrls,
+  issuePazYSalvoInSupabase,
+  transitionRequisitionInSupabase,
+  updateReconciliationInSupabase,
+  uploadFiscalReceiptWithBinary,
+  upsertCampanaTrade,
+  upsertPresupuestoTrade,
+  upsertTarifarioCostoTrade,
+  validateFiscalReceiptInSupabase,
+  verifyPazYSalvoInSupabase,
+} from '../services/contraloriaFinancialService';
 
 export type SyncState = 'sincronizando' | 'sincronizado' | 'tiempo_real' | 'error';
 
@@ -93,12 +130,30 @@ export interface UpsertVisitFromTastingResult {
   supplies: ProductionSuppliesResult;
 }
 
+export interface MatrixMutationResult {
+  ok: boolean;
+  error?: string;
+  reverted?: boolean;
+}
+
+export interface ClearVisitsBatchResult extends MatrixMutationResult {
+  removed: number;
+  preservedNonPending: number;
+}
+
+export interface BatchFillClientsResult extends MatrixMutationResult {
+  countUpdated: number;
+  countCreated: number;
+}
+
 interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
-  /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'supervisor' | 'vendedor' | null) */
+  /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'vendedor' | 'promotora' | 'cliente' | 'chofer' | null) */
   verifiedIamRole: ManagedUserRole | null;
+  /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'GLOBAL' | null) */
+  verifiedSucursal: SucursalCodigo | null;
   /** Verdadero únicamente para usuarios con rol estricto de Administrador (`super_admin` / `admin`) */
   isStrictAdmin: boolean;
   /** Verdadero para usuarios con autoridad de Contraloría Interna o Super Admin (Segregación de Funciones) */
@@ -109,6 +164,8 @@ interface AppContextType {
   caracasWeekStartYmd: string;
   users: User[];
   stores: Store[];
+  /** Fuente Única de Verdad de Maestros (`public.clientes`, `public.vendedores`, `public.cadenas_comerciales`, `public.zonas`) */
+  masterData: UseMasterDataResult;
   visits: ScheduledVisit[];
   requests: ControllerRequest[];
   tastingReports: TastingExecutionReport[];
@@ -126,7 +183,7 @@ interface AppContextType {
   syncStatus: SyncStatus;
   /** Verdadero cuando el canal Realtime de `cronograma_degustaciones` está suscrito en vivo */
   isCronogramaRealtimeConnected: boolean;
-  /** Sincroniza manualmente TODAS las fuentes (Supabase, degustaciones y solicitudes de contraloría) */
+  /** Sincroniza manualmente TODAS las fuentes (Supabase, maestros, degustaciones y solicitudes de contraloría) */
   refreshAll: () => Promise<void>;
 
   // Notificaciones en tiempo real de Degustaciones enviadas por Vendedores (Globito + Detalle)
@@ -139,26 +196,69 @@ interface AppContextType {
   // Flujo en tiempo real Trade Marketing <-> Contraloría Interna ("SOLICITUD DE PRODUCTOS")
   solicitudesContraloria: UseSolicitudesContraloriaResult;
 
+  // Datos financieros persistidos en Supabase (Hito 4: Campañas, Presupuestos, Tarifario, Conciliaciones, Paz y Salvo)
+  campanasTrade: CampanaTrade[];
+  presupuestosTrade: PresupuestoTrade[];
+  tarifarioCostos: TarifarioCostoTrade[];
+  conciliacionesByReqId: Record<string, InventoryReconciliation>;
+  certificadosPazYSalvo: Record<string, CertificadoPazYSalvo>;
+  isLoadingFinancial: boolean;
+  refreshFinancialData: () => Promise<void>;
+  selectReconciliationForRequest: (reqId: string) => void;
+  saveCampanaTrade: (
+    input: CampanaTradeInput
+  ) => Promise<{ success: boolean; message: string; data?: CampanaTrade }>;
+  savePresupuestoTrade: (
+    input: PresupuestoTradeInput
+  ) => Promise<{ success: boolean; message: string; data?: PresupuestoTrade }>;
+  saveTarifarioCosto: (
+    input: TarifarioCostoTradeInput
+  ) => Promise<{ success: boolean; message: string; data?: TarifarioCostoTrade }>;
+  verifyPazYSalvoCertificate: (code: string) => Promise<PazYSalvoVerificationResult>;
+
   // Actions
   advanceRequisitionWorkflow: (
     requestId: string,
     nextStatus: any,
     justification?: string,
     comments?: string
-  ) => { success: boolean; message: string };
-  createRequisition: (req: Partial<ControllerRequest>) => void;
+  ) => Promise<{ success: boolean; message: string }>;
+  createRequisition: (
+    req: Partial<ControllerRequest>
+  ) => Promise<{ success: boolean; message: string; requisicion?: ControllerRequest }>;
   addFiscalReceipt: (
-    receipt: Omit<FiscalReceipt, 'id' | 'isValidatedByContraloria'>
-  ) => { success: boolean; message: string };
-  validateFiscalReceipt: (receiptId: string, isValid: boolean, notes?: string) => void;
-  updateReconciliation: (updates: Partial<InventoryReconciliation>) => void;
-  closeReconciliationAndIssuePazYSalvo: (notes: string) => { success: boolean; message: string };
-  updateVisit: (visitId: string, updates: Partial<ScheduledVisit>) => void;
-  updateVisitFromProductFill: (visitId: string, product: string, quantityInput: string) => void;
-  addVisit: (visit: Omit<ScheduledVisit, 'id'>) => void;
-  deleteVisit: (visitId: string) => void;
-  deleteVisitsByIds: (visitIds: string[]) => number;
-  clearVisitsBatch: (criteria: ClearVisitsCriteria) => { removed: number; preservedNonPending: number };
+    receipt: Omit<FiscalReceipt, 'id' | 'isValidatedByContraloria'>,
+    file?: File | Blob | null
+  ) => Promise<{ success: boolean; message: string }>;
+  validateFiscalReceipt: (
+    receiptId: string,
+    isValid: boolean,
+    notes?: string
+  ) => Promise<{ success: boolean; message: string }>;
+  updateReconciliation: (
+    updates: Partial<InventoryReconciliation>,
+    options?: { persist?: boolean }
+  ) => Promise<{ success: boolean; message: string }>;
+  closeReconciliationAndIssuePazYSalvo: (
+    notes: string
+  ) => Promise<{ success: boolean; message: string; certificado?: CertificadoPazYSalvo }>;
+  updateVisit: (
+    visitId: string,
+    updates: Partial<ScheduledVisit>,
+    options?: { persist?: boolean }
+  ) => Promise<MatrixMutationResult>;
+  updateVisitFromProductFill: (
+    visitId: string,
+    product: string,
+    quantityInput: string
+  ) => Promise<MatrixMutationResult>;
+  addVisit: (visit: Omit<ScheduledVisit, 'id'>) => Promise<MatrixMutationResult & { visit?: ScheduledVisit }>;
+  deleteVisit: (visitId: string, motivo?: string) => Promise<MatrixMutationResult>;
+  deleteVisitsByIds: (
+    visitIds: string[],
+    motivo?: string
+  ) => Promise<MatrixMutationResult & { removed: number; preservedHistorical: number }>;
+  clearVisitsBatch: (criteria: ClearVisitsCriteria) => Promise<ClearVisitsBatchResult>;
   batchFillClientsProductShift: (params: {
     storeIds: string[];
     product: string;
@@ -168,7 +268,7 @@ interface AppContextType {
     date?: string;
     promotoraName?: string;
     sellerName?: string;
-  }) => { countUpdated: number; countCreated: number };
+  }) => Promise<BatchFillClientsResult>;
   upsertVisitFromApprovedTasting: (
     params: UpsertVisitFromTastingParams
   ) => UpsertVisitFromTastingResult;
@@ -323,6 +423,7 @@ export const AppProvider: React.FC<{
     displayName: string;
     appRole?: string | null;
     iamRole?: ManagedUserRole | null;
+    sucursal?: SucursalCodigo | null;
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -336,6 +437,7 @@ export const AppProvider: React.FC<{
   );
   const lastFocusRevalidationMsRef = useRef<number>(Date.now());
   const verifiedIamRole: ManagedUserRole | null = verifiedProfile?.iamRole ?? null;
+  const verifiedSucursal: SucursalCodigo | null = verifiedProfile?.sucursal ?? null;
   const isStrictAdmin = verifiedProfile
     ? verifiedIamRole === 'super_admin' || isStrictAdminRole(verifiedProfile.appRole)
     : isStrictAdminRole(currentRole);
@@ -343,9 +445,7 @@ export const AppProvider: React.FC<{
     ? verifiedIamRole === 'super_admin' || verifiedIamRole === 'contraloria'
     : currentRole === 'analista_contraloria' || currentRole === 'gerente_admin';
   const isTradeOpsRole = verifiedProfile
-    ? verifiedIamRole === 'super_admin' ||
-      verifiedIamRole === 'coordinacion' ||
-      verifiedIamRole === 'supervisor'
+    ? verifiedIamRole === 'super_admin' || verifiedIamRole === 'coordinacion'
     : true;
   const [currentUser, setCurrentUser] = useState<User | null>(
     verifiedProfile
@@ -372,13 +472,128 @@ export const AppProvider: React.FC<{
     }
   }, [verifiedProfile]);
 
-  const [stores, setStores] = useState<Store[]>([]);
+  const [fallbackStores, setFallbackStores] = useState<Store[]>([]);
   const [visits, setVisits] = useState<ScheduledVisit[]>([]);
   const [requests, setRequests] = useState<ControllerRequest[]>([]);
   const [tastingReports] = useState<TastingExecutionReport[]>([]);
   const [reconciliation, setReconciliation] = useState<InventoryReconciliation>(EMPTY_RECONCILIATION);
+  const [conciliacionesByReqId, setConciliacionesByReqId] = useState<
+    Record<string, InventoryReconciliation>
+  >({});
+  const [certificadosPazYSalvo, setCertificadosPazYSalvo] = useState<
+    Record<string, CertificadoPazYSalvo>
+  >({});
+  const [campanasTrade, setCampanasTrade] = useState<CampanaTrade[]>([]);
+  const [presupuestosTrade, setPresupuestosTrade] = useState<PresupuestoTrade[]>([]);
+  const [tarifarioCostos, setTarifarioCostos] = useState<TarifarioCostoTrade[]>([]);
+  const [isLoadingFinancial, setIsLoadingFinancial] = useState<boolean>(false);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [discrepancyAlerts, setDiscrepancyAlerts] = useState<DiscrepancyAlert[]>([]);
+
+  const reconciliationRef = useRef<InventoryReconciliation>(reconciliation);
+  useEffect(() => {
+    reconciliationRef.current = reconciliation;
+  }, [reconciliation]);
+
+  const refreshFinancialData = useCallback(async () => {
+    if (!isSupabaseConfigured) return;
+    setIsLoadingFinancial(true);
+    try {
+      const bundle = await fetchContraloriaFinancialBundle();
+      setCampanasTrade(bundle.campanas);
+      setPresupuestosTrade(bundle.presupuestos);
+      setTarifarioCostos(bundle.tarifario);
+      setCertificadosPazYSalvo(bundle.certificadosByReqId);
+      setRequests(bundle.requisiciones);
+
+      // Resolver URLs firmadas de corta duración para facturas con archivo privado
+      const allFacturaIdsWithFile: string[] = [];
+      Object.values(bundle.conciliacionesByReqId).forEach((conc) => {
+        conc.receipts.forEach((r) => {
+          if (r.storagePath && isRealUuid(r.id)) {
+            allFacturaIdsWithFile.push(r.id);
+          }
+        });
+      });
+
+      let signedUrlMap: Record<string, string> = {};
+      if (allFacturaIdsWithFile.length > 0) {
+        signedUrlMap = await fetchFiscalReceiptSignedUrls(allFacturaIdsWithFile.slice(0, 50)).catch(
+          () => ({})
+        );
+      }
+
+      const hydratedConcMap: Record<string, InventoryReconciliation> = {};
+      for (const [reqId, conc] of Object.entries(bundle.conciliacionesByReqId)) {
+        hydratedConcMap[reqId] = {
+          ...conc,
+          receipts: conc.receipts.map((r) => ({
+            ...r,
+            imageUrl: signedUrlMap[r.id] || r.imageUrl || '',
+          })),
+        };
+      }
+      setConciliacionesByReqId(hydratedConcMap);
+
+      const currentReqId = reconciliationRef.current.requestId;
+      const targetReq =
+        (currentReqId && hydratedConcMap[currentReqId]) ||
+        (bundle.requisiciones[0]?.id ? hydratedConcMap[bundle.requisiciones[0].id] : undefined);
+      if (targetReq) {
+        setReconciliation(targetReq);
+      }
+    } catch {
+      // Si las tablas de Hito 4 aún no se aplican en remoto, conserva el estado actual sin romper la sesión
+    } finally {
+      setIsLoadingFinancial(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshFinancialData();
+  }, [refreshFinancialData]);
+
+  const selectReconciliationForRequest = useCallback(
+    (reqId: string) => {
+      const found = conciliacionesByReqId[reqId];
+      if (found) {
+        setReconciliation(found);
+        return;
+      }
+      const reqObj = requests.find((r) => r.id === reqId);
+      if (reqObj) {
+        setReconciliation({
+          ...EMPTY_RECONCILIATION,
+          requestId: reqObj.id,
+          requestCode: reqObj.requestCode,
+          productName: reqObj.items[0]?.productName || reqObj.campaignOrPurpose,
+          deliveredUnits: reqObj.totalUnits,
+          discrepancyUnits: reqObj.totalUnits,
+          discrepancyStatus: reqObj.totalUnits === 0 ? 'CUADRADO' : 'MERMA_NO_JUSTIFICADA',
+        });
+      }
+    },
+    [conciliacionesByReqId, requests]
+  );
+
+  // Fuente Única de Verdad de Maestros (`public.clientes`, `public.vendedores`, `cadenas_comerciales`, `zonas`)
+  const masterData = useMasterData({
+    cargarVendedores: true,
+    cargarClientes: true,
+    cargarCadenas: true,
+    cargarZonas: true,
+    suscribirCambiosRealtime: true,
+  });
+
+  const stores = useMemo(
+    () => mergeMasterStoresWithFallback(masterData.stores, fallbackStores),
+    [masterData.stores, fallbackStores]
+  );
+
+  const visitsRef = useRef<ScheduledVisit[]>(visits);
+  useEffect(() => {
+    visitsRef.current = visits;
+  }, [visits]);
 
   // Estado de sincronización con Supabase (Módulo 1 y Módulo 2)
   const [module1Bundle, setModule1Bundle] = useState<Module1SupabaseBundle | null>(null);
@@ -419,8 +634,8 @@ export const AppProvider: React.FC<{
         });
       }
 
-      // Sincronizar catálogo real de PDVs registrados en Supabase
-      setStores((prev) => {
+      // Complementar catálogo con PDVs descubiertos en operaciones que aún no existan en `public.clientes`
+      setFallbackStores((prev) => {
         const existingNames = new Set(prev.map((s) => s.name.trim().toUpperCase()));
         const extraStores: Store[] = [];
         const registerCandidate = (name?: string, zone?: string, seller?: string) => {
@@ -804,117 +1019,207 @@ export const AppProvider: React.FC<{
     },
   });
 
-  const advanceRequisitionWorkflow = (
+  const syncReconciliationToState = (next: InventoryReconciliation) => {
+    setReconciliation(next);
+    if (next.requestId) {
+      setConciliacionesByReqId((prev) => ({
+        ...prev,
+        [next.requestId]: next,
+      }));
+    }
+  };
+
+  const saveCampanaTrade = async (
+    input: CampanaTradeInput
+  ): Promise<{ success: boolean; message: string; data?: CampanaTrade }> => {
+    try {
+      const saved = await upsertCampanaTrade({
+        ...input,
+        sucursal:
+          input.sucursal ??
+          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+            ? verifiedSucursal
+            : 'ZULIA'),
+      });
+      setCampanasTrade((prev) => {
+        const exists = prev.some((c) => c.id === saved.id);
+        return exists ? prev.map((c) => (c.id === saved.id ? saved : c)) : [saved, ...prev];
+      });
+      return { success: true, message: `Campaña ${saved.codigo} guardada en Supabase.`, data: saved };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : 'Error guardando campaña Trade.',
+      };
+    }
+  };
+
+  const savePresupuestoTrade = async (
+    input: PresupuestoTradeInput
+  ): Promise<{ success: boolean; message: string; data?: PresupuestoTrade }> => {
+    try {
+      const saved = await upsertPresupuestoTrade({
+        ...input,
+        sucursal:
+          input.sucursal ??
+          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+            ? verifiedSucursal
+            : 'ZULIA'),
+      });
+      setPresupuestosTrade((prev) => {
+        const exists = prev.some((p) => p.id === saved.id);
+        return exists ? prev.map((p) => (p.id === saved.id ? saved : p)) : [saved, ...prev];
+      });
+      return { success: true, message: `Presupuesto ${saved.categoria} guardado en Supabase.`, data: saved };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : 'Error guardando presupuesto Trade.',
+      };
+    }
+  };
+
+  const saveTarifarioCosto = async (
+    input: TarifarioCostoTradeInput
+  ): Promise<{ success: boolean; message: string; data?: TarifarioCostoTrade }> => {
+    try {
+      const saved = await upsertTarifarioCostoTrade({
+        ...input,
+        sucursal:
+          input.sucursal ??
+          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+            ? verifiedSucursal
+            : 'ZULIA'),
+      });
+      setTarifarioCostos((prev) => {
+        const exists = prev.some((t) => t.id === saved.id);
+        return exists ? prev.map((t) => (t.id === saved.id ? saved : t)) : [saved, ...prev];
+      });
+      return { success: true, message: `Tarifa ${saved.etiqueta} actualizada en BD.`, data: saved };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : 'Error guardando tarifario de costos.',
+      };
+    }
+  };
+
+  const verifyPazYSalvoCertificate = async (code: string): Promise<PazYSalvoVerificationResult> => {
+    return verifyPazYSalvoInSupabase(code);
+  };
+
+  const advanceRequisitionWorkflow = async (
     requestId: string,
     nextStatus: any,
     justification?: string,
     comments?: string
-  ) => {
+  ): Promise<{ success: boolean; message: string }> => {
     const req = requests.find((r) => r.id === requestId);
     if (!req) return { success: false, message: 'Requisición no encontrada.' };
-
     const oldStatus = req.status;
 
-    setRequests((prev) =>
-      prev.map((r) => {
-        if (r.id !== requestId) return r;
-        const updated = { ...r, status: nextStatus };
-        if (nextStatus === 'VALIDACION_COMERCIAL') {
-          updated.commercialApprover = {
-            name: currentUser?.name ?? '',
-            date: new Date().toLocaleString('es-VE'),
-            comments,
-          };
-        } else if (nextStatus === 'REVISION_FINANCIERA') {
-          updated.financialAuditor = {
-            name: currentUser?.name ?? '',
-            date: new Date().toLocaleString('es-VE'),
-            comments,
-          };
-        } else if (nextStatus === 'APROBADO_CONTRALORIA') {
-          updated.finalApprover = {
-            name: currentUser?.name ?? '',
-            date: new Date().toLocaleString('es-VE'),
-            comments,
-          };
-        } else if (nextStatus === 'RECHAZADO') {
-          updated.rejectionReason = justification || comments || 'Rechazado por Contraloría.';
-        }
-        return updated;
-      })
-    );
+    if (isSupabaseConfigured && isRealUuid(requestId)) {
+      try {
+        const updatedReq = await transitionRequisitionInSupabase({
+          requisicionId: requestId,
+          nextStatus,
+          justification,
+          comments,
+        });
+        setRequests((prev) => prev.map((r) => (r.id === requestId ? updatedReq : r)));
+        addAuditLog(
+          'REQUISITION',
+          updatedReq.requestCode,
+          `WORKFLOW_TRANSICION_${updatedReq.status}`,
+          oldStatus,
+          updatedReq.status,
+          justification || comments || 'Transición autorizada por PostgreSQL RPC.'
+        );
+        return {
+          success: true,
+          message: `Estado actualizado y persistido en BD: ${updatedReq.status}.`,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          message:
+            err instanceof Error
+              ? err.message
+              : 'Transición denegada por las reglas de Contraloría en base de datos.',
+        };
+      }
+    }
 
-    addAuditLog(
-      'REQUISITION',
-      req.requestCode,
-      `WORKFLOW_TRANSICION_${nextStatus}`,
-      oldStatus,
-      nextStatus,
-      justification || comments || 'Aprobado según perfil.'
-    );
-    return { success: true, message: `Estado actualizado a: ${nextStatus}.` };
-  };
-
-  const createRequisition = (req: Partial<ControllerRequest>) => {
-    const items = req.items || [];
-    const totalUnits = items.reduce((acc, it) => acc + it.quantityRequested, 0);
-    const estimatedCostUsd = items.reduce((acc, it) => acc + it.totalCostUsd, 0);
-    const nextNumber = String(requests.length + 1).padStart(4, '0');
-    const newReq: ControllerRequest = {
-      id: `req_${Date.now()}`,
-      requestCode: req.requestCode || `MP-${new Date().getFullYear()}-${nextNumber}`,
-      requestDate: req.requestDate || new Date().toLocaleDateString('es-VE'),
-      targetDepartment: req.targetDepartment || 'CONTRALORÍA',
-      campaignOrPurpose: req.campaignOrPurpose || 'Degustación y activación comercial',
-      applicantDepartment: req.applicantDepartment || 'MERCADEO Y PUBLICIDAD',
-      applicantName: req.applicantName || currentUser?.name || '',
-      targetRecipient: req.targetRecipient || 'Facturación / Almacén Codizulca',
-      deliveryDestination: req.deliveryDestination || 'Despacho Operativo Trade Marketing',
-      notesAndObservations: req.notesAndObservations || '',
-      budgetCategory: req.budgetCategory || 'Activación BTL - Trade Marketing',
-      approvedBudgetCapUsd: req.approvedBudgetCapUsd ?? estimatedCostUsd,
-      status: req.status || 'VALIDACION_COMERCIAL',
-      items,
-      totalUnits,
-      estimatedCostUsd,
+    return {
+      success: false,
+      message: 'Supabase no está configurado o la requisición no tiene un UUID persistido.',
     };
-
-    setRequests((prev) => [newReq, ...prev]);
-
-    setReconciliation((prev) => {
-      if (prev.requestCode) return prev;
-      return {
-        ...prev,
-        requestId: newReq.id,
-        requestCode: newReq.requestCode,
-        productName: items[0]?.productName || newReq.campaignOrPurpose,
-        deliveredUnits: totalUnits,
-        degustatedUnitsReported: 0,
-        returnedRemanentUnits: 0,
-        discrepancyUnits: totalUnits,
-        discrepancyStatus: totalUnits === 0 ? 'CUADRADO' : 'MERMA_NO_JUSTIFICADA',
-        pazYSalvoIssued: false,
-      };
-    });
-
-    addAuditLog(
-      'REQUISITION',
-      newReq.requestCode,
-      'CREACION_NUEVA_REQUISICION',
-      'N/A',
-      newReq.status,
-      'Nueva solicitud radicada.'
-    );
   };
 
-  const addFiscalReceipt = (receipt: Omit<FiscalReceipt, 'id' | 'isValidatedByContraloria'>) => {
-    const exists = reconciliation.receipts.some(
+  const createRequisition = async (
+    req: Partial<ControllerRequest>
+  ): Promise<{ success: boolean; message: string; requisicion?: ControllerRequest }> => {
+    if (!isSupabaseConfigured) {
+      return {
+        success: false,
+        message: 'Supabase no está configurado: no se pueden radicar requisiciones en memoria.',
+      };
+    }
+
+    try {
+      const targetSucursal =
+        req.sucursal ??
+        (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+          ? verifiedSucursal
+          : 'ZULIA');
+      const { requisicion, conciliacion } = await createRequisitionInSupabase({
+        ...req,
+        applicantName: req.applicantName || currentUser?.name || 'Trade Marketing',
+        sucursal: targetSucursal,
+      });
+
+      setRequests((prev) => [requisicion, ...prev.filter((r) => r.id !== requisicion.id)]);
+      syncReconciliationToState(conciliacion);
+      addAuditLog(
+        'REQUISITION',
+        requisicion.requestCode,
+        'CREACION_NUEVA_REQUISICION',
+        'N/A',
+        requisicion.status,
+        'Requisición radicada en Supabase con correlativo secuencial.'
+      );
+      return {
+        success: true,
+        message: `Requisición ${requisicion.requestCode} radicada en Supabase.`,
+        requisicion,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : 'No se pudo radicar la requisición.',
+      };
+    }
+  };
+
+  const addFiscalReceipt = async (
+    receipt: Omit<FiscalReceipt, 'id' | 'isValidatedByContraloria'>,
+    file?: File | Blob | null
+  ): Promise<{ success: boolean; message: string }> => {
+    const activeConc = reconciliationRef.current;
+    if (activeConc.cerrada || activeConc.pazYSalvoIssued) {
+      return {
+        success: false,
+        message: 'BLOQUEO INMUTABLE: La conciliación ya posee Paz y Salvo y no admite nuevas facturas.',
+      };
+    }
+
+    const existsLocally = activeConc.receipts.some(
       (r) =>
         r.supplierRif.trim().toUpperCase() === receipt.supplierRif.trim().toUpperCase() &&
         r.invoiceNumber.trim().toLowerCase() === receipt.invoiceNumber.trim().toLowerCase()
     );
 
-    if (exists) {
+    if (existsLocally) {
       const alert: DiscrepancyAlert = {
         id: `alert_${Date.now()}`,
         severity: 'CRITICA',
@@ -940,82 +1245,189 @@ export const AppProvider: React.FC<{
       };
     }
 
-    const newRec: FiscalReceipt = {
-      ...receipt,
-      id: `rec_${Date.now()}`,
-      isValidatedByContraloria: false,
-    };
+    if (!isSupabaseConfigured || !isRealUuid(activeConc.id) || !isRealUuid(activeConc.requestId)) {
+      return {
+        success: false,
+        message:
+          'Seleccione una requisición persistida en Supabase para cargar comprobantes fiscales.',
+      };
+    }
 
-    setReconciliation((prev) => ({
-      ...prev,
-      receipts: [newRec, ...prev.receipts],
-      totalExpensesReportedUsd: prev.totalExpensesReportedUsd + newRec.totalUsd,
-      balanceDueCompanyOrPromotorUsd:
-        prev.approvedPettyCashUsd - (prev.totalExpensesReportedUsd + newRec.totalUsd),
-    }));
+    try {
+      let savedReceipt: FiscalReceipt;
+      if (file) {
+        const uploaded = await uploadFiscalReceiptWithBinary({
+          conciliacionId: activeConc.id,
+          requisicionId: activeConc.requestId,
+          receipt,
+          file,
+        });
+        savedReceipt = uploaded.receipt;
+      } else {
+        savedReceipt = await createFiscalReceiptMetadataInSupabase({
+          conciliacionId: activeConc.id,
+          requisicionId: activeConc.requestId,
+          receipt,
+        });
+      }
 
-    addAuditLog(
-      'EXPENSE',
-      newRec.invoiceNumber,
-      'COMPROBANTE_FISCAL_SUBIDO',
-      undefined,
-      'PENDIENTE_VALIDACION',
-      `Factura por $${newRec.totalUsd} cargada a rendición.`
+      const nextReceipts = [savedReceipt, ...activeConc.receipts];
+      const nextTotalExpenses = Number(
+        nextReceipts.reduce((s, r) => s + r.totalUsd, 0).toFixed(2)
+      );
+      syncReconciliationToState({
+        ...activeConc,
+        receipts: nextReceipts,
+        totalExpensesReportedUsd: nextTotalExpenses,
+        balanceDueCompanyOrPromotorUsd: Number(
+          (activeConc.approvedPettyCashUsd - nextTotalExpenses).toFixed(2)
+        ),
+      });
+
+      addAuditLog(
+        'EXPENSE',
+        savedReceipt.invoiceNumber,
+        'COMPROBANTE_FISCAL_SUBIDO',
+        undefined,
+        'PENDIENTE_VALIDACION',
+        `Factura por $${savedReceipt.totalUsd} persistida en Supabase${
+          savedReceipt.storagePath ? ' con soporte privado verificado' : ''
+        }.`
+      );
+      return {
+        success: true,
+        message: savedReceipt.storagePath
+          ? 'Factura y documento binario validados y guardados en Storage privado.'
+          : 'Factura registrada en Supabase. En cola de validación fiscal.',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error registrando factura fiscal.';
+      if (/ANTIFRAUDE|duplicad/i.test(msg)) {
+        setDiscrepancyAlerts((prev) => [
+          {
+            id: `alert_${Date.now()}`,
+            severity: 'CRITICA',
+            title: 'Bloqueo Antifraude BD: Factura Duplicada',
+            description: msg,
+            entityCode: receipt.invoiceNumber,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            detectedByRule: 'DB_UNIQUE_RIF_INVOICE',
+            resolved: false,
+          },
+          ...prev,
+        ]);
+      }
+      return { success: false, message: msg };
+    }
+  };
+
+  const validateFiscalReceipt = async (
+    receiptId: string,
+    isValid: boolean,
+    notes?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const activeConc = reconciliationRef.current;
+    if (activeConc.cerrada || activeConc.pazYSalvoIssued) {
+      return {
+        success: false,
+        message: 'La conciliación ya está cerrada con Paz y Salvo inmutable.',
+      };
+    }
+
+    if (!isSupabaseConfigured || !isRealUuid(receiptId)) {
+      return { success: false, message: 'Factura no persistida o Supabase no configurado.' };
+    }
+
+    try {
+      const updated = await validateFiscalReceiptInSupabase(
+        receiptId,
+        isValid,
+        notes,
+        currentUser?.name || 'Contraloría Interna'
+      );
+      syncReconciliationToState({
+        ...activeConc,
+        receipts: activeConc.receipts.map((r) =>
+          r.id === receiptId ? { ...updated, imageUrl: r.imageUrl || updated.imageUrl } : r
+        ),
+      });
+      addAuditLog(
+        'EXPENSE',
+        receiptId,
+        isValid ? 'FACTURA_CONTRALORIA_CONFORME' : 'FACTURA_CONTRALORIA_RECHAZADA',
+        undefined,
+        isValid ? 'VALIDADO' : 'OBSERVADO',
+        notes
+      );
+      return {
+        success: true,
+        message: isValid
+          ? 'Factura marcada como CONFORME FISCAL en Supabase.'
+          : 'Factura observada por Contraloría en Supabase.',
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : 'Error validando comprobante fiscal.',
+      };
+    }
+  };
+
+  const updateReconciliation = async (
+    updates: Partial<InventoryReconciliation>,
+    options?: { persist?: boolean }
+  ): Promise<{ success: boolean; message: string }> => {
+    const snapshot = reconciliationRef.current;
+    if (snapshot.cerrada || snapshot.pazYSalvoIssued) {
+      return {
+        success: false,
+        message: 'BLOQUEO INMUTABLE: La conciliación está sellada con Paz y Salvo.',
+      };
+    }
+
+    const next: InventoryReconciliation = { ...snapshot, ...updates };
+    const discrepancy =
+      (Number(next.deliveredUnits) || 0) -
+      ((Number(next.degustatedUnitsReported) || 0) + (Number(next.returnedRemanentUnits) || 0));
+    next.discrepancyUnits = discrepancy;
+    next.discrepancyStatus =
+      discrepancy === 0
+        ? 'CUADRADO'
+        : Math.abs(discrepancy) <= 1
+        ? 'DESVIACION_ACEPTABLE'
+        : 'MERMA_NO_JUSTIFICADA';
+    next.balanceDueCompanyOrPromotorUsd = Number(
+      ((Number(next.approvedPettyCashUsd) || 0) - (Number(next.totalExpensesReportedUsd) || 0)).toFixed(2)
     );
-    return {
-      success: true,
-      message: 'Factura registrada con éxito. En cola de validación fiscal.',
-    };
+
+    syncReconciliationToState(next);
+
+    if (options?.persist === false || !isSupabaseConfigured || !isRealUuid(next.id)) {
+      return { success: true, message: 'Conciliación actualizada.' };
+    }
+
+    try {
+      await updateReconciliationInSupabase(next.id, updates);
+      return { success: true, message: 'Conciliación guardada en Supabase.' };
+    } catch (err) {
+      syncReconciliationToState(snapshot);
+      return {
+        success: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo persistir la conciliación; se revirtió el cambio.',
+      };
+    }
   };
 
-  const validateFiscalReceipt = (receiptId: string, isValid: boolean, notes?: string) => {
-    setReconciliation((prev) => ({
-      ...prev,
-      receipts: prev.receipts.map((r) =>
-        r.id === receiptId
-          ? {
-              ...r,
-              isValidatedByContraloria: isValid,
-              validationNotes:
-                notes || (isValid ? 'Conforme fiscalmente.' : 'Rechazada por inconformidad.'),
-            }
-          : r
-      ),
-    }));
-
-    addAuditLog(
-      'EXPENSE',
-      receiptId,
-      isValid ? 'FACTURA_CONTRALORIA_CONFORME' : 'FACTURA_CONTRALORIA_RECHAZADA',
-      undefined,
-      isValid ? 'VALIDADO' : 'OBSERVADO',
-      notes
-    );
-  };
-
-  const updateReconciliation = (updates: Partial<InventoryReconciliation>) => {
-    setReconciliation((prev) => {
-      const next = { ...prev, ...updates };
-      const discrepancy =
-        (Number(next.deliveredUnits) || 0) -
-        ((Number(next.degustatedUnitsReported) || 0) + (Number(next.returnedRemanentUnits) || 0));
-      next.discrepancyUnits = discrepancy;
-      next.discrepancyStatus =
-        discrepancy === 0
-          ? 'CUADRADO'
-          : Math.abs(discrepancy) <= 1
-          ? 'DESVIACION_ACEPTABLE'
-          : 'MERMA_NO_JUSTIFICADA';
-      next.balanceDueCompanyOrPromotorUsd =
-        (Number(next.approvedPettyCashUsd) || 0) - (Number(next.totalExpensesReportedUsd) || 0);
-      return next;
-    });
-  };
-
-  const closeReconciliationAndIssuePazYSalvo = (notes: string) => {
+  const closeReconciliationAndIssuePazYSalvo = async (
+    notes: string
+  ): Promise<{ success: boolean; message: string; certificado?: CertificadoPazYSalvo }> => {
+    const activeConc = reconciliationRef.current;
     const variance =
-      reconciliation.deliveredUnits -
-      (reconciliation.degustatedUnitsReported + reconciliation.returnedRemanentUnits);
+      activeConc.deliveredUnits -
+      (activeConc.degustatedUnitsReported + activeConc.returnedRemanentUnits);
 
     if (variance !== 0) {
       return {
@@ -1024,150 +1436,302 @@ export const AppProvider: React.FC<{
       };
     }
 
-    const certHash =
-      'SHA256:' +
-      Array.from(crypto.getRandomValues(new Uint8Array(32)))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-
-    const targetCode = reconciliation.requestCode || requests[0]?.requestCode || 'GENERAL';
-
-    setReconciliation((prev) => ({
-      ...prev,
-      requestCode: targetCode,
-      discrepancyStatus: 'CUADRADO',
-      pazYSalvoIssued: true,
-      pazYSalvoIssueDate: new Date().toISOString(),
-      pazYSalvoHash: certHash,
-      auditNotes: notes,
-    }));
-
-    setRequests((prev) =>
-      prev.map((r) => (r.requestCode === targetCode ? { ...r, status: 'CONCILIADO_CERRADO' } : r))
-    );
-
-    addAuditLog(
-      'RECONCILIATION',
-      targetCode,
-      'EMISION_PAZ_Y_SALVO_DIGITAL',
-      'RENDICION_PENDIENTE',
-      'CONCILIADO_CERRADO',
-      notes
-    );
-    return {
-      success: true,
-      message: 'Conciliación cerrada exitosamente. Certificado digital de Paz y Salvo emitido!',
-    };
-  };
-
-  const updateVisit = (visitId: string, updates: Partial<ScheduledVisit>) => {
-    setVisits((prev) => prev.map((v) => (v.id === visitId ? { ...v, ...updates } : v)));
-  };
-
-  const updateVisitFromProductFill = (visitId: string, product: string, quantityInput: string) => {
-    const fields = buildProductFields(product, quantityInput);
-    setVisits((prev) => prev.map((v) => (v.id === visitId ? { ...v, ...fields } : v)));
-  };
-
-  const addVisit = (visit: Omit<ScheduledVisit, 'id'>) => {
-    const promotoraPool = users
-      .filter((u) => u.role === 'promotora')
-      .map((u) => u.name.trim());
-    const requestedKey = canonicalStaffKey(visit.promotoraName || '');
-    const matchedActiveName =
-      promotoraPool.find((p) => canonicalStaffKey(p) === requestedKey) ||
-      promotoraPool[0] ||
-      'POR ASIGNAR (Trade Marketing)';
-    const matchedKey = canonicalStaffKey(matchedActiveName);
-
-    let finalPromotora = matchedActiveName;
-    const hasConflict =
-      Boolean(matchedKey) &&
-      !matchedActiveName.toUpperCase().startsWith('POR ASIGNAR') &&
-      visits.some(
-        (v) =>
-          v.dayLabel === visit.dayLabel &&
-          v.shift === visit.shift &&
-          canonicalStaffKey(v.promotoraName) === matchedKey
-      );
-    if (hasConflict) {
-      const occupiedKeys = new Set(
-        visits
-          .filter((v) => v.dayLabel === visit.dayLabel && v.shift === visit.shift)
-          .map((v) => canonicalStaffKey(v.promotoraName))
-          .filter(Boolean)
-      );
-      const available = promotoraPool.find((p) => !occupiedKeys.has(canonicalStaffKey(p)));
-      if (available) finalPromotora = available;
+    if (!isSupabaseConfigured || !isRealUuid(activeConc.requestId)) {
+      return {
+        success: false,
+        message:
+          'Solo el servidor PostgreSQL (`rpc_emitir_paz_y_salvo`) puede emitir y firmar criptográficamente un Paz y Salvo oficial.',
+      };
     }
 
+    try {
+      const { certificado, requisicion, conciliacion } = await issuePazYSalvoInSupabase(
+        activeConc.requestId,
+        notes
+      );
+
+      const sealedConc: InventoryReconciliation = {
+        ...conciliacion,
+        receipts: activeConc.receipts,
+        pazYSalvoIssued: true,
+        cerrada: true,
+        pazYSalvoCertificateCode: certificado.codigo_certificado,
+        pazYSalvoIssueDate: certificado.emitido_en,
+        pazYSalvoHash: `SHA256:${certificado.sha256_hash}`,
+      };
+
+      syncReconciliationToState(sealedConc);
+      setCertificadosPazYSalvo((prev) => ({
+        ...prev,
+        [requisicion.id]: certificado,
+      }));
+      setRequests((prev) => prev.map((r) => (r.id === requisicion.id ? requisicion : r)));
+
+      addAuditLog(
+        'RECONCILIATION',
+        requisicion.requestCode,
+        'EMISION_PAZ_Y_SALVO_DIGITAL',
+        'RENDICION_PENDIENTE',
+        'CONCILIADO_CERRADO',
+        `${certificado.codigo_certificado} · SHA256:${certificado.sha256_hash.slice(0, 16)}… · ${notes}`
+      );
+
+      return {
+        success: true,
+        message: `Paz y Salvo ${certificado.codigo_certificado} emitido y sellado con SHA-256 real en PostgreSQL.`,
+        certificado,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo emitir el certificado de Paz y Salvo en servidor.',
+      };
+    }
+  };
+
+  const lookupClientCode = (storeId: string, storeName: string): string => {
+    const byId = stores.find((s) => s.id === storeId);
+    if (byId?.clientCode) return byId.clientCode;
+    const norm = storeName.trim().toUpperCase();
+    const byName = stores.find((s) => s.name.trim().toUpperCase() === norm);
+    return byName?.clientCode || '';
+  };
+
+  const applySavedRowsToState = (
+    savedRows: Array<{
+      id: string;
+      client_temp_id?: string | null;
+      promotora_id?: string | null;
+      promotora_nombre?: string | null;
+    }>
+  ) => {
+    if (savedRows.length === 0) return;
+    setVisits((prev) =>
+      prev.map((v) => {
+        const matched = savedRows.find(
+          (r) =>
+            (r.client_temp_id && r.client_temp_id === v.id) ||
+            r.id === v.id ||
+            (v.cronogramaId && r.id === v.cronogramaId)
+        );
+        if (!matched) return v;
+        return {
+          ...v,
+          id: isRealUuid(v.id) ? v.id : matched.id,
+          cronogramaId: matched.id,
+          promotoraId: matched.promotora_id ?? v.promotoraId,
+          promotoraName: matched.promotora_nombre ?? v.promotoraName,
+        };
+      })
+    );
+  };
+
+  const updateVisit = async (
+    visitId: string,
+    updates: Partial<ScheduledVisit>,
+    options?: { persist?: boolean }
+  ): Promise<MatrixMutationResult> => {
+    const snapshot = visitsRef.current;
+    const target = snapshot.find((v) => v.id === visitId);
+    if (!target) return { ok: false, error: 'Registro no encontrado en la matriz.' };
+
+    const mergedVisit: ScheduledVisit = { ...target, ...updates };
+    setVisits((prev) => prev.map((v) => (v.id === visitId ? mergedVisit : v)));
+
+    if (!options?.persist || !isSupabaseConfigured) {
+      return { ok: true };
+    }
+
+    try {
+      const payload = buildMatrixUpsertRowFromVisit(mergedVisit, {
+        clientCode: lookupClientCode(mergedVisit.storeId, mergedVisit.storeName),
+        clientTempId: mergedVisit.id,
+      });
+      const res = await persistMatrixUpsertBatch([payload]);
+      applySavedRowsToState(res.filas);
+      return { ok: true };
+    } catch (err) {
+      setVisits(snapshot);
+      return {
+        ok: false,
+        reverted: true,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo guardar el cambio en Supabase; se revirtió el estado anterior.',
+      };
+    }
+  };
+
+  const updateVisitFromProductFill = async (
+    visitId: string,
+    product: string,
+    quantityInput: string
+  ): Promise<MatrixMutationResult> => {
+    const fields = buildProductFields(product, quantityInput);
+    return updateVisit(visitId, fields, { persist: true });
+  };
+
+  const addVisit = async (
+    visit: Omit<ScheduledVisit, 'id'>
+  ): Promise<MatrixMutationResult & { visit?: ScheduledVisit }> => {
+    const snapshot = visitsRef.current;
+    const occupiedKeys = new Set(
+      snapshot
+        .filter(
+          (v) =>
+            v.shift === visit.shift &&
+            (v.date ? v.date === visit.date : v.dayLabel === visit.dayLabel) &&
+            v.promotoraName &&
+            !v.promotoraName.toUpperCase().startsWith('POR ASIGNAR') &&
+            !v.promotoraName.toUpperCase().startsWith('SIN ASIGNAR')
+        )
+        .map((v) => canonicalStaffKey(v.promotoraName))
+        .filter(Boolean)
+    );
+
+    const resolvedProm = resolveRealPromotoraForMatrix(users, visit.promotoraName, occupiedKeys);
+    const tempId = `vis_pending_${Date.now()}_${Math.floor(Math.random() * 900 + 100)}`;
     const newVisit: ScheduledVisit = {
       ...visit,
-      promotoraName: finalPromotora,
-      id: `vis_${Date.now()}_${Math.floor(Math.random() * 900 + 100)}`,
+      promotoraId: resolvedProm.promotoraId,
+      promotoraName: resolvedProm.promotoraName,
+      id: tempId,
     };
+
     setVisits((prev) => [newVisit, ...prev]);
-    addAuditLog(
-      'CAMPO',
-      newVisit.id,
-      'NUEVA_ACTIVACION_AGREGADA',
-      'N/A',
-      newVisit.status,
-      `Tienda: ${newVisit.storeName}, Producto: ${newVisit.productFocus}`
-    );
+
+    if (!isSupabaseConfigured) {
+      addAuditLog(
+        'CAMPO',
+        newVisit.id,
+        'NUEVA_ACTIVACION_AGREGADA',
+        'N/A',
+        newVisit.status,
+        `Tienda: ${newVisit.storeName}, Producto: ${newVisit.productFocus}`
+      );
+      return { ok: true, visit: newVisit };
+    }
+
+    try {
+      const payload = buildMatrixUpsertRowFromVisit(newVisit, {
+        clientCode: lookupClientCode(newVisit.storeId, newVisit.storeName),
+        clientTempId: tempId,
+      });
+      const res = await persistMatrixUpsertBatch([payload]);
+      applySavedRowsToState(res.filas);
+      const savedId = res.filas[0]?.id || tempId;
+      addAuditLog(
+        'CAMPO',
+        savedId,
+        'NUEVA_ACTIVACION_AGREGADA',
+        'N/A',
+        newVisit.status,
+        `Tienda: ${newVisit.storeName}, Producto: ${newVisit.productFocus} (persistido en cronograma_degustaciones)`
+      );
+      return { ok: true, visit: { ...newVisit, id: savedId, cronogramaId: savedId } };
+    } catch (err) {
+      setVisits(snapshot);
+      return {
+        ok: false,
+        reverted: true,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo guardar la activación en Supabase; la fila fue revertida.',
+      };
+    }
   };
 
-  const deleteVisit = (visitId: string) => {
-    recordDeletedVisitIds([visitId]);
-    setVisits((prev) => {
-      const next = prev.filter((v) => v.id !== visitId);
-      if (next.length === 0) {
-        markVisitsCleared();
-      }
-      return next;
-    });
-    addAuditLog(
-      'CAMPO',
-      visitId,
-      'ACTIVACION_ELIMINADA',
-      'ACTIVO',
-      'ELIMINADO',
-      'Registro retirado de la matriz'
-    );
+  const deleteVisit = async (
+    visitId: string,
+    motivo = 'CANCELADO_DESDE_MATRIZ'
+  ): Promise<MatrixMutationResult> => {
+    const res = await deleteVisitsByIds([visitId], motivo);
+    return { ok: res.ok, error: res.error, reverted: res.reverted };
   };
 
-  const deleteVisitsByIds = (visitIds: string[]): number => {
+  const deleteVisitsByIds = async (
+    visitIds: string[],
+    motivo = 'CANCELADO_DESDE_MATRIZ'
+  ): Promise<MatrixMutationResult & { removed: number; preservedHistorical: number }> => {
     const idSet = new Set(visitIds.filter(Boolean));
-    if (idSet.size === 0) return 0;
+    if (idSet.size === 0) return { ok: true, removed: 0, preservedHistorical: 0 };
 
-    recordDeletedVisitIds(idSet);
-    let removedCount = 0;
-
-    setVisits((prev) => {
-      const next = prev.filter((v) => !idSet.has(v.id));
-      removedCount = prev.length - next.length;
-      if (next.length === 0) {
-        markVisitsCleared();
-        if (module1Bundle?.visitsForSchedule) {
-          recordDeletedVisitIds(module1Bundle.visitsForSchedule.map((sv) => sv.id));
-        }
-      }
-      return next;
-    });
-
-    addAuditLog(
-      'CAMPO',
-      'BATCH_DELETE_SELECTED',
-      'ELIMINACION_SELECCIONADOS_TABLA',
-      'ACTIVO',
-      'ELIMINADO',
-      `Se eliminaron ${idSet.size} registros seleccionados de la Tabla General de Activaciones`
+    const snapshot = visitsRef.current;
+    const classified = classifyVisitsForLogicalCancel(snapshot, Array.from(idSet));
+    const removableIdSet = new Set(
+      snapshot
+        .filter((v) => idSet.has(v.id) && !classified.preservedHistoricalIds.includes(v.id))
+        .map((v) => v.id)
     );
 
-    return removedCount || idSet.size;
+    if (removableIdSet.size === 0) {
+      return {
+        ok: false,
+        removed: 0,
+        preservedHistorical: classified.preservedHistoricalIds.length,
+        error:
+          'Los registros seleccionados están completados o archivados en Historial y no pueden cancelarse.',
+      };
+    }
+
+    // Actualización optimista (retira de la vista activa las filas cancelables)
+    setVisits((prev) => prev.filter((v) => !removableIdSet.has(v.id)));
+
+    if (classified.cancelableCronogramaIds.length > 0 && isSupabaseConfigured) {
+      try {
+        const rpcRes = await persistMatrixLogicalCancel(classified.cancelableCronogramaIds, motivo);
+        recordDeletedVisitIds(removableIdSet);
+        addAuditLog(
+          'CAMPO',
+          'BATCH_CANCEL_LOGICO',
+          'CANCELACION_LOGICA_MATRIZ',
+          'ACTIVO',
+          'CANCELADA_HISTORIAL',
+          `Cancelación lógica en BD: ${rpcRes.canceladas} registro(s) archivados como CANCELADA (${rpcRes.preservadas_historicas} históricos preservados)`
+        );
+        return {
+          ok: true,
+          removed: rpcRes.canceladas + classified.localOnlyIds.length,
+          preservedHistorical:
+            classified.preservedHistoricalIds.length + rpcRes.preservadas_historicas,
+        };
+      } catch (err) {
+        setVisits(snapshot);
+        return {
+          ok: false,
+          reverted: true,
+          removed: 0,
+          preservedHistorical: classified.preservedHistoricalIds.length,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Error ejecutando cancelación lógica en Supabase; se revirtieron los cambios.',
+        };
+      }
+    }
+
+    recordDeletedVisitIds(removableIdSet);
+    addAuditLog(
+      'CAMPO',
+      'BATCH_CANCEL_LOGICO',
+      'CANCELACION_LOGICA_MATRIZ',
+      'ACTIVO',
+      'CANCELADA',
+      `Se cancelaron ${removableIdSet.size} registro(s) de la matriz`
+    );
+    return {
+      ok: true,
+      removed: removableIdSet.size,
+      preservedHistorical: classified.preservedHistoricalIds.length,
+    };
   };
 
-  const batchFillClientsProductShift = (params: {
+  const batchFillClientsProductShift = async (params: {
     storeIds: string[];
     product: string;
     quantityInput: string;
@@ -1176,157 +1740,77 @@ export const AppProvider: React.FC<{
     date?: string;
     promotoraName?: string;
     sellerName?: string;
-  }): { countUpdated: number; countCreated: number } => {
-    const {
-      storeIds,
-      product,
-      quantityInput,
-      shift,
-      dayLabel,
-      date,
-      promotoraName,
-      sellerName,
-    } = params;
-    const effectiveDate = date || getTodayVeYmd();
-    const calc = calculateProductionSupplies(product, quantityInput);
-    const {
-      productFocus: prodUpper,
-      mortadelaQty,
-      espaldaQty,
-      arrozQty,
-      azucarGrams,
-      lecheGrams,
-      rowHighlight,
-      plannedUnits,
-      additionalGoods,
-      operationalSupplies,
-    } = calc;
-
-    const uniqueStoreIds = Array.from(new Set(storeIds));
-    // Coincidencia por fecha ISO real (respaldo: dayLabel si la fila no tiene fecha)
-    const sameSlot = (v: ScheduledVisit) =>
-      v.shift === shift && (v.date ? v.date === effectiveDate : v.dayLabel === dayLabel);
-    const countUpdated = visits.filter(
-      (v) => uniqueStoreIds.includes(v.storeId) && sameSlot(v)
-    ).length;
-    const storesWithVisit = new Set(visits.filter(sameSlot).map((v) => v.storeId));
-    const countCreated = uniqueStoreIds.filter(
-      (id) => !storesWithVisit.has(id) && stores.some((s) => s.id === id)
-    ).length;
-
-    setVisits((prev) => {
-      const nextVisits = [...prev];
-      const visitedStoreIds = new Set<string>();
-
-      for (let i = 0; i < nextVisits.length; i++) {
-        const v = nextVisits[i];
-        if (uniqueStoreIds.includes(v.storeId) && sameSlot(v)) {
-          visitedStoreIds.add(v.storeId);
-          nextVisits[i] = {
-            ...v,
-            date: effectiveDate,
-            productFocus: prodUpper,
-            fillProductSelection: prodUpper,
-            fillQuantityInput: calc.fillQuantityInput,
-            mortadelaQty,
-            espaldaQty,
-            arrozQty,
-            azucarGrams,
-            lecheGrams,
-            plannedUnits,
-            rowHighlight,
-            promotoraName: promotoraName || v.promotoraName,
-            sellerName: sellerName || v.sellerName,
-            additionalGoods,
-            operationalSupplies,
-          };
-        }
-      }
-
-      const promotoraPool = users
-        .filter((u) => u.role === 'promotora')
-        .map((u) => u.name.trim());
-
-      const occupiedPromotoraKeys = new Set<string>();
-      nextVisits.forEach((v) => {
-        if (
-          v.dayLabel === dayLabel &&
-          v.shift === shift &&
-          v.promotoraName &&
-          !v.promotoraName.toUpperCase().startsWith('POR ASIGNAR') &&
-          !v.promotoraName.toUpperCase().startsWith('SIN ASIGNAR')
-        ) {
-          occupiedPromotoraKeys.add(canonicalStaffKey(v.promotoraName));
-        }
-      });
-
-      for (const storeId of uniqueStoreIds) {
-        if (!visitedStoreIds.has(storeId)) {
-          const storeObj = stores.find((s) => s.id === storeId);
-          if (!storeObj) continue;
-
-          let assignedPromotora = '';
-          const requestedKey = promotoraName ? canonicalStaffKey(promotoraName) : '';
-          const requestedMatch = requestedKey
-            ? promotoraPool.find((p) => canonicalStaffKey(p) === requestedKey)
-            : undefined;
-
-          if (requestedMatch && !occupiedPromotoraKeys.has(requestedKey)) {
-            assignedPromotora = requestedMatch;
-            occupiedPromotoraKeys.add(requestedKey);
-          } else {
-            const freePromotora = promotoraPool.find(
-              (p) => !occupiedPromotoraKeys.has(canonicalStaffKey(p))
-            );
-            assignedPromotora =
-              freePromotora || promotoraPool[0] || 'POR ASIGNAR (Trade Marketing)';
-            if (!assignedPromotora.toUpperCase().startsWith('POR ASIGNAR')) {
-              occupiedPromotoraKeys.add(canonicalStaffKey(assignedPromotora));
-            }
-          }
-
-          const newVisit: ScheduledVisit = {
-            id: `vis_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}_${storeId}`,
-            date: effectiveDate,
-            dayLabel,
-            shift,
-            storeId: storeObj.id,
-            storeName: storeObj.name,
-            zone: storeObj.zone,
-            productFocus: prodUpper,
-            fillProductSelection: prodUpper,
-            fillQuantityInput: calc.fillQuantityInput,
-            promotoraId: 'usr_prom_01',
-            promotoraName: assignedPromotora,
-            sellerName: sellerName || storeObj.sellerName || 'FDV Codizulca',
-            plannedUnits,
-            mortadelaQty,
-            espaldaQty,
-            arrozQty,
-            azucarGrams,
-            lecheGrams,
-            rowHighlight,
-            status: 'PENDIENTE',
-            additionalGoods,
-            operationalSupplies,
-          };
-          nextVisits.unshift(newVisit);
-        }
-      }
-
-      return nextVisits;
+  }): Promise<BatchFillClientsResult> => {
+    const snapshot = visitsRef.current;
+    const plan = buildBatchFillPlan({
+      existingVisits: snapshot,
+      stores,
+      users,
+      ...params,
     });
 
-    addAuditLog(
-      'CAMPO',
-      'BATCH_FILL',
-      'LLENADO_POR_LOTE_EXITOSO',
-      'VARIOS',
-      prodUpper,
-      `Llenado en lote: ${storeIds.length} clientes, producto: ${prodUpper}, jornada: ${shift}, fecha: ${effectiveDate}`
-    );
+    if (plan.affectedVisits.length === 0) {
+      return {
+        ok: false,
+        countUpdated: 0,
+        countCreated: 0,
+        error: 'No se encontraron tiendas válidas para el llenado por lote.',
+      };
+    }
 
-    return { countUpdated, countCreated };
+    setVisits(plan.nextVisits);
+
+    if (!isSupabaseConfigured) {
+      addAuditLog(
+        'CAMPO',
+        'BATCH_FILL',
+        'LLENADO_POR_LOTE_EXITOSO',
+        'VARIOS',
+        params.product.toUpperCase(),
+        `Llenado en lote local: ${params.storeIds.length} clientes, jornada: ${params.shift}`
+      );
+      return {
+        ok: true,
+        countUpdated: plan.countUpdated,
+        countCreated: plan.countCreated,
+      };
+    }
+
+    try {
+      const rowsPayload = plan.affectedVisits.map((v) =>
+        buildMatrixUpsertRowFromVisit(v, {
+          clientCode: lookupClientCode(v.storeId, v.storeName),
+          clientTempId: v.id,
+        })
+      );
+      const rpcRes = await persistMatrixUpsertBatch(rowsPayload);
+      applySavedRowsToState(rpcRes.filas);
+      addAuditLog(
+        'CAMPO',
+        'BATCH_FILL',
+        'LLENADO_POR_LOTE_EXITOSO',
+        'VARIOS',
+        params.product.toUpperCase(),
+        `Llenado en lote persistido en Supabase: ${rpcRes.insertadas} creadas, ${rpcRes.actualizadas} actualizadas (jornada ${params.shift})`
+      );
+      return {
+        ok: true,
+        countUpdated: plan.countUpdated,
+        countCreated: plan.countCreated,
+      };
+    } catch (err) {
+      setVisits(snapshot);
+      return {
+        ok: false,
+        reverted: true,
+        countUpdated: 0,
+        countCreated: 0,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo guardar el lote en Supabase; la tabla fue revertida.',
+      };
+    }
   };
 
   const upsertVisitFromApprovedTasting = (
@@ -1408,7 +1892,7 @@ export const AppProvider: React.FC<{
     );
     const resolvedStoreId = existingStore?.id || `st_sup_sync_${solicitudId}`;
     if (!existingStore && cleanStoreName !== 'PDV Sin Nombre') {
-      setStores((prev) => {
+      setFallbackStores((prev) => {
         if (prev.some((s) => s.name.trim().toUpperCase() === cleanStoreName.toUpperCase())) {
           return prev;
         }
@@ -1577,7 +2061,10 @@ export const AppProvider: React.FC<{
     return hadMatch;
   };
 
-  const clearVisitsBatch = (criteria: ClearVisitsCriteria): { removed: number; preservedNonPending: number } => {
+  const clearVisitsBatch = async (
+    criteria: ClearVisitsCriteria
+  ): Promise<ClearVisitsBatchResult> => {
+    const snapshot = visitsRef.current;
     const matches = (v: ScheduledVisit) => {
       if (criteria.mode === 'ALL') return true;
       if (criteria.storeIds && !criteria.storeIds.includes(v.storeId)) return false;
@@ -1586,38 +2073,37 @@ export const AppProvider: React.FC<{
       if (criteria.date && v.date !== criteria.date) return false;
       return true;
     };
-    const targets = visits.filter(matches);
-    const removable = targets.filter((v) => v.status === 'PENDIENTE');
-    const removeIds = new Set(removable.map((v) => v.id));
-    if (removeIds.size > 0) {
-      recordDeletedVisitIds(removeIds);
-      setVisits((prev) => {
-        const next = prev.filter((v) => !removeIds.has(v.id));
-        if (next.length === 0 || criteria.mode === 'ALL') {
-          markVisitsCleared();
-          if (module1Bundle?.visitsForSchedule) {
-            recordDeletedVisitIds(module1Bundle.visitsForSchedule.map((sv) => sv.id));
-          }
-        }
-        return next;
-      });
+    const targets = snapshot.filter(matches);
+    const removable = targets.filter((v) => v.status === 'PENDIENTE' && !v.enHistorial);
+    const preservedNonPending = targets.length - removable.length;
+    if (removable.length === 0) {
+      return { ok: true, removed: 0, preservedNonPending };
     }
-    addAuditLog(
-      'CAMPO',
-      'BATCH_CLEAR',
-      'LIMPIEZA_POR_LOTE',
-      'ACTIVO',
-      'ELIMINADO',
-      `Modo ${criteria.mode}: ${removeIds.size} filas eliminadas, ${targets.length - removeIds.size} preservadas (no PENDIENTE)`
+
+    const cancelRes = await deleteVisitsByIds(
+      removable.map((v) => v.id),
+      `LIMPIEZA_LOTE_${criteria.mode}`
     );
-    return { removed: removeIds.size, preservedNonPending: targets.length - removeIds.size };
+
+    return {
+      ok: cancelRes.ok,
+      error: cancelRes.error,
+      reverted: cancelRes.reverted,
+      removed: cancelRes.removed,
+      preservedNonPending: preservedNonPending + cancelRes.preservedHistorical,
+    };
   };
 
   // ---- Estado de sincronización agregado (única fuente: servidor) ----
   const syncErrorMessage =
-    supabaseError || solicitudesContraloria.error || degustacionNotifications.syncError || null;
+    supabaseError ||
+    masterData.error ||
+    solicitudesContraloria.error ||
+    degustacionNotifications.syncError ||
+    null;
   const isAnySyncing =
     isLoadingSupabase ||
+    masterData.cargando ||
     solicitudesContraloria.isLoading ||
     degustacionNotifications.isLoadingNotifications;
   const syncState: SyncState = isAnySyncing
@@ -1630,12 +2116,14 @@ export const AppProvider: React.FC<{
   const syncStatus: SyncStatus = {
     state: syncState,
     errorMessage: syncErrorMessage,
-    lastSyncAt: module1Bundle?.fetchedAt ?? null,
+    lastSyncAt: module1Bundle?.fetchedAt ?? masterData.ultimaActualizacionIso ?? null,
   };
 
   const refreshAll = async () => {
     await Promise.all([
       refreshSupabaseData(),
+      refreshFinancialData(),
+      masterData.refrescar(),
       degustacionNotifications.reloadNotifications(),
       solicitudesContraloria.refreshSolicitudes(),
     ]);
@@ -1648,12 +2136,14 @@ export const AppProvider: React.FC<{
         currentRole,
         setCurrentRole,
         verifiedIamRole,
+        verifiedSucursal,
         isStrictAdmin,
         isContraloriaOrAdmin,
         isTradeOpsRole,
         caracasWeekStartYmd,
         users,
         stores,
+        masterData,
         visits,
         requests,
         tastingReports,
@@ -1673,6 +2163,18 @@ export const AppProvider: React.FC<{
         focusedTastingSnapshot,
         setFocusedTastingSnapshot,
         solicitudesContraloria,
+        campanasTrade,
+        presupuestosTrade,
+        tarifarioCostos,
+        conciliacionesByReqId,
+        certificadosPazYSalvo,
+        isLoadingFinancial,
+        refreshFinancialData,
+        selectReconciliationForRequest,
+        saveCampanaTrade,
+        savePresupuestoTrade,
+        saveTarifarioCosto,
+        verifyPazYSalvoCertificate,
         advanceRequisitionWorkflow,
         createRequisition,
         addFiscalReceipt,

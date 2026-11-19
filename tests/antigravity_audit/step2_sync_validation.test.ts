@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -502,29 +502,27 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
 
     try {
       // Launch 2 simultaneous creations without pre-assigned code
+      contraloriaSvc.resetSolicitudesBackendModeForTests();
       const [solA, solB] = await Promise.all([
         contraloriaSvc.createSolicitudContraloriaInSupabase(payload),
         contraloriaSvc.createSolicitudContraloriaInSupabase(payload),
       ]);
 
-      // CRITICAL SPLIT-BRAIN BUG DISCOVERED:
-      // 1) Both compute MP-07-0073 concurrently.
-      // 2) Second POST hits 409 (23505: "...solicitudes_contraloria_codigo_correlativo_key").
-      // 3) isDedicatedTableMissing() at line 458 tests /solicitudes_contraloria/i -> returns TRUE on 409!
-      // 4) Service corrupts detectedBackendMode = 'surveys_envelope' and inserts a DUPLICATE MP-07-0073 into public.surveys!
-      assert.equal(solA.codigoCorrelativo, 'MP-07-0073');
-      assert.equal(
-        solB.codigoCorrelativo,
-        'MP-07-0073',
-        'SPLIT-BRAIN CONFIRMADO: Ambas solicitudes concurrentes reciben el mismo correlativo MP-07-0073'
+      // HITO 4 / P-05 FIX VERIFICADO:
+      // 1) isDedicatedTableMissing() NUNCA trata 409/23505 como tabla inexistente.
+      // 2) Dos envíos simultáneos obtienen correlativos ÚNICOS (MP-07-0073 y MP-07-0074).
+      // 3) Ambos persisten en public.solicitudes_contraloria y CERO caen en public.surveys (Split-Brain cerrado).
+      const codes = [solA.codigoCorrelativo, solB.codigoCorrelativo].sort();
+      assert.deepEqual(
+        codes,
+        ['MP-07-0073', 'MP-07-0074'],
+        'Ambas solicitudes concurrentes deben recibir correlativos únicos sin colisión ni duplicidad'
       );
-      assert.equal(mock.tables.solicitudes_contraloria.length, 2); // seed MP-07-0072 + 1st MP-07-0073
+      assert.equal(mock.tables.solicitudes_contraloria.length, 3); // seed MP-07-0072 + MP-07-0073 + MP-07-0074
       assert.equal(
-        mock.tables.surveys.some(
-          (s) => s.type === 'SolicitudContraloria' && s.creatorId === 'MP-07-0073'
-        ),
-        true,
-        'La segunda solicitud burló UNIQUE cayendo en public.surveys por falso positivo en isDedicatedTableMissing()'
+        mock.tables.surveys.some((s) => s.type === 'SolicitudContraloria'),
+        false,
+        'Cero solicitudes deben fugarse a public.surveys ante conflicto 409/23505'
       );
     } finally {
       mock.faultInjection.artificialDelayMs = 0;
@@ -533,8 +531,8 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
     summaryReport.push({
       id: 'SYNC-06',
       flow: 'Solicitudes de Productos a Contraloría (MP-07-XXXX)',
-      outcome: 'FALLIDO',
-      detail: 'Split-Brain crítico confirmado: ante colisión 23505, isDedicatedTableMissing() coincide con /solicitudes_contraloria/i, degrada el modo a surveys_envelope y duplica el correlativo MP-07-0073 entre dos tablas distintas (+ RLS abierto a anon).',
+      outcome: 'APROBADO',
+      detail: 'Hito 4 / P-05 cerrado: isDedicatedTableMissing() rechaza falsos positivos en 409/23505, secuencia MP-07-XXXX asignada atómicamente vía RPC o reintento sin Split-Brain en public.surveys.',
     });
   });
 
@@ -574,7 +572,7 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
     });
   });
 
-  await t.test('SYNC-08: Desajuste de storageKey entre supabaseClient.ts, cleanSync.ts y authService.ts', async () => {
+  await t.test('SYNC-08: Preservación de sesión (storageKey) entre supabaseClient.ts, cleanSync.ts y authService.ts', async () => {
     const fakeStore = new Map<string, string>();
     const mockStorage: Storage = {
       get length() {
@@ -614,24 +612,28 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
       const detectedBefore = authSvcMod.hasStoredSupabaseAuthToken();
       const purgedKeys = cleanSyncMod.runCleanSyncMigration();
 
-      // Prove the bug empirically:
+      // Regresión: la sesión activa debe detectarse y NO purgarse (corregido en Hito 0)
       assert.equal(
         detectedBefore,
-        false,
-        'BUG CONFIRMADO: hasStoredSupabaseAuthToken() ignora codizulca.supabase.auth.v1 porque solo busca /^sb-.*-auth-token$/i'
+        true,
+        'hasStoredSupabaseAuthToken() debe detectar codizulca.supabase.auth.v1'
       );
       assert.ok(
-        purgedKeys.includes('codizulca.supabase.auth.v1'),
-        'BUG CONFIRMADO: runCleanSyncMigration() purga la sesión activa codizulca.supabase.auth.v1'
+        !purgedKeys.includes('codizulca.supabase.auth.v1'),
+        'runCleanSyncMigration() NO debe purgar la sesión activa codizulca.supabase.auth.v1'
+      );
+      assert.equal(
+        mockStorage.getItem('codizulca.supabase.auth.v1') !== null,
+        true,
+        'La sesión debe seguir presente en localStorage tras la migración'
       );
 
       summaryReport.push({
         id: 'SYNC-08',
         flow: 'Persistencia de Sesión Auth vs cleanSync Boot Migration',
-        outcome: 'FALLIDO',
-        detail: 'Confirmado: cleanSync.ts elimina codizulca.supabase.auth.v1 y hasStoredSupabaseAuthToken() devuelve siempre false.',
-      });
-    } finally {
+        outcome: 'APROBADO',
+        detail: 'Corregido (Hito 0): cleanSync preserva sb-*, codizulca.* y bases IndexedDB de sesión/offline; hasStoredSupabaseAuthToken() detecta la sesión.',
+      });    } finally {
       delete (globalThis as any).window;
       delete (globalThis as any).localStorage;
       delete (globalThis as any).sessionStorage;

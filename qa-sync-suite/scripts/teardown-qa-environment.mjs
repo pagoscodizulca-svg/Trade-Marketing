@@ -577,6 +577,11 @@ export async function teardownQaEnvironment({ runId = null } = {}) {
       'id',
       allAuthUserIds
     );
+    markLedgerEntriesPurged({
+      resource_type: 'db_row',
+      table_or_bucket: 'profiles',
+      ids: allAuthUserIds,
+    });
   }
 
   for (const uid of allAuthUserIds) {

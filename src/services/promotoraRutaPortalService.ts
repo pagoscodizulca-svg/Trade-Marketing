@@ -1,7 +1,21 @@
-import type { RutaPromotoraRecord } from '../types/degustacionesPipeline';
+import type {
+  EjecucionPdvInput,
+  ResultadoEjecucionRutaPromotora,
+  RutaPromotoraRecord,
+} from '../types/degustacionesPipeline';
 import { getCaracasTodayYmd } from '../utils/caracasWeekCycle';
+import { DEFAULT_GEOFENCE_RADIUS_METERS } from '../utils/geofenceHaversine';
 import type { VerifiedAuthProfile } from './authService';
 import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+
+export interface PortalPdvGeofenceRef {
+  id: string;
+  codigoCliente: string;
+  nombreComercial: string;
+  latitud: number | null;
+  longitud: number | null;
+  radioGeocercaM: number;
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -125,4 +139,148 @@ export async function registerPromotoraRouteStep(
   }
 
   return data as RutaPromotoraRecord;
+}
+
+/**
+ * Consulta las geocercas maestras (`latitud`, `longitud`, `radio_geocerca_m`) de `public.clientes`
+ * dentro de la sucursal autorizada por RLS.
+ */
+export async function fetchPortalPdvGeofences(): Promise<PortalPdvGeofenceRef[]> {
+  if (!isSupabaseConfigured) return [];
+  const client = getSupabaseClient();
+  const { data, error } = await client
+    .from('clientes')
+    .select('id, codigo_cliente, nombre_comercial, latitud, longitud, radio_geocerca_m')
+    .eq('activo', true)
+    .limit(2000);
+
+  if (error || !Array.isArray(data)) {
+    return [];
+  }
+
+  return data.map((raw: Record<string, unknown>) => ({
+    id: String(raw.id || ''),
+    codigoCliente: String(raw.codigo_cliente || '').trim(),
+    nombreComercial: String(raw.nombre_comercial || '').trim(),
+    latitud:
+      raw.latitud !== null && raw.latitud !== undefined && Number.isFinite(Number(raw.latitud))
+        ? Number(raw.latitud)
+        : null,
+    longitud:
+      raw.longitud !== null && raw.longitud !== undefined && Number.isFinite(Number(raw.longitud))
+        ? Number(raw.longitud)
+        : null,
+    radioGeocercaM:
+      raw.radio_geocerca_m !== null &&
+      raw.radio_geocerca_m !== undefined &&
+      Number.isFinite(Number(raw.radio_geocerca_m))
+        ? Number(raw.radio_geocerca_m)
+        : DEFAULT_GEOFENCE_RADIUS_METERS,
+  }));
+}
+
+export function matchRutaPdvGeofence(
+  ruta: Pick<RutaPromotoraRecord, 'cliente_codigo' | 'cliente_nombre'>,
+  catalog: PortalPdvGeofenceRef[]
+): PortalPdvGeofenceRef | null {
+  const codeNorm = String(ruta.cliente_codigo || '').trim().toUpperCase();
+  if (codeNorm) {
+    const byCode = catalog.find(
+      (c) => c.codigoCliente && c.codigoCliente.toUpperCase() === codeNorm
+    );
+    if (byCode) return byCode;
+  }
+
+  const nameNorm = String(ruta.cliente_nombre || '').trim().toLowerCase();
+  if (nameNorm) {
+    const byName = catalog.find(
+      (c) => c.nombreComercial && c.nombreComercial.toLowerCase() === nameNorm
+    );
+    if (byName) return byName;
+  }
+
+  return null;
+}
+
+function isRpcMissingError(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    msg.includes('could not find the function') ||
+    msg.includes('rpc_registrar_ejecucion_ruta_promotora')
+  );
+}
+
+/**
+ * Registra Check-in / Check-out con validación Haversine en servidor, alerta auditada
+ * cuando está fuera de rango y reporte operativo de ejecución en PDV (`B-08`).
+ */
+export async function submitPromotoraRouteExecution(params: {
+  rutaId: string;
+  accion: 'CHECKIN' | 'CHECKOUT';
+  clientSubmissionId: string;
+  lat: number | null;
+  lng: number | null;
+  accuracyMeters?: number | null;
+  motivoFueraGeocerca?: string;
+  ejecucion?: EjecucionPdvInput | null;
+}): Promise<ResultadoEjecucionRutaPromotora> {
+  const cleanId = String(params.rutaId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    throw new Error('Identificador de ruta inválido.');
+  }
+
+  const client = getSupabaseClient();
+  const payload = {
+    ruta_id: cleanId,
+    accion: params.accion,
+    client_submission_id: params.clientSubmissionId,
+    lat: params.lat,
+    lng: params.lng,
+    accuracy_m: params.accuracyMeters ?? null,
+    motivo_fuera_geocerca: params.motivoFueraGeocerca?.trim() || '',
+    ejecucion: params.ejecucion ?? null,
+  };
+
+  const { data, error } = await client.rpc('rpc_registrar_ejecucion_ruta_promotora', {
+    p_payload: payload,
+  });
+
+  if (error) {
+    if (isRpcMissingError(error)) {
+      const fallbackRuta = await registerPromotoraRouteStep(cleanId, params.accion);
+      return {
+        ok: true,
+        ruta: fallbackRuta,
+        distancia_m: null,
+        radio_geocerca_m: DEFAULT_GEOFENCE_RADIUS_METERS,
+        dentro_geocerca: null,
+        alerta_geocerca_registrada: false,
+      };
+    }
+    throw new Error(
+      error.message || 'No se pudo registrar el avance operativo de la degustación.'
+    );
+  }
+
+  const parsed = (data ?? {}) as Record<string, unknown>;
+  if (!parsed.ruta) {
+    throw new Error('Respuesta incompleta del servidor al registrar ejecución en PDV.');
+  }
+
+  return {
+    ok: true,
+    ruta: parsed.ruta as RutaPromotoraRecord,
+    distancia_m: typeof parsed.distancia_m === 'number' ? parsed.distancia_m : null,
+    radio_geocerca_m:
+      typeof parsed.radio_geocerca_m === 'number'
+        ? parsed.radio_geocerca_m
+        : DEFAULT_GEOFENCE_RADIUS_METERS,
+    dentro_geocerca:
+      typeof parsed.dentro_geocerca === 'boolean' ? parsed.dentro_geocerca : null,
+    alerta_geocerca_registrada: Boolean(parsed.alerta_geocerca_registrada),
+  };
 }

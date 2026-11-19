@@ -245,6 +245,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
       displayName: 'Modo Edición Local (Super Admin)',
       appRole: 'admin',
       iamRole: 'super_admin',
+      sucursal: 'GLOBAL',
       rawAppRole: 'super_admin',
       legacyRole: 'gerente_admin',
       staffId: null,

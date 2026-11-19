@@ -49,6 +49,11 @@ import {
   assignAcceptedDegustacionToPromotoraRoute,
   isValidUuid,
 } from '../../services/degustacionesPipelineService';
+import {
+  filterMatrixVisits,
+  normalizeSearchText,
+  resolveRealPromotoraForMatrix,
+} from '../../services/scheduleMatrixService';
 
 export const ScheduleMatrixView: React.FC = () => {
   const { 
@@ -209,21 +214,22 @@ export const ScheduleMatrixView: React.FC = () => {
   };
 
   const filteredGlobalTastingItems = useMemo(() => {
+    const q = normalizeSearchText(searchQuery);
+    const prodFilter = normalizeSearchText(selectedProduct);
     return synchronizedMonthlyTastingItems.filter((item) => {
       if (!matchesSelectedDayFilter(item.date, item.dayLabel)) return false;
       if (selectedShift !== 'TODOS' && item.shift !== selectedShift) return false;
-      if (selectedProduct !== 'TODOS') {
-        const pUpper = (item.productName || '').toUpperCase();
-        if (!pUpper.includes(selectedProduct.toUpperCase())) return false;
+      if (selectedProduct !== 'TODOS' && prodFilter) {
+        const pNorm = normalizeSearchText(item.productName || '');
+        if (!pNorm.includes(prodFilter)) return false;
       }
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
+      if (q) {
         const match =
-          item.storeName.toLowerCase().includes(q) ||
-          item.zone.toLowerCase().includes(q) ||
-          item.responsibleName.toLowerCase().includes(q) ||
-          item.sellerApplicant.toLowerCase().includes(q) ||
-          item.productName.toLowerCase().includes(q);
+          normalizeSearchText(item.storeName).includes(q) ||
+          normalizeSearchText(item.zone).includes(q) ||
+          normalizeSearchText(item.responsibleName).includes(q) ||
+          normalizeSearchText(item.sellerApplicant).includes(q) ||
+          normalizeSearchText(item.productName).includes(q);
         if (!match) return false;
       }
       return true;
@@ -231,6 +237,8 @@ export const ScheduleMatrixView: React.FC = () => {
   }, [
     synchronizedMonthlyTastingItems,
     selectedDay,
+    matrixDateFrom,
+    matrixDateTo,
     tableRollingWeek,
     liveClock.currentWeek,
     liveClock.yearMonth,
@@ -241,7 +249,9 @@ export const ScheduleMatrixView: React.FC = () => {
 
   const activeMatrixFilterMeta = useMemo(() => {
     const parts: string[] = [];
-    if (selectedDay === 'SEMANA_ACTUAL') {
+    if (matrixDateFrom.trim() || matrixDateTo.trim()) {
+      parts.push(`Rango: ${matrixDateFrom.trim() || 'Inicio'} a ${matrixDateTo.trim() || 'Hoy'}`);
+    } else if (selectedDay === 'SEMANA_ACTUAL') {
       parts.push(`Semana Actual (${liveClock.currentWeek.rangeLabel})`);
     } else if (selectedDay === 'SEMANA_NAV') {
       parts.push(`Semana ${tableRollingWeek.isoWeekNumber} (${tableRollingWeek.rangeLabel})`);
@@ -262,6 +272,8 @@ export const ScheduleMatrixView: React.FC = () => {
     };
   }, [
     selectedDay,
+    matrixDateFrom,
+    matrixDateTo,
     selectedShift,
     selectedProduct,
     searchQuery,
@@ -327,13 +339,37 @@ export const ScheduleMatrixView: React.FC = () => {
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
   const [storeZoneFilter, setStoreZoneFilter] = useState<string>('TODAS');
   const [storeSearchInBatch, setStoreSearchInBatch] = useState<string>('');
-  
+
+  // Estados de carga para persistencia en Supabase y bloqueo de doble envío
+  const [isPersistingMatrix, setIsPersistingMatrix] = useState<boolean>(false);
+  const [savingVisitIds, setSavingVisitIds] = useState<Record<string, boolean>>({});
+
+  const isVisitSaving = (visitId: string): boolean => Boolean(savingVisitIds[visitId]);
+
+  const withVisitSaving = async <T,>(visitId: string, fn: () => Promise<T>): Promise<T> => {
+    setSavingVisitIds((prev) => ({ ...prev, [visitId]: true }));
+    try {
+      return await fn();
+    } finally {
+      setSavingVisitIds((prev) => {
+        const next = { ...prev };
+        delete next[visitId];
+        return next;
+      });
+    }
+  };
+
   // Notification toast
-  const [notificationMsg, setNotificationMsg] = useState<{ text: string; count: number } | null>(null);
+  const [notificationMsg, setNotificationMsg] = useState<{
+    text: string;
+    count: number;
+    subtitle?: string;
+  } | null>(null);
 
   // Modal to add single row
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [newStoreName, setNewStoreName] = useState<string>('');
+  const [newStoreId, setNewStoreId] = useState<string>('');
   const [newZone, setNewZone] = useState<string>('');
   const [newSellerNameInput, setNewSellerNameInput] = useState<string>('');
 
@@ -341,13 +377,19 @@ export const ScheduleMatrixView: React.FC = () => {
     () => users.find((u) => u.role === 'promotora')?.name || ''
   );
 
-  const showNotification = (text: string, count: number) => {
-    setNotificationMsg({ text, count });
-    setTimeout(() => setNotificationMsg(null), 4000);
+  const showNotification = (text: string, count: number, subtitle?: string) => {
+    setNotificationMsg({ text, count, subtitle });
+    setTimeout(() => setNotificationMsg(null), 4500);
   };
 
   // Helper de Validación: Comprueba si una promotora activa ya está agendada el mismo día en la misma jornada
-  const isPromotoraBooked = (promotoraName: string, dayLabel: string, shift: ShiftType, excludeVisitId?: string) => {
+  const isPromotoraBooked = (
+    promotoraName: string,
+    dayLabel: string,
+    shift: ShiftType,
+    excludeVisitId?: string,
+    dateYmd?: string
+  ) => {
     if (!promotoraName) return undefined;
     const upper = promotoraName.toUpperCase().trim();
     if (upper.startsWith('POR ASIGNAR') || upper.startsWith('SIN ASIGNAR')) return undefined;
@@ -356,7 +398,7 @@ export const ScheduleMatrixView: React.FC = () => {
     return visits.find(
       (v) =>
         v.id !== excludeVisitId &&
-        v.dayLabel === dayLabel &&
+        (dateYmd && v.date ? v.date === dateYmd : v.dayLabel === dayLabel) &&
         v.shift === shift &&
         !v.promotoraName.toUpperCase().trim().startsWith('POR ASIGNAR') &&
         !v.promotoraName.toUpperCase().trim().startsWith('SIN ASIGNAR') &&
@@ -367,13 +409,15 @@ export const ScheduleMatrixView: React.FC = () => {
   // Unique zones for filtering clients in batch selector
   const availableZones = Array.from(new Set(stores.map((s) => s.zone))).filter(Boolean);
 
-  // Stores filtered for the batch selection list
+  // Stores filtered for the batch selection list (búsqueda NFD insensible a tildes)
   const filteredStoresForBatch = stores.filter((s) => {
     const matchZone = storeZoneFilter === 'TODAS' || s.zone === storeZoneFilter;
+    const q = normalizeSearchText(storeSearchInBatch);
     const matchSearch =
-      s.name.toLowerCase().includes(storeSearchInBatch.toLowerCase()) ||
-      s.zone.toLowerCase().includes(storeSearchInBatch.toLowerCase()) ||
-      s.clientCode.toLowerCase().includes(storeSearchInBatch.toLowerCase());
+      !q ||
+      normalizeSearchText(s.name).includes(q) ||
+      normalizeSearchText(s.zone).includes(q) ||
+      normalizeSearchText(s.clientCode).includes(q);
     return matchZone && matchSearch;
   });
 
@@ -383,7 +427,7 @@ export const ScheduleMatrixView: React.FC = () => {
     .map((s) => s.id);
   const hiddenSelectedCount = selectedStoreIds.length - effectiveBatchStoreIds.length;
 
-  // Estado del modal LIMPIAR POR LOTE / NUEVA CARGA
+  // Estado del modal LIMPIAR POR LOTE / NUEVA CARGA (cancelación lógica auditable)
   const [isClearModalOpen, setIsClearModalOpen] = useState<boolean>(false);
   const [clearMode, setClearMode] = useState<'FILTERED' | 'ALL'>('FILTERED');
   const [clearByClients, setClearByClients] = useState<boolean>(true);
@@ -400,11 +444,12 @@ export const ScheduleMatrixView: React.FC = () => {
       if (clearByShiftDate && (v.shift !== batchShift || v.date !== batchDate)) return false;
       return true;
     });
-    const pending = matches.filter((v) => v.status === 'PENDIENTE').length;
+    const pending = matches.filter((v) => v.status === 'PENDIENTE' && !v.enHistorial).length;
     return { total: matches.length, pending, preserved: matches.length - pending };
   })();
 
-  const handleConfirmClear = () => {
+  const handleConfirmClear = async () => {
+    if (isPersistingMatrix) return;
     if (clearMode === 'FILTERED' && clearByClients && effectiveBatchStoreIds.length === 0) {
       showNotification(
         'No hay clientes seleccionados y visibles. Desactiva el criterio de clientes o selecciona clientes.',
@@ -412,28 +457,49 @@ export const ScheduleMatrixView: React.FC = () => {
       );
       return;
     }
-    const res = clearVisitsBatch({
-      mode: clearMode,
-      storeIds: clearByClients ? effectiveBatchStoreIds : undefined,
-      product: clearByProduct ? batchProduct : undefined,
-      shift: clearByShiftDate ? batchShift : undefined,
-      date: clearByShiftDate ? batchDate : undefined,
-    });
-    if (clearResetSteps) {
-      setSelectedStoreIds([]);
-      setBatchQuantity('1');
-      setStoreSearchInBatch('');
-      setStoreZoneFilter('TODAS');
+
+    setIsPersistingMatrix(true);
+    try {
+      const res = await clearVisitsBatch({
+        mode: clearMode,
+        storeIds: clearByClients ? effectiveBatchStoreIds : undefined,
+        product: clearByProduct ? batchProduct : undefined,
+        shift: clearByShiftDate ? batchShift : undefined,
+        date: clearByShiftDate ? batchDate : undefined,
+      });
+
+      if (!res.ok) {
+        showNotification(
+          res.error || 'No se pudo completar la cancelación lógica en Supabase.',
+          0,
+          res.reverted
+            ? 'Los cambios no persistidos fueron revertidos automáticamente.'
+            : 'Verifica permisos y estado de los registros seleccionados.'
+        );
+        return;
+      }
+
+      if (clearResetSteps) {
+        setSelectedStoreIds([]);
+        setBatchQuantity('1');
+        setStoreSearchInBatch('');
+        setStoreZoneFilter('TODAS');
+      }
+      setIsClearModalOpen(false);
+      setClearAllConfirmText('');
+      showNotification(
+        res.removed === 0 && res.preservedNonPending === 0
+          ? 'No había registros pendientes que cancelar con esos criterios.'
+          : `Cancelación lógica por lote: ${res.removed} cancelados en Supabase` +
+              (res.preservedNonPending > 0
+                ? `, ${res.preservedNonPending} preservados (históricos/no pendientes).`
+                : '.'),
+        res.removed,
+        'Los registros cancelados se archivan en Historial sin borrado físico.'
+      );
+    } finally {
+      setIsPersistingMatrix(false);
     }
-    setIsClearModalOpen(false);
-    setClearAllConfirmText('');
-    showNotification(
-      res.removed === 0 && res.preservedNonPending === 0
-        ? 'No había registros que limpiar con esos criterios.'
-        : `Limpieza por lote: ${res.removed} registros eliminados` +
-            (res.preservedNonPending > 0 ? `, ${res.preservedNonPending} preservados (no PENDIENTE).` : '.'),
-      res.removed
-    );
   };
 
   // Toggle store selection in batch list
@@ -453,9 +519,10 @@ export const ScheduleMatrixView: React.FC = () => {
   };
 
   // ----------------------------------------------------
-  // EXECUTE BATCH FILL (LLENADO POR LOTE INMEDIATO)
+  // EXECUTE BATCH FILL (LLENADO POR LOTE PERSISTIDO EN SUPABASE)
   // ----------------------------------------------------
-  const handleExecuteBatchFill = (shiftOverride?: ShiftType) => {
+  const handleExecuteBatchFill = async (shiftOverride?: ShiftType) => {
+    if (isPersistingMatrix) return;
     if (effectiveBatchStoreIds.length === 0) {
       showNotification(
         hiddenSelectedCount > 0
@@ -474,55 +541,84 @@ export const ScheduleMatrixView: React.FC = () => {
       if (effectiveBatchStoreIds.length > 1) {
         showNotification(
           `⛔ Conflicto de Jornada: No se puede agendar a la promotora ${promotoraToUse} en ${effectiveBatchStoreIds.length} tiendas simultáneamente el ${batchDay} en la jornada ${shiftToUse}. Usa asignación automática o selecciona 1 tienda.`,
-          0
+          0,
+          'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
         );
         return;
       }
-      const conflict = isPromotoraBooked(promotoraToUse, batchDay, shiftToUse);
+      const conflict = isPromotoraBooked(promotoraToUse, batchDay, shiftToUse, undefined, batchDate);
       if (conflict && !effectiveBatchStoreIds.includes(conflict.storeId)) {
         showNotification(
           `⛔ Conflicto de Jornada: ${promotoraToUse} ya está agendada en "${conflict.storeName}" para el ${batchDay} (${shiftToUse}). No se puede duplicar en la misma jornada.`,
-          0
+          0,
+          'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
         );
         return;
       }
     }
 
-    const result = batchFillClientsProductShift({
-      storeIds: effectiveBatchStoreIds,
-      product: batchProduct,
-      quantityInput: batchQuantity,
-      shift: shiftToUse,
-      dayLabel: batchDay,
-      date: batchDate,
-      promotoraName: promotoraToUse,
-    });
+    setIsPersistingMatrix(true);
+    try {
+      const result = await batchFillClientsProductShift({
+        storeIds: effectiveBatchStoreIds,
+        product: batchProduct,
+        quantityInput: batchQuantity,
+        shift: shiftToUse,
+        dayLabel: batchDay,
+        date: batchDate,
+        promotoraName: promotoraToUse,
+      });
 
-    const totalProcessed = result.countUpdated + result.countCreated;
-    showNotification(
-      `¡Llenado por lote exitoso! Se cargó ${batchProduct} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
-        (hiddenSelectedCount > 0 ? ` ${hiddenSelectedCount} marcados ocultos por filtro omitidos.` : ''),
-      totalProcessed
-    );
+      if (!result.ok) {
+        showNotification(
+          result.error || 'Error guardando el lote en Supabase.',
+          0,
+          result.reverted
+            ? 'Los cambios optimistas fueron revertidos automáticamente.'
+            : 'No se pudo persistir el llenado por lote.'
+        );
+        return;
+      }
+
+      const totalProcessed = result.countUpdated + result.countCreated;
+      showNotification(
+        `¡Llenado por lote persistido en Supabase! Se cargó ${batchProduct} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
+          (hiddenSelectedCount > 0 ? ` ${hiddenSelectedCount} marcados ocultos por filtro omitidos.` : ''),
+        totalProcessed,
+        'Sincronizado en cronograma_degustaciones y rutas_promotoras.'
+      );
+    } finally {
+      setIsPersistingMatrix(false);
+    }
   };
 
-  // Filter visits for Main Table (conectado al motor de semanas automáticas)
-  const filteredVisits = visits.filter((v) => {
-    const matchDay = matchesSelectedDayFilter(v.date, v.dayLabel);
-    const matchShift = selectedShift === 'TODOS' || v.shift === selectedShift;
-    const matchProduct =
-      selectedProduct === 'TODOS' ||
-      (selectedProduct === 'MORTADELA' && v.productFocus.includes('MORTADELA')) ||
-      (selectedProduct === 'VENCAMPO' && v.productFocus.includes('VENCAMPO')) ||
-      (selectedProduct === 'ESPALDA' && v.productFocus.includes('ESPALDA'));
-    const matchSearch =
-      v.storeName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.promotoraName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.sellerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.zone.toLowerCase().includes(searchQuery.toLowerCase());
-
-    return matchDay && matchShift && matchProduct && matchSearch;
-  });
+  // Filter visits for Main Table (soporta rango de fechas, todos los productos y búsqueda NFD sin tildes)
+  const filteredVisits = useMemo(
+    () =>
+      filterMatrixVisits(visits, {
+        selectedDay,
+        matrixDateFrom,
+        matrixDateTo,
+        selectedShift,
+        selectedProduct,
+        searchQuery,
+        currentWeekBounds: liveClock.currentWeek,
+        rollingWeekBounds: tableRollingWeek,
+        currentYearMonth: liveClock.yearMonth,
+      }),
+    [
+      visits,
+      selectedDay,
+      matrixDateFrom,
+      matrixDateTo,
+      selectedShift,
+      selectedProduct,
+      searchQuery,
+      liveClock.currentWeek,
+      tableRollingWeek,
+      liveClock.yearMonth,
+    ]
+  );
 
   // Selección por fila y por lote en la Tabla General de Activaciones
   const [selectedTableVisitIds, setSelectedTableVisitIds] = useState<string[]>([]);
@@ -565,14 +661,14 @@ export const ScheduleMatrixView: React.FC = () => {
   );
 
   const selectedNonPendingCount = useMemo(
-    () => selectedTableVisits.filter((v) => v.status !== 'PENDIENTE').length,
+    () => selectedTableVisits.filter((v) => v.status !== 'PENDIENTE' || v.enHistorial).length,
     [selectedTableVisits]
   );
 
   const handleClickDeleteSelected = () => {
     if (selectedTableVisitIds.length === 0) {
       showNotification(
-        '⚠️ Debes seleccionar al menos un cliente en la Tabla General para poder limpiar.',
+        '⚠️ Debes seleccionar al menos un cliente en la Tabla General para poder cancelar.',
         0
       );
       return;
@@ -580,19 +676,92 @@ export const ScheduleMatrixView: React.FC = () => {
     setIsDeleteSelectedModalOpen(true);
   };
 
-  const handleConfirmDeleteSelected = () => {
+  const handleConfirmDeleteSelected = async () => {
+    if (isPersistingMatrix) return;
     const countToRemove = selectedTableVisitIds.length;
     if (countToRemove === 0) {
       setIsDeleteSelectedModalOpen(false);
       return;
     }
-    const removed = deleteVisitsByIds(selectedTableVisitIds);
-    setSelectedTableVisitIds([]);
-    setIsDeleteSelectedModalOpen(false);
-    showNotification(
-      `✓ Se eliminaron ${removed} registros seleccionados de la Tabla General de Activaciones.`,
-      removed
+
+    setIsPersistingMatrix(true);
+    try {
+      const res = await deleteVisitsByIds(selectedTableVisitIds, 'CANCELACION_LOTE_TABLA');
+      if (!res.ok) {
+        showNotification(
+          res.error || 'No se pudo completar la cancelación lógica en Supabase.',
+          0,
+          res.reverted
+            ? 'Los cambios no persistidos fueron revertidos automáticamente.'
+            : 'Los registros históricos o completados permanecen protegidos.'
+        );
+        return;
+      }
+
+      setSelectedTableVisitIds([]);
+      setIsDeleteSelectedModalOpen(false);
+      showNotification(
+        `✓ Cancelación lógica aplicada: ${res.removed} registro(s) archivados como CANCELADA` +
+          (res.preservedHistorical > 0
+            ? ` (${res.preservedHistorical} históricos/completados preservados).`
+            : '.'),
+        res.removed,
+        'Sin borrado físico: los registros quedan trazables en Historial.'
+      );
+    } finally {
+      setIsPersistingMatrix(false);
+    }
+  };
+
+  const handleCancelSingleVisit = async (visitId: string) => {
+    if (isVisitSaving(visitId)) return;
+    const res = await withVisitSaving(visitId, () =>
+      deleteVisit(visitId, 'CANCELACION_INDIVIDUAL_MATRIZ')
     );
+    if (!res.ok) {
+      showNotification(
+        res.error || 'No se pudo cancelar el registro en Supabase.',
+        0,
+        res.reverted
+          ? 'El registro fue restaurado automáticamente en la Tabla General.'
+          : 'Los registros completados o en Historial están protegidos.'
+      );
+      return;
+    }
+    showNotification(
+      '✓ Registro cancelado lógicamente y archivado en Historial.',
+      1,
+      'Sin borrado físico en Supabase.'
+    );
+  };
+
+  const handleInlineProductFill = async (visitId: string, product: string, qty: string) => {
+    const res = await withVisitSaving(visitId, () =>
+      updateVisitFromProductFill(visitId, product, qty)
+    );
+    if (!res.ok) {
+      showNotification(
+        res.error || 'No se pudo guardar la modificación del producto en Supabase.',
+        0,
+        'El cambio en línea fue revertido automáticamente.'
+      );
+    }
+  };
+
+  const handleInlineVisitPatch = async (
+    visitId: string,
+    patch: Parameters<typeof updateVisit>[1]
+  ) => {
+    const res = await withVisitSaving(visitId, () =>
+      updateVisit(visitId, patch, { persist: true })
+    );
+    if (!res.ok) {
+      showNotification(
+        res.error || 'No se pudo persistir el ajuste en línea en Supabase.',
+        0,
+        'El valor anterior fue restaurado automáticamente.'
+      );
+    }
   };
 
   // Calculate live totals across all visits in general table
@@ -689,9 +858,10 @@ export const ScheduleMatrixView: React.FC = () => {
           <div>
             <div className="font-extrabold text-sm">{notificationMsg.text}</div>
             <div className="text-[10px] text-white/90">
-              {notificationMsg.count === 0
-                ? 'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
-                : 'La Tabla General ha sido actualizada y recalculada en tiempo real.'}
+              {notificationMsg.subtitle ||
+                (notificationMsg.count === 0
+                  ? 'Los cambios no persistidos fueron revertidos automáticamente o requieren ajuste.'
+                  : 'La Tabla General ha sido actualizada y persistida en tiempo real.')}
             </div>
           </div>
         </div>
@@ -1333,22 +1503,32 @@ export const ScheduleMatrixView: React.FC = () => {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => handleExecuteBatchFill()}
-                className="w-full py-4 px-6 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-black text-sm uppercase tracking-wider border-2 border-red-400 shadow-2xl shadow-red-950 flex items-center justify-center gap-3 transition transform active:scale-[0.99]"
+                disabled={isPersistingMatrix}
+                onClick={() => void handleExecuteBatchFill()}
+                className="w-full py-4 px-6 rounded-2xl bg-red-600 hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-black text-sm uppercase tracking-wider border-2 border-red-400 shadow-2xl shadow-red-950 flex items-center justify-center gap-3 transition transform active:scale-[0.99]"
               >
-                <Zap className="w-5 h-5 text-white" />
-                <span>EJECUTAR LLENADO POR LOTE A LA TABLA GENERAL</span>
+                {isPersistingMatrix ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Zap className="w-5 h-5 text-white" />
+                )}
+                <span>
+                  {isPersistingMatrix
+                    ? 'PERSISTIENDO LOTE EN SUPABASE...'
+                    : 'EJECUTAR LLENADO POR LOTE A LA TABLA GENERAL'}
+                </span>
                 <span className="px-2.5 py-0.5 rounded-full bg-black/40 text-white font-mono text-xs border border-white/20">
                   {effectiveBatchStoreIds.length} Clientes • {batchProduct} • {batchShift}
                 </span>
               </button>
               <button
                 type="button"
+                disabled={isPersistingMatrix}
                 onClick={() => setIsClearModalOpen(true)}
-                className="mt-2 w-full py-2.5 px-4 rounded-xl bg-zinc-950 hover:bg-red-950/40 text-red-400 hover:text-red-300 font-black text-xs uppercase tracking-wider border border-red-700/60 flex items-center justify-center gap-2 transition"
+                className="mt-2 w-full py-2.5 px-4 rounded-xl bg-zinc-950 hover:bg-red-950/40 disabled:opacity-50 disabled:cursor-not-allowed text-red-400 hover:text-red-300 font-black text-xs uppercase tracking-wider border border-red-700/60 flex items-center justify-center gap-2 transition"
               >
                 <Trash2 className="w-4 h-4" />
-                <span>LIMPIAR POR LOTE / NUEVA CARGA</span>
+                <span>CANCELAR POR LOTE (LÓGICO) / NUEVA CARGA</span>
               </button>
             </div>
 
@@ -1361,7 +1541,7 @@ export const ScheduleMatrixView: React.FC = () => {
         <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-lg bg-zinc-950 border border-red-700/60 rounded-2xl p-5 shadow-2xl shadow-red-950/60 space-y-4">
             <div className="flex items-center gap-2 text-white font-black uppercase text-sm tracking-wider">
-              <Trash2 className="w-5 h-5 text-red-500" /> Limpiar por lote / Nueva carga
+              <Trash2 className="w-5 h-5 text-red-500" /> Cancelación lógica por lote / Nueva carga
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs font-black uppercase">
@@ -1371,7 +1551,7 @@ export const ScheduleMatrixView: React.FC = () => {
               </button>
               <button type="button" onClick={() => setClearMode('ALL')}
                 className={`py-2 rounded-xl border transition ${clearMode === 'ALL' ? 'bg-red-600 text-white border-red-400' : 'bg-black text-zinc-400 border-zinc-800'}`}>
-                Vaciar toda la tabla
+                Cancelar todos los pendientes
               </button>
             </div>
 
@@ -1392,7 +1572,7 @@ export const ScheduleMatrixView: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-1.5 text-xs text-zinc-300">
-                <p className="text-red-300 font-bold">Se vaciará la Tabla General completa (solo filas PENDIENTE). Escribe VACIAR para confirmar:</p>
+                <p className="text-red-300 font-bold">Se marcarán como CANCELADA las filas PENDIENTE (se preservan históricas/completadas sin borrado físico). Escribe VACIAR para confirmar:</p>
                 <input value={clearAllConfirmText} onChange={(e) => setClearAllConfirmText(e.target.value)} placeholder="VACIAR"
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-red-600" />
               </div>
@@ -1404,19 +1584,20 @@ export const ScheduleMatrixView: React.FC = () => {
             </label>
 
             <div className="p-3 rounded-xl bg-red-950/30 border border-red-800/50 text-xs text-zinc-200">
-              Se eliminarán <b className="text-white">{clearPreview.pending}</b> registros.
-              {clearPreview.preserved > 0 && <> <b className="text-white">{clearPreview.preserved}</b> no están PENDIENTE y se preservarán.</>}
+              Se cancelarán lógicamente <b className="text-white">{clearPreview.pending}</b> registros (archivados en Historial sin <span className="font-mono">DELETE</span>).
+              {clearPreview.preserved > 0 && <> <b className="text-white">{clearPreview.preserved}</b> no están PENDIENTE o ya son históricos y se preservarán.</>}
             </div>
 
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => { setIsClearModalOpen(false); setClearAllConfirmText(''); }}
-                className="px-4 py-2 rounded-xl bg-black border border-zinc-800 text-zinc-300 text-xs font-bold hover:text-white">
+              <button type="button" disabled={isPersistingMatrix} onClick={() => { setIsClearModalOpen(false); setClearAllConfirmText(''); }}
+                className="px-4 py-2 rounded-xl bg-black border border-zinc-800 text-zinc-300 text-xs font-bold hover:text-white disabled:opacity-40">
                 Cancelar
               </button>
-              <button type="button" onClick={handleConfirmClear}
-                disabled={clearMode === 'ALL' && clearAllConfirmText.trim().toUpperCase() !== 'VACIAR'}
-                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-black uppercase border border-red-400">
-                Confirmar limpieza
+              <button type="button" onClick={() => void handleConfirmClear()}
+                disabled={isPersistingMatrix || (clearMode === 'ALL' && clearAllConfirmText.trim().toUpperCase() !== 'VACIAR')}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-black uppercase border border-red-400 inline-flex items-center gap-1.5">
+                {isPersistingMatrix && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isPersistingMatrix ? 'Cancelando...' : 'Confirmar cancelación lógica'}</span>
               </button>
             </div>
           </div>
@@ -1643,8 +1824,8 @@ export const ScheduleMatrixView: React.FC = () => {
             </div>
 
             {/* Product filter */}
-            <div className="flex items-center gap-1 bg-black p-1 rounded-lg border border-zinc-900">
-              {['TODOS', 'MORTADELA', 'VENCAMPO', 'ESPALDA'].map((prod) => (
+            <div className="flex flex-wrap items-center gap-1 bg-black p-1 rounded-lg border border-zinc-900">
+              {['TODOS', 'MORTADELA', 'VENCAMPO', 'ESPALDA', 'JAMON', 'SALCHICHA'].map((prod) => (
                 <button
                   key={prod}
                   onClick={() => setSelectedProduct(prod)}
@@ -1902,6 +2083,7 @@ export const ScheduleMatrixView: React.FC = () => {
                     {/* INTERACTIVE COLUMN 1: Llenado - Selector de Producto */}
                     <td className="p-2 bg-red-950/20 border-l border-r border-red-900/40">
                       <select
+                        disabled={isVisitSaving(v.id)}
                         value={
                           v.fillProductSelection?.includes('ARROZ') || v.productFocus?.includes('ARROZ') || v.productFocus?.includes('VENCAMPO')
                             ? 'VENCAMPO'
@@ -1910,9 +2092,9 @@ export const ScheduleMatrixView: React.FC = () => {
                         onChange={(e) => {
                           const newProd = e.target.value;
                           const currentQty = v.fillQuantityInput || String(v.plannedUnits || 1);
-                          updateVisitFromProductFill(v.id, newProd, currentQty);
+                          void handleInlineProductFill(v.id, newProd, currentQty);
                         }}
-                        className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-white font-bold text-xs focus:outline-none focus:border-red-500"
+                        className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-white font-bold text-xs focus:outline-none focus:border-red-500 disabled:opacity-50"
                       >
                         <option value="MORTADELA">MORTADELA</option>
                         <option value="VENCAMPO">VENCAMPO</option>
@@ -1936,11 +2118,11 @@ export const ScheduleMatrixView: React.FC = () => {
                         onChange={(e) => {
                           const newQty = e.target.value;
                           const currentProd = v.fillProductSelection || v.productFocus;
-                          updateVisitFromProductFill(v.id, currentProd, newQty);
+                          void handleInlineProductFill(v.id, currentProd, newQty);
                         }}
                         className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-center font-mono font-bold text-white text-xs focus:outline-none focus:border-red-500 hover:border-red-600 transition"
                         placeholder="1"
-                        title="Cantidad principal editable"
+                        title="Cantidad principal editable (persiste en Supabase)"
                       />
                     </td>
 
@@ -1954,7 +2136,7 @@ export const ScheduleMatrixView: React.FC = () => {
                         value={v.mortadelaQty || 0}
                         onChange={(e) => {
                           const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                          updateVisit(v.id, {
+                          void handleInlineVisitPatch(v.id, {
                             mortadelaQty: val,
                             plannedUnits: val > 0 ? val : v.plannedUnits,
                             fillQuantityInput: val > 0 ? String(val) : v.fillQuantityInput,
@@ -1978,7 +2160,7 @@ export const ScheduleMatrixView: React.FC = () => {
                         value={v.espaldaQty || 0}
                         onChange={(e) => {
                           const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                          updateVisit(v.id, {
+                          void handleInlineVisitPatch(v.id, {
                             espaldaQty: val,
                             plannedUnits: val > 0 ? val : v.plannedUnits,
                             fillQuantityInput: val > 0 ? String(val) : v.fillQuantityInput,
@@ -2002,7 +2184,7 @@ export const ScheduleMatrixView: React.FC = () => {
                         value={v.arrozQty || 0}
                         onChange={(e) => {
                           const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                          updateVisit(v.id, {
+                          void handleInlineVisitPatch(v.id, {
                             arrozQty: val,
                             plannedUnits: val > 0 ? val : v.plannedUnits,
                             fillQuantityInput: val > 0 ? String(val) : v.fillQuantityInput,
@@ -2027,7 +2209,7 @@ export const ScheduleMatrixView: React.FC = () => {
                         value={v.azucarGrams || 0}
                         onChange={(e) => {
                           const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                          updateVisit(v.id, {
+                          void handleInlineVisitPatch(v.id, {
                             azucarGrams: val,
                             additionalGoods: { ...v.additionalGoods, azucarKg: val / 1000 },
                           });
@@ -2050,7 +2232,7 @@ export const ScheduleMatrixView: React.FC = () => {
                         value={v.lecheGrams || 0}
                         onChange={(e) => {
                           const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                          updateVisit(v.id, {
+                          void handleInlineVisitPatch(v.id, {
                             lecheGrams: val,
                             additionalGoods: { ...v.additionalGoods, lecheKg: val / 1000 },
                           });
@@ -2080,20 +2262,36 @@ export const ScheduleMatrixView: React.FC = () => {
                         const selectedValue = matchedActiveUser
                           ? matchedActiveUser.name
                           : 'POR ASIGNAR (Trade Marketing)';
-                        const currentConflict = isPromotoraBooked(v.promotoraName, v.dayLabel, v.shift, v.id);
+                        const currentConflict = isPromotoraBooked(
+                          v.promotoraName,
+                          v.dayLabel,
+                          v.shift,
+                          v.id,
+                          v.date
+                        );
                         return (
                           <div>
                             <select
+                              disabled={isVisitSaving(v.id)}
                               value={selectedValue}
-                              onChange={(e) => {
+                              onChange={async (e) => {
                                 const newPromotora = e.target.value;
+                                const prevPromotoraName = v.promotoraName;
+                                const prevPromotoraId = v.promotoraId;
 
                                 // Validación estricta: No agendar a la promotora el mismo día en la misma jornada
-                                const conflict = isPromotoraBooked(newPromotora, v.dayLabel, v.shift, v.id);
+                                const conflict = isPromotoraBooked(
+                                  newPromotora,
+                                  v.dayLabel,
+                                  v.shift,
+                                  v.id,
+                                  v.date
+                                );
                                 if (conflict) {
                                   showNotification(
                                     `⛔ No permitido: ${newPromotora} ya está agendada en "${conflict.storeName}" para el ${v.dayLabel} en la jornada ${v.shift}. No se puede duplicar en la misma jornada.`,
-                                    0
+                                    0,
+                                    'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
                                   );
                                   return;
                                 }
@@ -2105,12 +2303,7 @@ export const ScheduleMatrixView: React.FC = () => {
                                   activePromotoraUsers.map((u) => u.id).filter(Boolean)
                                 );
 
-                                updateVisit(v.id, {
-                                  promotoraName: newPromotora,
-                                  promotoraId: targetActiveUser?.id || '',
-                                });
-
-                                if (targetActiveUser?.id && isValidUuid(targetActiveUser.id)) {
+                                await withVisitSaving(v.id, async () => {
                                   const candidateCronogramaId = isValidUuid(v.cronogramaId)
                                     ? v.cronogramaId!
                                     : isValidUuid(v.id) && !v.solicitudId
@@ -2122,37 +2315,87 @@ export const ScheduleMatrixView: React.FC = () => {
                                       ? v.id
                                       : null;
 
-                                  if (candidateCronogramaId || candidateSurveyId) {
-                                    void assignAcceptedDegustacionToPromotoraRoute({
-                                      promotoraId: targetActiveUser.id,
-                                      surveyId: candidateSurveyId,
-                                      cronogramaId: candidateCronogramaId,
-                                      confirmarAceptacion: true,
-                                      allowedPromotoraIds: allowedIds,
-                                    })
-                                      .then((rpcRes) => {
-                                        updateVisit(v.id, {
+                                  if (
+                                    targetActiveUser?.id &&
+                                    isValidUuid(targetActiveUser.id) &&
+                                    (candidateCronogramaId || candidateSurveyId)
+                                  ) {
+                                    await updateVisit(
+                                      v.id,
+                                      {
+                                        promotoraName: newPromotora,
+                                        promotoraId: targetActiveUser.id,
+                                      },
+                                      { persist: false }
+                                    );
+                                    try {
+                                      const rpcRes = await assignAcceptedDegustacionToPromotoraRoute({
+                                        promotoraId: targetActiveUser.id,
+                                        surveyId: candidateSurveyId,
+                                        cronogramaId: candidateCronogramaId,
+                                        confirmarAceptacion: true,
+                                        allowedPromotoraIds: allowedIds,
+                                      });
+                                      await updateVisit(
+                                        v.id,
+                                        {
                                           cronogramaId: rpcRes.cronograma_id,
                                           promotoraId: targetActiveUser.id,
-                                        });
-                                      })
-                                      .catch((err) => {
-                                        showNotification(
-                                          err instanceof Error
-                                            ? err.message
-                                            : 'No se pudo sincronizar la asignación con /portal/ruta.',
-                                          0
-                                        );
-                                      });
+                                          promotoraName: newPromotora,
+                                        },
+                                        { persist: false }
+                                      );
+                                      showNotification(
+                                        `✓ Promotora ${newPromotora} agendada en ${v.storeName} (${v.dayLabel} - ${v.shift}) y sincronizada con /portal/ruta.`,
+                                        1
+                                      );
+                                    } catch (err) {
+                                      await updateVisit(
+                                        v.id,
+                                        {
+                                          promotoraName: prevPromotoraName,
+                                          promotoraId: prevPromotoraId,
+                                        },
+                                        { persist: false }
+                                      );
+                                      showNotification(
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'No se pudo sincronizar la asignación con /portal/ruta.',
+                                        0,
+                                        'La asignación de promotora fue revertida automáticamente.'
+                                      );
+                                    }
+                                    return;
                                   }
-                                }
 
-                                showNotification(
-                                  `✓ Promotora ${newPromotora} agendada en ${v.storeName} (${v.dayLabel} - ${v.shift}) y sincronizada con /portal/ruta.`,
-                                  1
-                                );
+                                  const persistRes = await updateVisit(
+                                    v.id,
+                                    {
+                                      promotoraName: newPromotora,
+                                      promotoraId:
+                                        targetActiveUser?.id && isValidUuid(targetActiveUser.id)
+                                          ? targetActiveUser.id
+                                          : '',
+                                    },
+                                    { persist: true }
+                                  );
+                                  if (!persistRes.ok) {
+                                    showNotification(
+                                      persistRes.error ||
+                                        'No se pudo persistir el cambio de promotora en Supabase.',
+                                      0,
+                                      'La asignación anterior fue restaurada automáticamente.'
+                                    );
+                                    return;
+                                  }
+                                  showNotification(
+                                    `✓ Promotora ${newPromotora} guardada en ${v.storeName} (${v.dayLabel} - ${v.shift}).`,
+                                    1
+                                  );
+                                });
                               }}
-                              className={`w-full px-2 py-1.5 rounded-lg bg-black text-white font-bold text-xs focus:outline-none transition ${
+                              className={`w-full px-2 py-1.5 rounded-lg bg-black text-white font-bold text-xs focus:outline-none transition disabled:opacity-50 ${
                                 currentConflict
                                   ? 'border-2 border-amber-500 text-amber-300'
                                   : !matchedActiveUser
@@ -2172,7 +2415,13 @@ export const ScheduleMatrixView: React.FC = () => {
                               )}
                               {activePromotoraUsers.map((u) => {
                                 const fullName = u.name;
-                                const conflictVisit = isPromotoraBooked(fullName, v.dayLabel, v.shift, v.id);
+                                const conflictVisit = isPromotoraBooked(
+                                  fullName,
+                                  v.dayLabel,
+                                  v.shift,
+                                  v.id,
+                                  v.date
+                                );
                                 const isCurrent = canonicalStaffKey(v.promotoraName) === canonicalStaffKey(fullName);
 
                                 return (
@@ -2220,14 +2469,24 @@ export const ScheduleMatrixView: React.FC = () => {
                       </span>
                     </td>
 
-                    {/* Actions */}
+                    {/* Actions (Cancelación lógica auditable) */}
                     <td className="p-3 text-center">
                       <button
-                        onClick={() => deleteVisit(v.id)}
-                        title="Eliminar fila de la matriz"
-                        className="p-1 rounded text-zinc-600 hover:text-red-500 hover:bg-black transition"
+                        type="button"
+                        disabled={isVisitSaving(v.id) || v.status === 'COMPLETADA' || Boolean(v.enHistorial)}
+                        onClick={() => void handleCancelSingleVisit(v.id)}
+                        title={
+                          v.status === 'COMPLETADA' || v.enHistorial
+                            ? 'Registro histórico/completado protegido contra cancelación'
+                            : 'Cancelar lógicamente (archiva en Historial sin borrado físico)'
+                        }
+                        className="p-1 rounded text-zinc-600 hover:text-red-500 hover:bg-black transition disabled:opacity-35 disabled:cursor-not-allowed"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        {isVisitSaving(v.id) ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-red-400" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
                       </button>
                     </td>
 
@@ -2239,7 +2498,7 @@ export const ScheduleMatrixView: React.FC = () => {
         </div>
       </div>
 
-      {/* Modal de Confirmación: Limpiar Seleccionados de la Tabla General */}
+      {/* Modal de Confirmación: Cancelación Lógica por Lote de la Tabla General */}
       {isDeleteSelectedModalOpen && (
         <div
           className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
@@ -2251,28 +2510,30 @@ export const ScheduleMatrixView: React.FC = () => {
               <span className="p-2 rounded-xl bg-red-600/20 text-red-500 border border-red-600/30">
                 <Trash2 className="w-5 h-5" />
               </span>
-              <span>Confirmar Eliminación por Lote</span>
+              <span>Confirmar Cancelación Lógica por Lote</span>
             </div>
 
             <p className="text-xs text-zinc-200 leading-relaxed">
-              ¿Estás seguro de que deseas eliminar los{' '}
+              ¿Deseas cancelar lógicamente los{' '}
               <strong className="text-red-400 font-black font-mono">
                 {selectedTableVisitIds.length}
               </strong>{' '}
-              registros seleccionados de la Tabla General de Activaciones? Esta acción no se puede
-              deshacer.
+              registros seleccionados en Supabase? Las filas activas se marcarán como{' '}
+              <span className="font-mono text-white">CANCELADA</span> y quedarán archivadas en
+              Historial (sin borrado físico <span className="font-mono">DELETE</span>).
             </p>
 
             {selectedNonPendingCount > 0 && (
               <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-600/50 text-xs text-amber-200 space-y-1">
                 <div className="font-black text-amber-400 uppercase tracking-wide">
-                  ⚠️ Advertencia de Estado Operativo
+                  ⚠️ Protección de Historial y Completados
                 </div>
                 <p>
                   Entre los registros seleccionados hay{' '}
                   <strong className="text-white font-mono">{selectedNonPendingCount}</strong> con
-                  estado distinto de <span className="font-mono">PENDIENTE</span> (en curso o
-                  completados). Si confirmas, también serán eliminados permanentemente.
+                  estado distinto de <span className="font-mono">PENDIENTE</span> o ya archivados en
+                  Historial. Los registros <span className="font-mono">COMPLETADA</span> / históricos
+                  se preservarán intactos en base de datos.
                 </p>
               </div>
             )}
@@ -2280,17 +2541,24 @@ export const ScheduleMatrixView: React.FC = () => {
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
+                disabled={isPersistingMatrix}
                 onClick={() => setIsDeleteSelectedModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-black border border-zinc-800 text-zinc-300 hover:text-white text-xs font-bold transition cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-black border border-zinc-800 text-zinc-300 hover:text-white text-xs font-bold transition cursor-pointer disabled:opacity-40"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                onClick={handleConfirmDeleteSelected}
-                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black uppercase tracking-wider border border-red-400 shadow-lg shadow-red-950/60 transition cursor-pointer"
+                disabled={isPersistingMatrix}
+                onClick={() => void handleConfirmDeleteSelected()}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider border border-red-400 shadow-lg shadow-red-950/60 transition cursor-pointer inline-flex items-center gap-1.5"
               >
-                Sí, Eliminar ({selectedTableVisitIds.length})
+                {isPersistingMatrix && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>
+                  {isPersistingMatrix
+                    ? 'Archivando...'
+                    : `Sí, Cancelar (${selectedTableVisitIds.length})`}
+                </span>
               </button>
             </div>
           </div>
@@ -2307,8 +2575,10 @@ export const ScheduleMatrixView: React.FC = () => {
                 <span>Nueva Activación Individual</span>
               </h3>
               <button
+                type="button"
+                disabled={isPersistingMatrix}
                 onClick={() => setIsAddModalOpen(false)}
-                className="text-zinc-500 hover:text-white"
+                className="text-zinc-500 hover:text-white disabled:opacity-40"
               >
                 ✕
               </button>
@@ -2316,14 +2586,42 @@ export const ScheduleMatrixView: React.FC = () => {
 
             <div className="space-y-4 py-4">
               <div>
-                <label className="text-xs font-bold text-zinc-300 block mb-1">Nombre del Punto de Venta / Cliente</label>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">
+                  Punto de Venta / Cliente (Catálogo Maestro)
+                </label>
                 <input
                   type="text"
-                  placeholder="Ej: SUPER TIENDAS LA FAMILIA"
+                  list="matrix-master-stores-list"
+                  placeholder="Selecciona del catálogo o escribe el PDV..."
                   value={newStoreName}
-                  onChange={(e) => setNewStoreName(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setNewStoreName(val);
+                    const matched = stores.find(
+                      (s) => normalizeSearchText(s.name) === normalizeSearchText(val)
+                    );
+                    if (matched) {
+                      setNewStoreId(matched.id);
+                      if (matched.zone) setNewZone(matched.zone);
+                      if (matched.sellerName) setNewSellerNameInput(matched.sellerName);
+                    } else {
+                      setNewStoreId('');
+                    }
+                  }}
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
                 />
+                <datalist id="matrix-master-stores-list">
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.name}>
+                      {s.clientCode ? `${s.clientCode} · ${s.zone}` : s.zone}
+                    </option>
+                  ))}
+                </datalist>
+                {newStoreId && (
+                  <p className="text-[10px] text-emerald-400 font-mono mt-1">
+                    ✓ Vinculado al PDV maestro en Supabase ({newStoreId.slice(0, 8)}…)
+                  </p>
+                )}
               </div>
 
               <div>
@@ -2349,6 +2647,7 @@ export const ScheduleMatrixView: React.FC = () => {
                     <option value="VENCAMPO">CREMA DE ARROZ VENCAMPO</option>
                     <option value="ESPALDA">ESPALDA AHUMADA ASTURIAS</option>
                     <option value="JAMON">JAMÓN COCIDO SUPERIOR</option>
+                    <option value="SALCHICHA">SALCHICHAS VIENA ASTURIAS</option>
                   </select>
                 </div>
 
@@ -2407,9 +2706,12 @@ export const ScheduleMatrixView: React.FC = () => {
                   onChange={(e) => setNewPromotoraName(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
                 >
+                  <option value="POR ASIGNAR (Trade Marketing)">
+                    POR ASIGNAR (Trade Marketing)
+                  </option>
                   {users.filter((u) => u.role === 'promotora').map((u) => {
                     const fullName = u.name;
-                    const conflict = isPromotoraBooked(fullName, batchDay, batchShift);
+                    const conflict = isPromotoraBooked(fullName, batchDay, batchShift, undefined, batchDate);
                     return (
                       <option 
                         key={u.id} 
@@ -2427,82 +2729,145 @@ export const ScheduleMatrixView: React.FC = () => {
 
             <div className="flex items-center justify-end gap-2 pt-4 border-t border-zinc-900">
               <button
+                type="button"
+                disabled={isPersistingMatrix}
                 onClick={() => setIsAddModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-black hover:bg-zinc-900 text-zinc-300 text-xs font-bold border border-zinc-800 transition"
+                className="px-4 py-2 rounded-xl bg-black hover:bg-zinc-900 text-zinc-300 text-xs font-bold border border-zinc-800 transition disabled:opacity-40"
               >
                 Cancelar
               </button>
               <button
-                onClick={() => {
-                  if (!newStoreName.trim()) return;
+                type="button"
+                disabled={isPersistingMatrix}
+                onClick={async () => {
+                  if (isPersistingMatrix) return;
+                  const cleanStoreName = newStoreName.trim();
+                  if (cleanStoreName.length < 2) {
+                    showNotification(
+                      'El nombre del Punto de Venta / Cliente debe tener al menos 2 caracteres.',
+                      0
+                    );
+                    return;
+                  }
+                  if (!/^\d{4}-\d{2}-\d{2}$/.test(batchDate)) {
+                    showNotification('Selecciona una fecha válida (YYYY-MM-DD).', 0);
+                    return;
+                  }
 
                   // Validación: Promotora no duplicada en misma fecha y jornada
-                  const conflict = isPromotoraBooked(newPromotoraName, batchDay, batchShift);
+                  const conflict = isPromotoraBooked(
+                    newPromotoraName,
+                    batchDay,
+                    batchShift,
+                    undefined,
+                    batchDate
+                  );
                   if (conflict) {
                     showNotification(
                       `⛔ Conflicto de Jornada: ${newPromotoraName} ya está agendada en "${conflict.storeName}" para el ${batchDay} en la jornada ${batchShift}. No se puede agendar el mismo día en la misma jornada.`,
-                      0
+                      0,
+                      'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
                     );
                     return;
                   }
 
                   const prodUpper = batchProduct.toUpperCase();
+                  const parsedNumericQty = parseFloat(String(batchQuantity).replace(',', '.'));
+                  if (
+                    !prodUpper.includes('VENCAMPO') &&
+                    (!Number.isFinite(parsedNumericQty) || parsedNumericQty <= 0)
+                  ) {
+                    showNotification('Ingresa una cantidad positiva mayor a 0.', 0);
+                    return;
+                  }
+
                   let mortadelaQty = 0;
                   let espaldaQty = 0;
                   let arrozQty = 0;
                   let azucarGrams = 0;
                   let lecheGrams = 0;
-                  let plannedUnits = 1;
+                  let plannedUnits = Number.isFinite(parsedNumericQty) && parsedNumericQty > 0 ? Math.round(parsedNumericQty) : 1;
 
                   if (prodUpper.includes('MORTADELA')) {
-                    mortadelaQty = parseInt(batchQuantity) || 1;
-                    plannedUnits = mortadelaQty;
+                    mortadelaQty = plannedUnits;
                   } else if (prodUpper.includes('VENCAMPO')) {
                     arrozQty = 1;
                     azucarGrams = 600;
                     lecheGrams = 600;
+                    plannedUnits = 1;
                   } else if (prodUpper.includes('ESPALDA')) {
-                    espaldaQty = parseInt(batchQuantity) || 1;
-                    plannedUnits = espaldaQty;
+                    espaldaQty = plannedUnits;
                   }
 
-                  addVisit({
-                    date: batchDate,
-                    dayLabel: batchDay,
-                    shift: batchShift,
-                    storeId: `st_custom_${Date.now()}`,
-                    storeName: newStoreName.trim(),
-                    zone: newZone.trim() || 'MARACAIBO',
-                    productFocus: prodUpper,
-                    fillProductSelection: prodUpper,
-                    fillQuantityInput: batchQuantity,
-                    promotoraId: 'usr_prom_01',
-                    promotoraName: newPromotoraName,
-                    sellerName: newSellerNameInput.trim().toUpperCase() || 'SIN VENDEDOR',
-                    plannedUnits,
-                    mortadelaQty,
-                    espaldaQty,
-                    arrozQty,
-                    azucarGrams,
-                    lecheGrams,
-                    rowHighlight: prodUpper.includes('VENCAMPO') ? 'green' : 'none',
-                    status: 'PENDIENTE',
-                    additionalGoods: {
-                      arrozKg: arrozQty,
-                      azucarKg: azucarGrams / 1000,
-                      lecheKg: lecheGrams / 1000,
-                    },
-                  });
+                  const matchedStore =
+                    stores.find((s) => s.id === newStoreId) ||
+                    stores.find(
+                      (s) => normalizeSearchText(s.name) === normalizeSearchText(cleanStoreName)
+                    );
+                  const resolvedProm = resolveRealPromotoraForMatrix(users, newPromotoraName);
 
-                  setIsAddModalOpen(false);
-                  setNewStoreName('');
-                  setNewZone('');
-                  setNewSellerNameInput('');
-                  showNotification('✓ Nueva activación agregada y sincronizada en la Tabla General.', 1);
+                  setIsPersistingMatrix(true);
+                  try {
+                    const res = await addVisit({
+                      date: batchDate,
+                      dayLabel: batchDay,
+                      shift: batchShift,
+                      storeId: matchedStore?.id || '',
+                      storeName: matchedStore?.name || cleanStoreName,
+                      zone: newZone.trim() || matchedStore?.zone || 'MARACAIBO',
+                      productFocus: prodUpper,
+                      fillProductSelection: prodUpper,
+                      fillQuantityInput: batchQuantity,
+                      promotoraId: resolvedProm.promotoraId,
+                      promotoraName: resolvedProm.promotoraName,
+                      sellerName:
+                        newSellerNameInput.trim().toUpperCase() ||
+                        matchedStore?.sellerName ||
+                        'SIN VENDEDOR',
+                      plannedUnits,
+                      mortadelaQty,
+                      espaldaQty,
+                      arrozQty,
+                      azucarGrams,
+                      lecheGrams,
+                      rowHighlight: prodUpper.includes('VENCAMPO') ? 'green' : 'none',
+                      status: 'PENDIENTE',
+                      additionalGoods: {
+                        arrozKg: arrozQty,
+                        azucarKg: azucarGrams / 1000,
+                        lecheKg: lecheGrams / 1000,
+                      },
+                    });
+
+                    if (!res.ok) {
+                      showNotification(
+                        res.error || 'No se pudo guardar la activación en Supabase.',
+                        0,
+                        res.reverted
+                          ? 'La fila optimista fue revertida automáticamente.'
+                          : 'Corrige los datos e intenta nuevamente.'
+                      );
+                      return;
+                    }
+
+                    setIsAddModalOpen(false);
+                    setNewStoreName('');
+                    setNewStoreId('');
+                    setNewZone('');
+                    setNewSellerNameInput('');
+                    showNotification(
+                      '✓ Nueva activación persistida en Supabase y sincronizada en la Tabla General.',
+                      1,
+                      'Guardada en cronograma_degustaciones.'
+                    );
+                  } finally {
+                    setIsPersistingMatrix(false);
+                  }
                 }}
-                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black uppercase tracking-wider border border-red-500 shadow-md transition"
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider border border-red-500 shadow-md transition inline-flex items-center gap-1.5"
               >
-                Guardar en Tabla General
+                {isPersistingMatrix && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isPersistingMatrix ? 'Guardando...' : 'Guardar en Tabla General'}</span>
               </button>
             </div>
           </div>

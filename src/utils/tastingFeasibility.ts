@@ -1,4 +1,6 @@
 import { ControllerRequest, PriceComparisonThreeBrands, ScheduledVisit } from '../types';
+import type { TarifarioCostoTrade } from '../types/contraloriaFinancial';
+import { mapTarifarioRowsToLookupMap } from '../services/contraloriaFinancialService';
 import type { TastingScheduleItem } from '../components/field/FieldPromotoraView';
 import type { InventorySamplingRecord } from '../services/supabaseModule1';
 import { getWeekNumberInMonth } from './monthlyTastingReportPdf';
@@ -124,15 +126,39 @@ export function parseFeasibilityDate(raw?: string | null): ParsedFeasibilityDate
   return null;
 }
 
-export function classifyFeasibilityProductLine(rawProduct?: string | null): FeasibilityProductLineSpec {
+function applyTarifarioOverride(
+  baseSpec: FeasibilityProductLineSpec,
+  tarifarioMap?: ReadonlyMap<string, TarifarioCostoTrade>
+): FeasibilityProductLineSpec {
+  if (!tarifarioMap || tarifarioMap.size === 0) return baseSpec;
+  const dbRow = tarifarioMap.get(baseSpec.id);
+  if (!dbRow || !(Number(dbRow.costo_unitario_usd) > 0)) return baseSpec;
+  return {
+    ...baseSpec,
+    label: dbRow.etiqueta || baseSpec.label,
+    unitLabel: dbRow.unidad_medida || baseSpec.unitLabel,
+    tastingUnitCostUsd: Number(dbRow.costo_unitario_usd),
+    defaultRetailUnitPriceUsd:
+      Number(dbRow.precio_referencia_usd) > 0
+        ? Number(dbRow.precio_referencia_usd)
+        : baseSpec.defaultRetailUnitPriceUsd,
+  };
+}
+
+export function classifyFeasibilityProductLine(
+  rawProduct?: string | null,
+  tarifarioMap?: ReadonlyMap<string, TarifarioCostoTrade>
+): FeasibilityProductLineSpec {
   const norm = String(rawProduct || '')
     .toUpperCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
+  let spec: FeasibilityProductLineSpec;
+
   if (norm.includes('PECHUGA') && norm.includes('PAVO')) {
-    return {
+    spec = {
       id: 'pechuga_pavo_asturias',
       label: 'Pechuga de Pavo Asturias',
       brand: 'ASTURIAS',
@@ -140,9 +166,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 7.35,
       unitLabel: 'Piezas / Unid',
     };
-  }
-  if (norm.includes('PECHUGA')) {
-    return {
+  } else if (norm.includes('PECHUGA')) {
+    spec = {
       id: 'pechuga_pollo_asturias',
       label: 'Pechuga de Pollo Asturias',
       brand: 'ASTURIAS',
@@ -150,9 +175,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 7.01,
       unitLabel: 'Piezas / Unid',
     };
-  }
-  if (norm.includes('ESPALDA')) {
-    return {
+  } else if (norm.includes('ESPALDA')) {
+    spec = {
       id: 'espalda_asturias',
       label: 'Espalda Cocida / Ahumada Asturias',
       brand: 'ASTURIAS',
@@ -160,9 +184,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 6.5,
       unitLabel: 'Piezas / Unid',
     };
-  }
-  if (norm.includes('JAMON') || norm.includes('CHULETA') || norm.includes('TOCINETA')) {
-    return {
+  } else if (norm.includes('JAMON') || norm.includes('CHULETA') || norm.includes('TOCINETA')) {
+    spec = {
       id: 'jamon_asturias',
       label: 'Jamón Cocido y Ahumado Asturias',
       brand: 'ASTURIAS',
@@ -170,8 +193,7 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 7.05,
       unitLabel: 'Piezas / Unid',
     };
-  }
-  if (
+  } else if (
     norm.includes('MORTADELA') ||
     norm.includes('EMBUTIDO') ||
     norm.includes('SALCHICHA') ||
@@ -179,17 +201,16 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
     norm.includes('CHORIZO') ||
     norm.includes('ASTURIAS')
   ) {
-    return {
+    spec = {
       id: 'mortadela_asturias',
       label: 'Mortadela y Embutidos Asturias',
       brand: 'ASTURIAS',
-      tastingUnitCostUsd: 12.0, // Referencia exacta Acta Contraloría MP-07-0067 ($12.00/pieza 1kg)
+      tastingUnitCostUsd: 12.0,
       defaultRetailUnitPriceUsd: 5.25,
       unitLabel: 'Piezas (1kg)',
     };
-  }
-  if (norm.includes('AZUCAR')) {
-    return {
+  } else if (norm.includes('AZUCAR')) {
+    spec = {
       id: 'azucar_vencampo',
       label: 'Azúcar Refinada Vencampo (1kg)',
       brand: 'VENCAMPO',
@@ -197,9 +218,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 1.95,
       unitLabel: 'Empaques (1kg)',
     };
-  }
-  if (norm.includes('ACEITE')) {
-    return {
+  } else if (norm.includes('ACEITE')) {
+    spec = {
       id: 'aceite_vencampo',
       label: 'Aceite Comestible Vencampo (900ml)',
       brand: 'VENCAMPO',
@@ -207,9 +227,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 2.85,
       unitLabel: 'Unid (900ml)',
     };
-  }
-  if (norm.includes('LECHE')) {
-    return {
+  } else if (norm.includes('LECHE')) {
+    spec = {
       id: 'leche_vencampo',
       label: 'Leche en Polvo Vencampo',
       brand: 'VENCAMPO',
@@ -217,15 +236,14 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 8.2,
       unitLabel: 'Empaques',
     };
-  }
-  if (
+  } else if (
     norm.includes('CARAOTA') ||
     norm.includes('ARVEJA') ||
     norm.includes('LENTEJA') ||
     norm.includes('FRIJOL') ||
     norm.includes('GRANO')
   ) {
-    return {
+    spec = {
       id: 'granos_vencampo',
       label: 'Granos Seleccionados Vencampo',
       brand: 'VENCAMPO',
@@ -233,10 +251,8 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 2.45,
       unitLabel: 'Empaques',
     };
-  }
-  // Si es stand multipropósito "VENCAMPO" vs paquete individual de Arroz
-  if (norm === 'VENCAMPO' || norm.includes('KIT') || norm.includes('STAND')) {
-    return {
+  } else if (norm === 'VENCAMPO' || norm.includes('KIT') || norm.includes('STAND')) {
+    spec = {
       id: 'arroz_vencampo',
       label: 'Arroz Blanco e Insumos Vencampo',
       brand: 'VENCAMPO',
@@ -244,15 +260,18 @@ export function classifyFeasibilityProductLine(rawProduct?: string | null): Feas
       defaultRetailUnitPriceUsd: 2.4,
       unitLabel: 'Kits / Unid',
     };
+  } else {
+    spec = {
+      id: 'arroz_vencampo',
+      label: 'Arroz Blanco e Insumos Vencampo',
+      brand: 'VENCAMPO',
+      tastingUnitCostUsd: 2.6,
+      defaultRetailUnitPriceUsd: 1.35,
+      unitLabel: 'Unid (1kg)',
+    };
   }
-  return {
-    id: 'arroz_vencampo',
-    label: 'Arroz Blanco e Insumos Vencampo',
-    brand: 'VENCAMPO',
-    tastingUnitCostUsd: 2.6,
-    defaultRetailUnitPriceUsd: 1.35,
-    unitLabel: 'Unid (1kg)',
-  };
+
+  return applyTarifarioOverride(spec, tarifarioMap);
 }
 
 export function resolveFeasibilityVerdict(
@@ -311,6 +330,8 @@ export interface EvaluateFeasibilityParams {
   priceComparisons?: PriceComparisonThreeBrands[] | null;
   formalRequests?: ControllerRequest[] | null;
   fallbackVisits?: ScheduledVisit[] | null;
+  /** Tarifario dinámico desde `public.tarifario_costos_trade` (prioritario sobre los costos base) */
+  tarifarioCostos?: readonly TarifarioCostoTrade[] | null;
 }
 
 export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): TastingFeasibilityReport {
@@ -324,7 +345,10 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
     priceComparisons,
     formalRequests,
     fallbackVisits,
+    tarifarioCostos,
   } = params;
+
+  const tarifarioMap = mapTarifarioRowsToLookupMap(tarifarioCostos);
 
   interface LineWork {
     spec: FeasibilityProductLineSpec;
@@ -345,7 +369,7 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
   const lineMap = new Map<string, LineWork>();
 
   const getLine = (rawProduct: string): LineWork | null => {
-    const spec = classifyFeasibilityProductLine(rawProduct);
+    const spec = classifyFeasibilityProductLine(rawProduct, tarifarioMap);
     if (brandFilter !== 'TODAS' && spec.brand !== brandFilter) return null;
     let entry = lineMap.get(spec.id);
     if (!entry) {
@@ -374,7 +398,7 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
   if (priceComparisons && priceComparisons.length > 0) {
     priceComparisons.forEach((pc) => {
       if (!(pc.ownPriceUsd > 0 && pc.ownPriceUsd <= 35)) return;
-      const spec = classifyFeasibilityProductLine(pc.ownProduct);
+      const spec = classifyFeasibilityProductLine(pc.ownProduct, tarifarioMap);
       const gf = globalPriceFallback.get(spec.id) || { sum: 0, count: 0 };
       gf.sum += pc.ownPriceUsd;
       gf.count += 1;
@@ -399,7 +423,7 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
       const p = parseFeasibilityDate(item.date);
       if (!p || !dateMatcher(p)) return;
 
-      const spec = classifyFeasibilityProductLine(item.productName);
+      const spec = classifyFeasibilityProductLine(item.productName, tarifarioMap);
       const entry = getLine(item.productName);
       if (!entry) return;
 
@@ -427,7 +451,7 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
     fallbackVisits.forEach((v) => {
       const p = parseFeasibilityDate(v.date);
       if (!p || !dateMatcher(p)) return;
-      const spec = classifyFeasibilityProductLine(v.productFocus);
+      const spec = classifyFeasibilityProductLine(v.productFocus, tarifarioMap);
       const entry = getLine(v.productFocus);
       if (!entry) return;
 
@@ -451,7 +475,7 @@ export function evaluateTastingFeasibility(params: EvaluateFeasibilityParams): T
       const p = parseFeasibilityDate(inv.isoDate || inv.date);
       if (!p || !dateMatcher(p)) return;
 
-      const spec = classifyFeasibilityProductLine(inv.productName);
+      const spec = classifyFeasibilityProductLine(inv.productName, tarifarioMap);
       if (brandFilter !== 'TODAS' && spec.brand !== brandFilter) return;
 
       const hasSamplingHere = Number(inv.portionsSampled) > 0;

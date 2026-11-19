@@ -15,11 +15,11 @@ export type FeatureFlagKey =
 
 export const FEATURE_FLAGS: Readonly<Record<FeatureFlagKey, boolean>> = {
   /** Botón y modal "Cargar Archivo (Excel / CSV / PDF)" en Módulo 1 */
-  ENABLE_MODULO1_CARGAR_ARCHIVO: false,
+  ENABLE_MODULO1_CARGAR_ARCHIVO: true,
   /** Botón y modal "+ Enviar Solicitud FDV" en Módulo 1 */
-  ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV: false,
+  ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV: true,
   /** Indicador y lógica rígida de corte por "Ciclo ISO (Lunes - Domingo · UTC-4)" en Módulo 1 */
-  ENABLE_MODULO1_CICLO_ISO_BADGE: false,
+  ENABLE_MODULO1_CICLO_ISO_BADGE: true,
   /** Tarjetas y tablas de métricas 360° del Módulo 1 + consultas exclusivas asociadas */
-  ENABLE_MODULO1_TABLAS_METRICAS: false,
+  ENABLE_MODULO1_TABLAS_METRICAS: true,
 };

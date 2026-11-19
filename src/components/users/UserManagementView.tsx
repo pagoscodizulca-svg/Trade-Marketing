@@ -30,14 +30,19 @@ import {
   MANAGED_USER_ROLES,
   MANAGED_USER_ROLE_LABELS,
   MIN_SUPABASE_PASSWORD_LENGTH,
+  SUCURSAL_LABELS,
   createManagedUser,
   generateSecureInitialPassword,
+  getAllowedSucursalesForRole,
+  isSucursalValidForRole,
   listManagedUsers,
   listUserManagementAudit,
   normalizeManagedUserEmail,
+  resolveDefaultSucursalForRole,
   updateManagedUserAccess,
   type ManagedUserProfile,
   type ManagedUserRole,
+  type SucursalCodigo,
   type UserManagementAuditEntry,
 } from '../../services/userManagementService';
 
@@ -154,7 +159,10 @@ function getRoleBadgeStyle(role: ManagedUserRole): string {
   if (role === 'coordinacion') {
     return 'bg-amber-500/15 text-amber-200 border-amber-500/30';
   }
-  if (role === 'supervisor') {
+  if (role === 'promotora') {
+    return 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30';
+  }
+  if (role === 'chofer') {
     return 'bg-blue-500/15 text-blue-200 border-blue-500/30';
   }
   return 'bg-zinc-800/90 text-zinc-200 border-white/10';
@@ -194,6 +202,7 @@ export const UserManagementView: React.FC = () => {
   const [createPassword, setCreatePassword] = useState<string>('');
   const [showCreatePassword, setShowCreatePassword] = useState<boolean>(false);
   const [createRole, setCreateRole] = useState<ManagedUserRole>('vendedor');
+  const [createSucursal, setCreateSucursal] = useState<SucursalCodigo>('ZULIA');
   const [createMustChangePassword, setCreateMustChangePassword] = useState<boolean>(false);
   const [createSubmitting, setCreateSubmitting] = useState<boolean>(false);
   const [createModalError, setCreateModalError] = useState<string | null>(null);
@@ -238,7 +247,6 @@ export const UserManagementView: React.FC = () => {
     let superAdmins = 0;
     let contraloria = 0;
     let coordinacion = 0;
-    let supervisores = 0;
     let vendedores = 0;
     let suspended = 0;
 
@@ -246,7 +254,6 @@ export const UserManagementView: React.FC = () => {
       if (u.role === 'super_admin') superAdmins += 1;
       else if (u.role === 'contraloria') contraloria += 1;
       else if (u.role === 'coordinacion') coordinacion += 1;
-      else if (u.role === 'supervisor') supervisores += 1;
       else if (u.role === 'vendedor') vendedores += 1;
 
       if (!u.isActive) suspended += 1;
@@ -257,7 +264,6 @@ export const UserManagementView: React.FC = () => {
       superAdmins,
       contraloria,
       coordinacion,
-      supervisores,
       vendedores,
       suspended,
     };
@@ -336,10 +342,14 @@ export const UserManagementView: React.FC = () => {
     setErrorBanner(null);
 
     try {
+      const nextSucursal = isSucursalValidForRole(nextRole, user.sucursal)
+        ? user.sucursal
+        : resolveDefaultSucursalForRole(nextRole);
       const updated = await updateManagedUserAccess({
         targetUserId: user.id,
         fullName: user.fullName,
         role: nextRole,
+        sucursal: nextSucursal,
         isActive: user.isActive,
         mustChangePassword: user.mustChangePassword,
       });
@@ -423,12 +433,40 @@ export const UserManagementView: React.FC = () => {
     }
   };
 
+  const handleChangeSucursal = async (row: ManagedUserProfile, nextSucursal: SucursalCodigo) => {
+    if (nextSucursal === row.sucursal) return;
+    setBusyRowId(row.id);
+    setErrorBanner(null);
+
+    try {
+      const updated = await updateManagedUserAccess({
+        targetUserId: row.id,
+        fullName: row.fullName,
+        role: row.role,
+        sucursal: nextSucursal,
+        isActive: row.isActive,
+        mustChangePassword: row.mustChangePassword,
+      });
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
+      setFeedbackBanner(
+        `Sede de ${updated.fullName} actualizada a ${SUCURSAL_LABELS[updated.sucursal]}.`
+      );
+      const latestAudit = await listUserManagementAudit(25).catch(() => null);
+      if (latestAudit) setAuditEntries(latestAudit);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'No se pudo actualizar la sucursal.');
+    } finally {
+      setBusyRowId(null);
+    }
+  };
+
   const resetCreateModal = () => {
     setCreateFullName('');
     setCreateEmail('');
     setCreatePassword('');
     setShowCreatePassword(false);
     setCreateRole('vendedor');
+    setCreateSucursal('ZULIA');
     setCreateMustChangePassword(false);
     setCreateModalError(null);
     setCopiedCredentials(false);
@@ -520,6 +558,7 @@ export const UserManagementView: React.FC = () => {
         email: normalizedEmail,
         password: createPassword,
         role: createRole,
+        sucursal: createSucursal,
         mustChangePassword: createMustChangePassword,
       });
 
@@ -671,9 +710,9 @@ export const UserManagementView: React.FC = () => {
 
         <div className="rounded-xl bg-zinc-950/90 border border-amber-500/20 px-4 py-3 flex items-center justify-between">
           <div>
-            <p className="text-[11px] font-semibold text-amber-300/90">Coordinación / Sup.</p>
+            <p className="text-[11px] font-semibold text-amber-300/90">Coordinación</p>
             <p className="text-xl font-extrabold text-white font-mono mt-0.5">
-              {summaryCounts.coordinacion + summaryCounts.supervisores}
+              {summaryCounts.coordinacion}
             </p>
           </div>
           <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/25 flex items-center justify-center">
@@ -771,6 +810,7 @@ export const UserManagementView: React.FC = () => {
                 <th className="py-3.5 px-4">Nombre completo</th>
                 <th className="py-3.5 px-4">Correo electrónico</th>
                 <th className="py-3.5 px-4">Rol</th>
+                <th className="py-3.5 px-4">Sucursal</th>
                 <th className="py-3.5 px-4">Estado</th>
                 <th className="py-3.5 px-4 text-right">Pedir cambio de clave al iniciar</th>
               </tr>
@@ -779,7 +819,7 @@ export const UserManagementView: React.FC = () => {
             <tbody className="divide-y divide-white/[0.06] text-xs">
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="py-14 text-center text-zinc-400">
+                  <td colSpan={6} className="py-14 text-center text-zinc-400">
                     <span className="inline-flex items-center gap-2 font-mono">
                       <Loader2 className="w-4 h-4 text-red-500 animate-spin" />
                       Cargando directorio de usuarios...
@@ -788,7 +828,7 @@ export const UserManagementView: React.FC = () => {
                 </tr>
               ) : filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-12 text-center text-zinc-400">
+                  <td colSpan={6} className="py-12 text-center text-zinc-400">
                     No se encontraron usuarios que coincidan con los filtros actuales.
                   </td>
                 </tr>
@@ -902,6 +942,25 @@ export const UserManagementView: React.FC = () => {
                               className="bg-zinc-950 text-white"
                             >
                               {MANAGED_USER_ROLE_LABELS[roleOpt]} ({roleOpt})
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+
+                      {/* Columna 3B: Selector de Sucursal obligatoria por rol */}
+                      <td className="py-3.5 px-4 align-middle">
+                        <select
+                          value={row.sucursal}
+                          disabled={isSelfRow || isRowBusy || row.role === 'super_admin'}
+                          aria-label={`Sucursal de ${row.fullName}`}
+                          onChange={(e) =>
+                            void handleChangeSucursal(row, e.target.value as SucursalCodigo)
+                          }
+                          className="px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-white/10 text-xs font-mono font-semibold text-zinc-200 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                        >
+                          {getAllowedSucursalesForRole(row.role).map((sucOpt) => (
+                            <option key={sucOpt} value={sucOpt} className="bg-zinc-950 text-white">
+                              {SUCURSAL_LABELS[sucOpt]} ({sucOpt})
                             </option>
                           ))}
                         </select>
@@ -1264,26 +1323,56 @@ export const UserManagementView: React.FC = () => {
                   />
                 </div>
 
-                {/* 3. Rol inicial (por defecto 'vendedor') */}
-                <div>
-                  <label
-                    htmlFor="create-user-role"
-                    className="block text-xs font-bold text-zinc-300 mb-1"
-                  >
-                    Rol inicial
-                  </label>
-                  <select
-                    id="create-user-role"
-                    value={createRole}
-                    onChange={(e) => setCreateRole(e.target.value as ManagedUserRole)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
-                  >
-                    {MANAGED_USER_ROLES.map((roleOpt) => (
-                      <option key={roleOpt} value={roleOpt}>
-                        {MANAGED_USER_ROLE_LABELS[roleOpt]} ({roleOpt})
-                      </option>
-                    ))}
-                  </select>
+                {/* 3. Rol inicial y Sucursal obligatoria */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label
+                      htmlFor="create-user-role"
+                      className="block text-xs font-bold text-zinc-300 mb-1"
+                    >
+                      Rol inicial
+                    </label>
+                    <select
+                      id="create-user-role"
+                      value={createRole}
+                      onChange={(e) => {
+                        const nextRole = e.target.value as ManagedUserRole;
+                        setCreateRole(nextRole);
+                        if (!isSucursalValidForRole(nextRole, createSucursal)) {
+                          setCreateSucursal(resolveDefaultSucursalForRole(nextRole));
+                        }
+                      }}
+                      className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
+                    >
+                      {MANAGED_USER_ROLES.map((roleOpt) => (
+                        <option key={roleOpt} value={roleOpt}>
+                          {MANAGED_USER_ROLE_LABELS[roleOpt]} ({roleOpt})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="create-user-sucursal"
+                      className="block text-xs font-bold text-zinc-300 mb-1"
+                    >
+                      Sucursal asignada
+                    </label>
+                    <select
+                      id="create-user-sucursal"
+                      value={createSucursal}
+                      disabled={createRole === 'super_admin'}
+                      onChange={(e) => setCreateSucursal(e.target.value as SucursalCodigo)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono focus:outline-none focus:border-red-500 cursor-pointer disabled:opacity-60"
+                    >
+                      {getAllowedSucursalesForRole(createRole).map((sucOpt) => (
+                        <option key={sucOpt} value={sucOpt}>
+                          {SUCURSAL_LABELS[sucOpt]} ({sucOpt})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
                 {/* 4. Contraseña inicial (>= 6 caracteres + Generar clave segura + Copiar accesos) */}

@@ -309,7 +309,7 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
       'utf8'
     );
 
-    // Extract filteredGlobalTastingItems useMemo block (lines ~211-241)
+    // Extract filteredGlobalTastingItems useMemo block
     const memoMatch = scheduleSrc.match(
       /const filteredGlobalTastingItems = useMemo\(\(\) => \{[\s\S]*?\}, \[([\s\S]*?)\]\);/
     );
@@ -320,18 +320,19 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
 
     assert.equal(
       hasMatrixDateFrom && hasMatrixDateTo,
-      false,
-      'DEFECTO CONFIRMADO: ScheduleMatrixView.tsx omite matrixDateFrom y matrixDateTo en las dependencias de useMemo de filteredGlobalTastingItems'
+      true,
+      'ScheduleMatrixView.tsx debe incluir matrixDateFrom y matrixDateTo en las dependencias de useMemo de filteredGlobalTastingItems (fix Hito 3 / B-06)'
     );
 
-    // Check accent sensitivity in ScheduleMatrixView & FieldPromotoraView text search
-    const usesRawToLowerCaseWithoutNfd =
-      scheduleSrc.includes('const q = searchQuery.toLowerCase()') &&
-      !scheduleSrc.includes("searchQuery.normalize('NFD')");
+    // Verify NFD accent-insensitive search & full-product filterMatrixVisits delegation
+    const usesNfdSearch =
+      scheduleSrc.includes('normalizeSearchText(searchQuery)') &&
+      scheduleSrc.includes('filterMatrixVisits(') &&
+      !scheduleSrc.includes('const q = searchQuery.toLowerCase()');
     assert.equal(
-      usesRawToLowerCaseWithoutNfd,
+      usesNfdSearch,
       true,
-      'ADVERTENCIA CONFIRMADA: El buscador libre de ScheduleMatrixView no normaliza tildes (buscar "maria" no encuentra "María")'
+      'El buscador libre de ScheduleMatrixView debe normalizar tildes (NFD vía normalizeSearchText) y delegar el filtrado a filterMatrixVisits'
     );
 
     filterAuditMatrix.push({
@@ -340,8 +341,8 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
       layer: 'UI/Memoria',
       edgeCasesTested: 'Cambio reactivo de matrixDateFrom/matrixDateTo, búsqueda con/sin tildes ("María" vs "maria"), productos secundarios',
       securityValidated: true,
-      status: 'FALLIDO',
-      finding: 'ScheduleMatrixView.tsx:231-240 omite matrixDateFrom/matrixDateTo en useMemo (stale cache), restringe filteredVisits:514 a 3 productos fijos y no normaliza acentos NFD en búsqueda libre.',
+      status: 'APROBADO',
+      finding: 'Hito 3 / B-06 cerrado: filteredGlobalTastingItems incluye matrixDateFrom y matrixDateTo en useMemo, usa normalización NFD insensible a tildes y filtra cualquier producto mediante filterMatrixVisits.',
     });
   });
 });

@@ -28,6 +28,10 @@ export interface Store {
   geofenceRadiusMeters: number; // 0 = sin geocerca definida
   sellerName: string;
   channel: 'Supermercado' | 'Mayorista' | 'Farmacia' | 'Minimarket' | '';
+  cadenaId?: string | null;
+  cadenaName?: string;
+  zonaId?: string | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'GLOBAL' | null;
 }
 
 export type ShiftType = 'MAÑANA' | 'TARDE' | 'COMPLETO';
@@ -175,6 +179,10 @@ export interface ControllerRequest {
   finalApprover?: { name: string; date: string; comments?: string };
   rejectionReason?: string;
   pazYSalvoCertificateId?: string;
+  campanaId?: string | null;
+  presupuestoId?: string | null;
+  solicitudOrigenId?: string | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | null;
 }
 
 export interface FiscalReceipt {
@@ -187,11 +195,16 @@ export interface FiscalReceipt {
   taxAmountUsd: number;
   totalUsd: number;
   imageUrl: string;
+  storagePath?: string | null;
+  mimeType?: string | null;
+  archivoSha256Hex?: string | null;
+  sizeBytes?: number | null;
   isValidatedByContraloria: boolean;
   validationNotes?: string;
 }
 
 export interface InventoryReconciliation {
+  id?: string;
   requestId: string;
   requestCode: string;
   productName: string;
@@ -206,7 +219,9 @@ export interface InventoryReconciliation {
   approvedPettyCashUsd: number;
   balanceDueCompanyOrPromotorUsd: number;
   auditNotes: string;
+  cerrada?: boolean;
   pazYSalvoIssued: boolean;
+  pazYSalvoCertificateCode?: string;
   pazYSalvoIssueDate?: string;
   pazYSalvoHash?: string;
 }

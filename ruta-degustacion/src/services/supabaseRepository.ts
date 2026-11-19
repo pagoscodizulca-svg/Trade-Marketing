@@ -1,7 +1,9 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Entrega, EntregaVista } from '../types';
 import { MENSAJE_REQUIERE_CONEXION, newId, type EntregasRepository } from './entregasRepository';
 import { createSyncStore } from './syncStore';
 import { IMMEDIATE_TIMEOUT_MS, createSyncEngine, registerBackgroundSync } from './syncEngine';
+import { createRutaSupabaseClient, getRutaSupabaseClient } from './supabaseAuth';
 import { applyPayload, construirCuerpoServidor, type OutboxPayload } from '../lib/deliveryOps';
 import {
   enqueueOperation,
@@ -15,7 +17,7 @@ import {
   type OutboxItem,
   type StoredDelivery,
 } from '../lib/offlineDb';
-import { saveConfig, TABLE } from '../lib/syncCore';
+import { saveAuthToken, saveConfig, TABLE } from '../lib/syncCore';
 
 /*
  * Tabla requerida en Supabase: ver supabase/migrations/20261106_entregas_degustacion.sql
@@ -25,7 +27,6 @@ import { saveConfig, TABLE } from '../lib/syncCore';
 const PAGE = 1000;
 const INSERT_CHUNK = 500;
 const DELETE_CHUNK = 100;
-const PULL_TIMEOUT_MS = 20_000;
 const REFRESH_ON_FOCUS_MIN_MS = 15_000;
 
 const mensajeDe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -77,25 +78,13 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     aviso: null,
   });
 
-  type Client = import('@supabase/supabase-js').SupabaseClient;
-  let clientPromise: Promise<Client> | null = null;
-  const getClient = (): Promise<Client> => {
-    if (!clientPromise) {
-      clientPromise = import('@supabase/supabase-js').then(({ createClient }) =>
-        createClient(url, anonKey, {
-          auth: { persistSession: false, autoRefreshToken: false },
-          global: {
-            // Tiempo máximo por petición: una conexión colgada no deja la pantalla en «Sincronizando…» para siempre.
-            fetch: (input, init) => {
-              const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), PULL_TIMEOUT_MS);
-              return fetch(input, { ...init, signal: init?.signal ?? controller.signal }).finally(() => clearTimeout(timer));
-            },
-          },
-        }),
-      );
+  let cachedClient: SupabaseClient | null = null;
+  const getClient = async (): Promise<SupabaseClient> => {
+    if (!cachedClient) {
+      cachedClient =
+        getRutaSupabaseClient() ?? createRutaSupabaseClient({ url, publicKey: anonKey });
     }
-    return clientPromise;
+    return cachedClient;
   };
 
   // IndexedDB disponible (false en modos privados/bloqueados: la app sigue funcionando solo en línea).
@@ -104,6 +93,9 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
   let secuencia = 0;
   let ultimoPull = 0;
   let realtimeAbierto = false;
+  let activeChannel: ReturnType<SupabaseClient['channel']> | null = null;
+  let stopDeliveriesSub: (() => void) | null = null;
+  const cleanupDomListeners: Array<() => void> = [];
 
   // Serializa lecturas/escrituras locales para que la UI nunca vea estados intermedios.
   let cola: Promise<unknown> = Promise.resolve();
@@ -140,9 +132,24 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     }, 30);
   };
 
-  /** Descarga todas las filas (paginadas) del servidor. */
+  /** Garantiza sesión activa y sincroniza el token JWT hacia la cola offline / Realtime. */
+  async function syncSessionToken(client: SupabaseClient): Promise<string> {
+    const { data, error } = await client.auth.getSession();
+    const token = data.session?.access_token ?? '';
+    if (error || !token) {
+      throw new Error('Sesión expirada o inactiva. Inicie sesión nuevamente.');
+    }
+    if (idbOk) {
+      await saveAuthToken(token).catch(() => undefined);
+    }
+    client.realtime.setAuth(token);
+    return token;
+  }
+
+  /** Descarga todas las filas (paginadas) del servidor con la sesión autenticada del usuario. */
   async function traerTodo(): Promise<Record<string, unknown>[]> {
     const client = await getClient();
+    await syncSessionToken(client);
     const filas: Record<string, unknown>[] = [];
     for (let desde = 0; ; desde += PAGE) {
       const { data, error } = await client
@@ -233,12 +240,13 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
   }
 
   async function abrirRealtime(): Promise<void> {
-    if (realtimeAbierto) return;
+    if (realtimeAbierto || !started) return;
     realtimeAbierto = true;
     try {
       const client = await getClient();
+      await syncSessionToken(client);
       let t: ReturnType<typeof setTimeout> | null = null;
-      client
+      const channel = client
         .channel('entregas-degustacion-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: TABLE }, () => {
           if (t) clearTimeout(t);
@@ -247,6 +255,7 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
         .subscribe((status) => {
           store.setState({ realtime: status === 'SUBSCRIBED' });
         });
+      activeChannel = channel;
     } catch (err) {
       realtimeAbierto = false;
       console.error('[RutaDegustación] Error abriendo el canal en tiempo real:', mensajeDe(err));
@@ -256,6 +265,8 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
   async function arrancar(): Promise<void> {
     try {
       await saveConfig({ url, anonKey });
+      const client = await getClient();
+      await syncSessionToken(client).catch(() => undefined);
       const filas = await getAllDeliveries();
       const iso = await getMeta<string>('last_full_sync_iso');
       // Las marcas «Sincronizado en servidor» de la sesión anterior se limpian al abrir la app.
@@ -274,19 +285,28 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       console.warn('[RutaDegustación] Almacenamiento local no disponible; solo modo en línea:', mensajeDe(err));
     }
 
-    subscribeChanges((kind) => {
+    if (!started) return;
+
+    stopDeliveriesSub?.();
+    stopDeliveriesSub = subscribeChanges((kind) => {
       if (kind === 'deliveries') programarRecarga();
     });
     engine.start();
 
-    window.addEventListener('online', () => {
+    const onOnline = () => {
       void engine.flushNow({ force: true }).then(() => cargar(false));
-    });
-    document.addEventListener('visibilitychange', () => {
+    };
+    const onVisible = () => {
       if (document.visibilityState === 'visible' && navigator.onLine && Date.now() - ultimoPull > REFRESH_ON_FOCUS_MIN_MS) {
         void engine.flushNow({ force: true }).then(() => cargar(false));
       }
-    });
+    };
+    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisible);
+    cleanupDomListeners.push(
+      () => window.removeEventListener('online', onOnline),
+      () => document.removeEventListener('visibilitychange', onVisible),
+    );
 
     if (navigator.onLine) {
       await engine.flushNow({ force: true });
@@ -294,6 +314,32 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     } else {
       store.setState({ status: 'offline' });
     }
+  }
+
+  function detener(): void {
+    if (!started) return;
+    started = false;
+    secuencia += 1;
+    if (recargaPendiente) {
+      clearTimeout(recargaPendiente);
+      recargaPendiente = null;
+    }
+    cleanupDomListeners.splice(0).forEach((fn) => fn());
+    stopDeliveriesSub?.();
+    stopDeliveriesSub = null;
+    engine.stop();
+    if (activeChannel && cachedClient) {
+      const ch = activeChannel;
+      activeChannel = null;
+      void cachedClient.removeChannel(ch).catch(() => undefined);
+    }
+    realtimeAbierto = false;
+    store.commit([], {
+      status: 'sincronizando',
+      errorMessage: null,
+      realtime: false,
+      aviso: null,
+    });
   }
 
   /**
@@ -345,10 +391,11 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
   }
 
   /** Ejecuta una escritura en línea (alta/importación); si falla lanza el error y resincroniza. */
-  const run = async (op: (c: Client) => PromiseLike<{ error: { message: string } | null }>) => {
+  const run = async (op: (c: SupabaseClient) => PromiseLike<{ error: { message: string } | null }>) => {
     if (store.getState().offline) throw new Error(MENSAJE_REQUIERE_CONEXION);
     try {
       const client = await getClient();
+      await syncSessionToken(client);
       const { error } = await op(client);
       if (error) throw new Error(error.message);
     } catch (err) {
@@ -364,6 +411,9 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       if (started) return;
       started = true;
       void arrancar();
+    },
+    stop() {
+      detener();
     },
     getSnapshot: store.getEntregas,
     subscribe: store.subscribe,

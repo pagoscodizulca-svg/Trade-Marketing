@@ -87,38 +87,46 @@ export function checkEnvReadiness() {
   ensureEnvLoaded();
   const hasEnvFile = fs.existsSync(ENV_TEST_PATH);
   const supabaseUrl = normalizeUrl(process.env.SUPABASE_URL);
-  const supabaseAnonKey = String(process.env.SUPABASE_ANON_KEY || '').trim();
+  const supabasePublicKey = String(
+    process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || ''
+  ).trim();
   const supabaseServiceRoleKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 
   return {
     hasEnvFile,
     hasSupabaseUrl: !isPlaceholderValue(supabaseUrl) && supabaseUrl.startsWith('https://'),
-    hasSupabaseAnonKey: !isPlaceholderValue(supabaseAnonKey),
+    hasSupabaseAnonKey: !isPlaceholderValue(supabasePublicKey),
     hasSupabaseServiceRoleKey: !isPlaceholderValue(supabaseServiceRoleKey),
   };
 }
 
 /**
  * Carga variables públicas para las pruebas funcionales (`tests/*.spec.*`).
+ * Prioriza `SUPABASE_PUBLISHABLE_KEY` con compatibilidad hacia `SUPABASE_ANON_KEY`.
  * JAMÁS expone ni retorna `SUPABASE_SERVICE_ROLE_KEY`.
  */
 export function loadPublicQaEnv() {
   ensureEnvLoaded();
   const supabaseUrl = normalizeUrl(process.env.SUPABASE_URL);
-  const supabaseAnonKey = String(process.env.SUPABASE_ANON_KEY || '').trim();
+  const keyVarName = process.env.SUPABASE_PUBLISHABLE_KEY
+    ? 'SUPABASE_PUBLISHABLE_KEY'
+    : 'SUPABASE_ANON_KEY';
+  const supabasePublicKey = String(
+    process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || ''
+  ).trim();
 
   if (isPlaceholderValue(supabaseUrl) || !supabaseUrl.startsWith('https://')) {
     throw new Error(
       'Falta configurar SUPABASE_URL válido en qa-sync-suite/.env.test (ver .env.test.example).'
     );
   }
-  if (isPlaceholderValue(supabaseAnonKey)) {
+  if (isPlaceholderValue(supabasePublicKey)) {
     throw new Error(
-      'Falta configurar SUPABASE_ANON_KEY válido en qa-sync-suite/.env.test (ver .env.test.example).'
+      'Falta configurar SUPABASE_PUBLISHABLE_KEY o SUPABASE_ANON_KEY válido en qa-sync-suite/.env.test (ver .env.test.example).'
     );
   }
 
-  assertNotServiceRoleKey(supabaseAnonKey, 'SUPABASE_ANON_KEY');
+  assertNotServiceRoleKey(supabasePublicKey, keyVarName);
 
   const renderPlanificadorUrl = normalizeUrl(
     process.env.RENDER_PLANIFICADOR_URL || 'https://dashboard-fdv-planificador.onrender.com'
@@ -133,7 +141,8 @@ export function loadPublicQaEnv() {
 
   return Object.freeze({
     supabaseUrl,
-    supabaseAnonKey,
+    supabasePublicKey,
+    supabaseAnonKey: supabasePublicKey,
     renderPlanificadorUrl,
     tradeMarketingAppUrl,
     rateLimitRps,

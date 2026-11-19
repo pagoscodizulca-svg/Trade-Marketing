@@ -26,6 +26,52 @@ export type EstadoLoteSincronizacion =
   | 'con_observaciones'
   | 'fallido';
 
+export type SucursalMaestro = 'ZULIA' | 'VALENCIA';
+
+export interface CadenaComercial {
+  id: string;
+  codigo: string;
+  nombre: string;
+  tipo_canal: string;
+  sucursal: SucursalMaestro | null;
+  activo: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CadenaComercialInput {
+  id?: string;
+  codigo: string;
+  nombre: string;
+  tipo_canal?: string;
+  sucursal?: SucursalMaestro | null;
+  activo?: boolean;
+}
+
+export interface ZonaComercial {
+  id: string;
+  codigo: string;
+  nombre: string;
+  ciudad: string | null;
+  estado: string | null;
+  sucursal: SucursalMaestro | null;
+  activo: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ZonaComercialInput {
+  id?: string;
+  codigo: string;
+  nombre: string;
+  ciudad?: string | null;
+  estado?: string | null;
+  sucursal?: SucursalMaestro | null;
+  activo?: boolean;
+}
+
 export interface Vendedor {
   id: string;
   codigo_vendedor: string;
@@ -35,6 +81,7 @@ export interface Vendedor {
   email: string | null;
   zona: string | null;
   supervisor: string | null;
+  sucursal?: SucursalMaestro | null;
   activo: boolean;
   metadata: Record<string, unknown>;
   ultima_sincronizacion: string | null;
@@ -50,7 +97,13 @@ export interface VendedorSincronizacionInput {
   email?: string | null;
   zona?: string | null;
   supervisor?: string | null;
+  sucursal?: SucursalMaestro | null;
   metadata?: Record<string, unknown>;
+}
+
+export interface VendedorCrudInput extends VendedorSincronizacionInput {
+  id?: string;
+  activo?: boolean;
 }
 
 export interface Cliente {
@@ -69,6 +122,10 @@ export interface Cliente {
   telefono: string | null;
   latitud: number | null;
   longitud: number | null;
+  cadena_id?: string | null;
+  zona_id?: string | null;
+  radio_geocerca_m?: number | null;
+  sucursal?: SucursalMaestro | null;
   vendedor_id: string | null;
   codigo_vendedor: string | null;
   activo: boolean;
@@ -83,6 +140,8 @@ export interface ClienteConVendedor extends Cliente {
     Vendedor,
     'id' | 'codigo_vendedor' | 'nombre_completo' | 'zona' | 'supervisor' | 'activo'
   > | null;
+  cadena?: Pick<CadenaComercial, 'id' | 'codigo' | 'nombre' | 'tipo_canal'> | null;
+  zona_catalogo?: Pick<ZonaComercial, 'id' | 'codigo' | 'nombre' | 'ciudad' | 'estado'> | null;
 }
 
 export interface ClienteSincronizacionInput {
@@ -100,8 +159,18 @@ export interface ClienteSincronizacionInput {
   telefono?: string | null;
   latitud?: number | null;
   longitud?: number | null;
+  cadena_id?: string | null;
+  zona_id?: string | null;
+  radio_geocerca_m?: number | null;
+  sucursal?: SucursalMaestro | null;
   codigo_vendedor?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+export interface ClienteCrudInput extends ClienteSincronizacionInput {
+  id?: string;
+  vendedor_id?: string | null;
+  activo?: boolean;
 }
 
 export interface ErrorFilaSincronizacion {
@@ -188,9 +257,85 @@ export type MasterDataDatabase = {
   };
   public: {
     Tables: {
+      cadenas_comerciales: {
+        Row: {
+          activo: boolean;
+          codigo: string;
+          created_at: string;
+          id: string;
+          metadata: Json;
+          nombre: string;
+          sucursal: string | null;
+          tipo_canal: string;
+          updated_at: string;
+        };
+        Insert: {
+          activo?: boolean;
+          codigo: string;
+          created_at?: string;
+          id?: string;
+          metadata?: Json;
+          nombre: string;
+          sucursal?: string | null;
+          tipo_canal?: string;
+          updated_at?: string;
+        };
+        Update: {
+          activo?: boolean;
+          codigo?: string;
+          created_at?: string;
+          id?: string;
+          metadata?: Json;
+          nombre?: string;
+          sucursal?: string | null;
+          tipo_canal?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      zonas: {
+        Row: {
+          activo: boolean;
+          ciudad: string | null;
+          codigo: string;
+          created_at: string;
+          estado: string | null;
+          id: string;
+          metadata: Json;
+          nombre: string;
+          sucursal: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          activo?: boolean;
+          ciudad?: string | null;
+          codigo: string;
+          created_at?: string;
+          estado?: string | null;
+          id?: string;
+          metadata?: Json;
+          nombre: string;
+          sucursal?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          activo?: boolean;
+          ciudad?: string | null;
+          codigo?: string;
+          created_at?: string;
+          estado?: string | null;
+          id?: string;
+          metadata?: Json;
+          nombre?: string;
+          sucursal?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       clientes: {
         Row: {
           activo: boolean;
+          cadena_id: string | null;
           canal: string | null;
           ciudad: string | null;
           codigo_cliente: string;
@@ -203,18 +348,22 @@ export type MasterDataDatabase = {
           longitud: number | null;
           metadata: Json;
           nombre_comercial: string | null;
+          radio_geocerca_m: number;
           razon_social: string;
           rif: string | null;
           ruta: string | null;
           segmento: string | null;
+          sucursal: string | null;
           telefono: string | null;
           ultima_sincronizacion: string | null;
           updated_at: string;
           vendedor_id: string | null;
           zona: string | null;
+          zona_id: string | null;
         };
         Insert: {
           activo?: boolean;
+          cadena_id?: string | null;
           canal?: string | null;
           ciudad?: string | null;
           codigo_cliente: string;
@@ -227,18 +376,22 @@ export type MasterDataDatabase = {
           longitud?: number | null;
           metadata?: Json;
           nombre_comercial?: string | null;
+          radio_geocerca_m?: number;
           razon_social: string;
           rif?: string | null;
           ruta?: string | null;
           segmento?: string | null;
+          sucursal?: string | null;
           telefono?: string | null;
           ultima_sincronizacion?: string | null;
           updated_at?: string;
           vendedor_id?: string | null;
           zona?: string | null;
+          zona_id?: string | null;
         };
         Update: {
           activo?: boolean;
+          cadena_id?: string | null;
           canal?: string | null;
           ciudad?: string | null;
           codigo_cliente?: string;
@@ -251,15 +404,18 @@ export type MasterDataDatabase = {
           longitud?: number | null;
           metadata?: Json;
           nombre_comercial?: string | null;
+          radio_geocerca_m?: number;
           razon_social?: string;
           rif?: string | null;
           ruta?: string | null;
           segmento?: string | null;
+          sucursal?: string | null;
           telefono?: string | null;
           ultima_sincronizacion?: string | null;
           updated_at?: string;
           vendedor_id?: string | null;
           zona?: string | null;
+          zona_id?: string | null;
         };
         Relationships: [
           {
@@ -267,6 +423,20 @@ export type MasterDataDatabase = {
             columns: ['vendedor_id'];
             isOneToOne: false;
             referencedRelation: 'vendedores';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'clientes_cadena_id_fkey';
+            columns: ['cadena_id'];
+            isOneToOne: false;
+            referencedRelation: 'cadenas_comerciales';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'clientes_zona_id_fkey';
+            columns: ['zona_id'];
+            isOneToOne: false;
+            referencedRelation: 'zonas';
             referencedColumns: ['id'];
           },
         ];
@@ -320,6 +490,7 @@ export type MasterDataDatabase = {
           id: string;
           metadata: Json;
           nombre_completo: string;
+          sucursal: string | null;
           supervisor: string | null;
           telefono: string | null;
           ultima_sincronizacion: string | null;
@@ -335,6 +506,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre_completo: string;
+          sucursal?: string | null;
           supervisor?: string | null;
           telefono?: string | null;
           ultima_sincronizacion?: string | null;
@@ -350,6 +522,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre_completo?: string;
+          sucursal?: string | null;
           supervisor?: string | null;
           telefono?: string | null;
           ultima_sincronizacion?: string | null;

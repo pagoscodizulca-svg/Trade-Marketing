@@ -52,17 +52,34 @@ async function signInActorWithPassword(publicEnv, actor) {
     );
   }
   client.realtime.setAuth(data.session.access_token);
-  return { client, user: data.user };
+  return { client, user: data.user, accessToken: data.session.access_token };
+}
+
+async function isTradeBackendAvailable(baseUrl) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/health`, {
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Replica con exactitud el contrato `syncToGerenciaDashboard` de la App de Vendedores
- * (`dashboard-fdv---planificador/src/services/degustacionesService.ts:312-497`),
- * autenticado con el cliente `SUPABASE_ANON_KEY` del vendedor (`qa_vendedor`)
- * y SIN disparar webhooks externos a Google Sheets ni escrituras a Firestore productivo.
+ * Envía una solicitud de degustación de vendedor de forma 100% autenticada (CERO acceso `anon`):
+ * - Cuando el backend de Trade Marketing está disponible, usa `POST /api/fdv/solicitudes-degustacion`
+ *   con el Bearer JWT real de `qa_vendedor` (validación Zod, sello de autor/sucursal e idempotencia atómica).
+ * - Como respaldo (cuando solo se ejecuta contra Supabase directo), usa el cliente Supabase
+ *   autenticado con JWT de `qa_vendedor` y manejo atómico de colisión `23505`.
  */
 async function submitVendorDegustacionToInbox({
   vendedorClient,
+  vendedorAccessToken = null,
+  tradeMarketingAppUrl = null,
+  useBackendEndpoint = false,
   runId,
   degustacionId,
   clienteCodigo,
@@ -80,6 +97,61 @@ async function submitVendorDegustacionToInbox({
   checkExistingFirst = true,
 }) {
   const cleanId = String(degustacionId).trim().replace(/^DEG-/i, '');
+  const canonicalKey = cleanId.toLowerCase().slice(0, 128);
+
+  if (useBackendEndpoint && tradeMarketingAppUrl && vendedorAccessToken) {
+    const endpoint = `${tradeMarketingAppUrl.replace(/\/+$/, '')}/api/fdv/solicitudes-degustacion`;
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${vendedorAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        degustacionId: cleanId,
+        clienteCodigo,
+        clienteNombre,
+        vendedorId,
+        vendedorNombre,
+        ruta,
+        fecha,
+        turno,
+        hora,
+        productos,
+        kilosEstimados,
+        personasEstimadas,
+        observaciones,
+        contactoPunto: `[QA-SYNC-TEST:${runId}] CONTACTO PDV`,
+        telefonoContacto: '+584140001111',
+      }),
+    });
+
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok || !body?.solicitud?.id) {
+      throw new Error(
+        `Error en POST /api/fdv/solicitudes-degustacion (HTTP ${resp.status}): ${redactSensitive(
+          body?.error || 'respuesta inválida'
+        )}`
+      );
+    }
+
+    recordLedgerEntry({
+      resource_type: 'db_row',
+      schema: 'public',
+      table_or_bucket: 'surveys',
+      pk_column: 'id',
+      id: body.solicitud.id,
+      run_id: runId,
+      meta: { degustacionId: cleanId, via: 'backend_api' },
+    });
+
+    return {
+      row: body.solicitud,
+      wasUpdate: Boolean(body.wasUpdate),
+      idempotentHit: Boolean(body.idempotentHit),
+    };
+  }
+
   const isoCreatedAt = new Date().toISOString();
   const productCsv = productos.join(', ');
 
@@ -153,6 +225,7 @@ async function submitVendorDegustacionToInbox({
 
   const fullPayload = {
     ...basePayload,
+    degustacion_key: canonicalKey,
     leido_trade: false,
     visto_en_trade_at: null,
   };
@@ -166,7 +239,10 @@ async function submitVendorDegustacionToInbox({
       .select('id, store, date, product, comments, leido_trade')
       .single();
 
-    if (opResult.error && /leido_trade|visto_en_trade_at|PGRST204|42703/i.test(opResult.error.message)) {
+    if (
+      opResult.error &&
+      /degustacion_key|leido_trade|visto_en_trade_at|PGRST204|42703/i.test(opResult.error.message)
+    ) {
       opResult = await vendedorClient
         .from('surveys')
         .update(basePayload)
@@ -181,7 +257,40 @@ async function submitVendorDegustacionToInbox({
       .select('id, store, date, product, comments, leido_trade')
       .single();
 
-    if (opResult.error && /leido_trade|visto_en_trade_at|PGRST204|42703/i.test(opResult.error.message)) {
+    if (
+      opResult.error &&
+      (String(opResult.error.code || '') === '23505' ||
+        /duplicate key|uq_surveys_degustacion_key_active/i.test(opResult.error.message))
+    ) {
+      const winner = await vendedorClient
+        .from('surveys')
+        .select('id, store, date, product, comments, leido_trade')
+        .eq('type', 'Degustacion')
+        .eq('degustacion_key', canonicalKey)
+        .limit(1)
+        .single();
+      if (!winner.error && winner.data?.id) {
+        recordLedgerEntry({
+          resource_type: 'db_row',
+          schema: 'public',
+          table_or_bucket: 'surveys',
+          pk_column: 'id',
+          id: winner.data.id,
+          run_id: runId,
+          meta: { degustacionId: cleanId, conflictRecovered: true },
+        });
+        return {
+          row: winner.data,
+          wasUpdate: false,
+          idempotentHit: true,
+        };
+      }
+    }
+
+    if (
+      opResult.error &&
+      /degustacion_key|leido_trade|visto_en_trade_at|PGRST204|42703/i.test(opResult.error.message)
+    ) {
       opResult = await vendedorClient
         .from('surveys')
         .insert(basePayload)
@@ -212,6 +321,7 @@ async function submitVendorDegustacionToInbox({
   return {
     row: opResult.data,
     wasUpdate: Boolean(existingRow?.id),
+    idempotentHit: Boolean(existingRow?.id),
   };
 }
 
@@ -309,12 +419,12 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
     // 1. Seed programático de usuarios efímeros y Cliente Prueba
     seeded = await seedQaEnvironment();
 
-    // 2. Autenticación real con SUPABASE_ANON_KEY y usuario/contraseña en sesiones aisladas
+    // 2. Autenticación real con llave pública y usuario/contraseña en sesiones aisladas (CERO anon)
+    const useBackendEndpoint = await isTradeBackendAvailable(publicEnv.tradeMarketingAppUrl);
+
     await pacer.pace();
-    const { client: vendedorClient } = await signInActorWithPassword(
-      publicEnv,
-      seeded.users.qa_vendedor
-    );
+    const { client: vendedorClient, accessToken: vendedorAccessToken } =
+      await signInActorWithPassword(publicEnv, seeded.users.qa_vendedor);
     activeSessions.push(vendedorClient);
 
     await pacer.pace();
@@ -364,6 +474,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
 
       const submitRes = await submitVendorDegustacionToInbox({
         vendedorClient,
+        vendedorAccessToken,
+        tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+        useBackendEndpoint,
         runId: seeded.runId,
         degustacionId: degId,
         clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -414,7 +527,7 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
         restLatencyMs: restSyncMs,
         realtimeLatencyMs: rtResult.latencyMs,
         realtimeDelivered: rtResult.received,
-        notes: `Survey ID=${tc01SurveyId} recibido íntegro con estado SOLICITADA.`,
+        notes: `Survey ID=${tc01SurveyId} recibido íntegro con estado SOLICITADA (via=${useBackendEndpoint ? 'api_fdv' : 'jwt_rls'}).`,
       });
     });
 
@@ -429,6 +542,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
       const t0 = performance.now();
       const seq1 = await submitVendorDegustacionToInbox({
         vendedorClient,
+        vendedorAccessToken,
+        tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+        useBackendEndpoint,
         runId: seeded.runId,
         degustacionId: degIdSeq,
         clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -445,6 +561,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
 
       const seq2 = await submitVendorDegustacionToInbox({
         vendedorClient,
+        vendedorAccessToken,
+        tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+        useBackendEndpoint,
         runId: seeded.runId,
         degustacionId: degIdSeq,
         clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -480,6 +599,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
       const [raceA, raceB] = await Promise.all([
         submitVendorDegustacionToInbox({
           vendedorClient,
+          vendedorAccessToken,
+          tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+          useBackendEndpoint,
           runId: seeded.runId,
           degustacionId: degIdRace,
           clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -495,6 +617,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
         }),
         submitVendorDegustacionToInbox({
           vendedorClient,
+          vendedorAccessToken,
+          tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+          useBackendEndpoint,
           runId: seeded.runId,
           degustacionId: degIdRace,
           clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -530,27 +655,21 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
       }
 
       const elapsedMs = Math.round(performance.now() - t0);
-      const parallelDuplicates = (raceRows?.length || 0) > 1;
-
-      if (parallelDuplicates) {
-        findings.push({
-          id: 'FINDING-IDEMPOTENCY-SURVEYS-01',
-          severity: 'MEDIUM',
-          location:
-            'App para los bot/dashboard-fdv---planificador/src/services/degustacionesService.ts:341-361 & public.surveys',
-          summary:
-            'El reintento secuencial es idempotente (1 fila), pero el doble clic paralelo (Promise.all) inserta 2 filas en public.surveys porque la verificación GET previa no es atómica y falta un índice UNIQUE parcial sobre (comments::jsonb->>\'degustacionId\'). En cambio, cronograma_degustaciones sí bloquea duplicados por constraint UNIQUE.',
-        });
-      }
+      assert.equal(
+        raceRows?.length,
+        1,
+        'FALLO DE IDEMPOTENCIA (FINDING-IDEMPOTENCY-SURVEYS-01): el doble envío paralelo creó filas duplicadas; verifique que la migración 20261118000500 (uq_surveys_degustacion_key_active) esté aplicada.'
+      );
+      assert.equal(raceA.row.id, raceB.row.id);
 
       resultsMatrix.push({
         testCase: 'TC-02',
         title: 'Idempotencia ante Doble Envío (Secuencial vs Paralelo)',
-        status: parallelDuplicates ? 'PASS_WITH_FINDING' : 'PASS',
+        status: 'PASS',
         restLatencyMs: elapsedMs,
         realtimeLatencyMs: null,
         realtimeDelivered: null,
-        notes: `Secuencial=1 fila (update=${seq2.wasUpdate}); Paralelo Promise.all=${raceRows?.length || 0} fila(s) [${raceA.row.id}, ${raceB.row.id}] registradas en qa-ledger.json.`,
+        notes: `Secuencial=1 fila (update=${seq2.wasUpdate}); Paralelo Promise.all=1 fila única [${raceA.row.id}] verificada sin duplicados.`,
       });
     });
 
@@ -860,6 +979,9 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
       // Crear segunda degustación en turno TARDE para no colisionar con el turno MAÑANA de TC-03
       const sub05 = await submitVendorDegustacionToInbox({
         vendedorClient,
+        vendedorAccessToken,
+        tradeMarketingAppUrl: publicEnv.tradeMarketingAppUrl,
+        useBackendEndpoint,
         runId: seeded.runId,
         degustacionId: degId05,
         clienteCodigo: seeded.clientePrueba.codigoCliente,
@@ -1025,20 +1147,47 @@ test('Suite E2E Sincronización Multi-App y Seguridad RLS con Protocolo Cero-Res
         'VULNERABILIDAD: rol anon pudo ejecutar registrar_avance_ruta_promotora'
       );
 
-      // Comprobar también superficie RLS de `public.surveys` ante `anon` (lectura sin sesión)
-      const unauthSurveyProbe = await unauthAnonClient
-        .from('surveys')
-        .select('id')
-        .eq('id', tc01SurveyId);
-      if (!unauthSurveyProbe.error && (unauthSurveyProbe.data?.length || 0) > 0) {
-        findings.push({
-          id: 'FINDING-RLS-SURVEYS-ANON-03',
-          severity: 'HIGH',
-          location:
-            'App para los bot/dashboard-fdv---planificador/src/services/degustacionesService.ts:238-246 & public.surveys RLS',
-          summary:
-            'Debido a que dashboard-fdv---planificador transmite con ANON_KEY sin sesión Supabase Auth, public.surveys mantiene lectura/escritura abierta al rol anon. En contraste, cronograma_degustaciones y rutas_promotoras sí bloquean al 100% a anon.',
-        });
+      // Comprobar también bloqueo estricto de `anon` en `public.surveys` y `public.entregas_degustacion` (N-07 / S-06)
+      const [unauthSurveyProbe, unauthEntregasProbe] = await Promise.all([
+        unauthAnonClient.from('surveys').select('id').eq('id', tc01SurveyId),
+        unauthAnonClient.from('entregas_degustacion').select('id').limit(1),
+      ]);
+      const unauthSurveyVisible = Array.isArray(unauthSurveyProbe.data)
+        ? unauthSurveyProbe.data.length
+        : 0;
+      const unauthEntregasVisible = Array.isArray(unauthEntregasProbe.data)
+        ? unauthEntregasProbe.data.length
+        : 0;
+
+      assert.equal(
+        unauthSurveyVisible,
+        0,
+        'VULNERABILIDAD (N-07): rol anon pudo leer public.surveys sin autenticación'
+      );
+      assert.equal(
+        unauthEntregasVisible,
+        0,
+        'VULNERABILIDAD (S-06): rol anon pudo leer public.entregas_degustacion sin autenticación'
+      );
+
+      if (useBackendEndpoint) {
+        const unauthApiRes = await fetch(
+          `${publicEnv.tradeMarketingAppUrl.replace(/\/+$/, '')}/api/fdv/solicitudes-degustacion`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              clienteNombre: 'INTENTO ANON',
+              fecha: seeded.tastingDateYmd,
+              productos: ['MORTADELA'],
+            }),
+          }
+        );
+        assert.equal(
+          unauthApiRes.status,
+          401,
+          `VULNERABILIDAD (N-07): POST /api/fdv/solicitudes-degustacion aceptó petición sin Bearer token (HTTP ${unauthApiRes.status})`
+        );
       }
 
       // 6.B: Aislamiento cruzado `qa_promotora_b` contra degustaciones de `qa_promotora_a`

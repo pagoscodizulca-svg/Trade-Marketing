@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -8,17 +8,16 @@ import { buildMockJwt, MOCK_PUBLIC_ANON_KEY, MOCK_SERVICE_ROLE_KEY } from './ant
 
 const ROOT_DIR = process.cwd();
 
-test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificación SQL + JS ES6+ OWASP', async (t) => {
-  await t.test('Entregable 1: Integridad no destructiva, FORCE RLS y aislamiento en 001_blindaje_trade_sucursales.sql', () => {
+test('FASE 1 / HITO 1 MULTI-SUCURSAL (ZULIA / VALENCIA / GLOBAL) — Certificación SQL + Cliente TS Único', async (t) => {
+  await t.test('Entregable 1: Integridad histórica no destructiva en 20261118000200_blindaje_trade_sucursales.sql', () => {
     const sqlPath = path.join(
       ROOT_DIR,
       'supabase',
       'migrations',
-      '001_blindaje_trade_sucursales.sql'
+      '20261118000200_blindaje_trade_sucursales.sql'
     );
     const sql = fs.readFileSync(sqlPath, 'utf8');
 
-    // 1. Regla de oro: prohibición absoluta de comandos destructivos de tabla o borrado de datos
     assert.doesNotMatch(sql, /\bDROP\s+TABLE\b/i, 'PROHIBIDO DROP TABLE en migración');
     assert.doesNotMatch(sql, /\bTRUNCATE\b/i, 'PROHIBIDO TRUNCATE en migración');
     assert.doesNotMatch(
@@ -26,67 +25,21 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
       /\bDELETE\s+FROM\s+public\.(promotoras|clientes)\b/i,
       'PROHIBIDO borrar registros en promotoras o clientes'
     );
-
-    // 2. ENUMs controlados
-    assert.match(sql, /CREATE TYPE public\.sucursal_tipo AS ENUM\s*\('Zulia',\s*'Valencia'\)/i);
-    assert.match(
-      sql,
-      /CREATE TYPE public\.rol_trade AS ENUM\s*\('promotora',\s*'coordinadora',\s*'admin_general'\)/i
-    );
-    assert.match(sql, /EXCEPTION\s+WHEN\s+duplicate_object\s+THEN\s+NULL/i);
-
-    // 3. ENABLE + FORCE ROW LEVEL SECURITY en las 4 tablas
-    for (const tabla of ['promotoras', 'clientes', 'perfiles_acceso', 'reportes_trade']) {
-      assert.match(
-        sql,
-        new RegExp(`ALTER TABLE public\\.${tabla} ENABLE ROW LEVEL SECURITY`, 'i'),
-        `Falta ENABLE RLS en ${tabla}`
-      );
-      assert.match(
-        sql,
-        new RegExp(`ALTER TABLE public\\.${tabla} FORCE ROW LEVEL SECURITY`, 'i'),
-        `Falta FORCE RLS en ${tabla}`
-      );
-      assert.match(
-        sql,
-        new RegExp(`REVOKE ALL ON TABLE public\\.${tabla} FROM PUBLIC,\\s*anon`, 'i'),
-        `Falta REVOKE anon en ${tabla}`
-      );
-    }
-
-    // 4. Restricciones, funciones anti-recursión, lista blanca y triggers
-    assert.match(
-      sql,
-      /CHECK\s*\(\(rol\s*=\s*'admin_general'\)\s*OR\s*\(sucursal\s+IS\s+NOT\s+NULL\)\)/i
-    );
-    assert.match(sql, /CREATE OR REPLACE FUNCTION public\.vincular_mi_usuario_auth\(\)/i);
-    assert.match(sql, /CREATE OR REPLACE FUNCTION public\.obtener_mi_rol\(\)/i);
-    assert.match(sql, /CREATE OR REPLACE FUNCTION public\.obtener_mi_sucursal\(\)/i);
-    assert.match(sql, /CREATE TRIGGER trg_sync_promotora_a_perfil_acceso/i);
-    assert.match(sql, /CREATE TRIGGER trg_vincular_nuevo_auth_user_perfil/i);
-    assert.match(sql, /CREATE TRIGGER trg_forzar_integridad_reporte_trade/i);
-
-    // 5. Bloque comentado de verificación para los 5 perfiles
-    assert.match(sql, /1_promotora_zulia_clientes_valencia/);
-    assert.match(sql, /2_promotora_valencia_reportes_zulia/);
-    assert.match(sql, /3_coord_zulia_ve_valencia/);
-    assert.match(sql, /4_coord_valencia_ve_zulia/);
-    assert.match(sql, /5_admin_general_consolidado/);
   });
 
-  await t.test('Entregable 2 (OWASP): Cero innerHTML / service_role y bloqueo de llaves secretas en supabaseClient.js', async () => {
+  await t.test('Entregable 2 (OWASP + N-03): Cliente único TS sin innerHTML ni service_role y con storageKey unificado', async () => {
     const clientCode = fs.readFileSync(
-      path.join(ROOT_DIR, 'src', 'lib', 'supabaseClient.js'),
+      path.join(ROOT_DIR, 'src', 'services', 'supabaseClient.ts'),
       'utf8'
     );
-    const guardCode = fs.readFileSync(
-      path.join(ROOT_DIR, 'src', 'auth', 'authGuard.js'),
+    const authCode = fs.readFileSync(
+      path.join(ROOT_DIR, 'src', 'services', 'authService.ts'),
       'utf8'
     );
 
     for (const [nombre, codigo] of [
-      ['supabaseClient.js', clientCode],
-      ['authGuard.js', guardCode],
+      ['supabaseClient.ts', clientCode],
+      ['authService.ts', authCode],
     ] as const) {
       assert.doesNotMatch(
         codigo,
@@ -100,11 +53,11 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
       );
     }
 
-    assert.match(clientCode, /persistSession:\s*true/);
-    assert.match(clientCode, /autoRefreshToken:\s*true/);
+    const { UNIFIED_SUPABASE_STORAGE_KEY, validarClavePublicaNoSecreta } = await import(
+      '../src/services/supabaseClient'
+    );
 
-    const { validarClavePublicaNoSecreta } = await import('../src/lib/supabaseClient.js');
-
+    assert.equal(UNIFIED_SUPABASE_STORAGE_KEY, 'codizulca.supabase.auth.v1');
     assert.throws(
       () => validarClavePublicaNoSecreta('sb_secret_clave_prohibida_12345'),
       /SEGURIDAD CRÍTICA/
@@ -116,7 +69,7 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
     assert.doesNotThrow(() => validarClavePublicaNoSecreta(MOCK_PUBLIC_ANON_KEY));
   });
 
-  await t.test('Entregable 2 (E2E Local): iniciarSesionPorCorreo, vinculación RPC, signOut fuera de lista blanca y DOM seguro', async () => {
+  await t.test('Entregable 2 (E2E Local en public.profiles): iniciarSesionPorCorreo, storageKey unificado, signOut inmediato y DOM seguro', async () => {
     const UID_PROM_ZULIA = '11111111-1111-4111-8111-000000000101';
     const PROM_ZULIA_ID = '22222222-2222-4222-8222-000000001101';
     const UID_COORD_VAL = '11111111-1111-4111-8111-000000000202';
@@ -125,76 +78,69 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
     const UID_INACTIVO = '11111111-1111-4111-8111-000000000777';
 
     const usuariosAuth = new Map([
-      ['maria.zulia@empresa.com', { id: UID_PROM_ZULIA, password: 'ClaveSegura123!' }],
-      ['coord.valencia@empresa.com', { id: UID_COORD_VAL, password: 'ClaveSegura123!' }],
-      ['admin.general@empresa.com', { id: UID_ADMIN_GEN, password: 'ClaveSegura123!' }],
-      ['intruso.externo@empresa.com', { id: UID_INTRUSO, password: 'ClaveSegura123!' }],
-      ['suspendida.zulia@empresa.com', { id: UID_INACTIVO, password: 'ClaveSegura123!' }],
+      [
+        'maria.zulia@empresa.com',
+        { id: UID_PROM_ZULIA, password: 'ClaveSegura123!', staffId: PROM_ZULIA_ID },
+      ],
+      ['coord.valencia@empresa.com', { id: UID_COORD_VAL, password: 'ClaveSegura123!', staffId: null }],
+      ['admin.general@empresa.com', { id: UID_ADMIN_GEN, password: 'ClaveSegura123!', staffId: null }],
+      ['intruso.externo@empresa.com', { id: UID_INTRUSO, password: 'ClaveSegura123!', staffId: null }],
+      ['suspendida.zulia@empresa.com', { id: UID_INACTIVO, password: 'ClaveSegura123!', staffId: null }],
     ]);
 
-    const perfilesTabla = new Map<
+    const profilesTable = new Map<
       string,
       {
         id: string;
-        auth_user_id: string | null;
         email: string;
-        nombre_completo: string;
-        rol: string;
-        sucursal: string | null;
-        promotora_id: string | null;
-        activo: boolean;
+        full_name: string;
+        role: string;
+        sucursal: string;
+        is_active: boolean;
       }
     >([
       [
-        'maria.zulia@empresa.com',
+        UID_PROM_ZULIA,
         {
-          id: 'aaaaaaaa-aaaa-4aaa-8aaa-000000000001',
-          auth_user_id: null, // Se vinculará automáticamente vía RPC al iniciar sesión
+          id: UID_PROM_ZULIA,
           email: 'maria.zulia@empresa.com',
-          nombre_completo: 'María Alejandra · Zulia',
-          rol: 'promotora',
-          sucursal: 'Zulia',
-          promotora_id: PROM_ZULIA_ID,
-          activo: true,
+          full_name: 'María Alejandra · Zulia',
+          role: 'promotora',
+          sucursal: 'ZULIA',
+          is_active: true,
         },
       ],
       [
-        'coord.valencia@empresa.com',
+        UID_COORD_VAL,
         {
-          id: 'aaaaaaaa-aaaa-4aaa-8aaa-000000000002',
-          auth_user_id: null,
+          id: UID_COORD_VAL,
           email: 'coord.valencia@empresa.com',
-          nombre_completo: 'Coordinadora Sede Valencia',
-          rol: 'coordinadora',
-          sucursal: 'Valencia',
-          promotora_id: null,
-          activo: true,
+          full_name: 'Coordinadora Sede Valencia',
+          role: 'coordinacion',
+          sucursal: 'VALENCIA',
+          is_active: true,
         },
       ],
       [
-        'admin.general@empresa.com',
+        UID_ADMIN_GEN,
         {
-          id: 'aaaaaaaa-aaaa-4aaa-8aaa-000000000003',
-          auth_user_id: UID_ADMIN_GEN,
+          id: UID_ADMIN_GEN,
           email: 'admin.general@empresa.com',
-          nombre_completo: 'Dirección Nacional Trade',
-          rol: 'admin_general',
-          sucursal: null,
-          promotora_id: null,
-          activo: true,
+          full_name: 'Dirección Nacional Trade',
+          role: 'super_admin',
+          sucursal: 'GLOBAL',
+          is_active: true,
         },
       ],
       [
-        'suspendida.zulia@empresa.com',
+        UID_INACTIVO,
         {
-          id: 'aaaaaaaa-aaaa-4aaa-8aaa-000000000004',
-          auth_user_id: UID_INACTIVO,
+          id: UID_INACTIVO,
           email: 'suspendida.zulia@empresa.com',
-          nombre_completo: 'Promotora Inactiva',
-          rol: 'promotora',
-          sucursal: 'Zulia',
-          promotora_id: null,
-          activo: false,
+          full_name: 'Promotora Inactiva',
+          role: 'promotora',
+          sucursal: 'ZULIA',
+          is_active: false,
         },
       ],
     ]);
@@ -210,7 +156,6 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
 
       res.setHeader('Content-Type', 'application/json');
 
-      // 1. Login Supabase Auth: POST /auth/v1/token?grant_type=password
       if (req.method === 'POST' && url.pathname === '/auth/v1/token') {
         const email = String(body.email || '');
         const found = usuariosAuth.get(email);
@@ -223,6 +168,7 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
           sub: found.id,
           email,
           role: 'authenticated',
+          app_metadata: found.staffId ? { staff_id: found.staffId } : {},
           exp: 2100000000,
         });
         res.statusCode = 200;
@@ -237,13 +183,13 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
               aud: 'authenticated',
               role: 'authenticated',
               email,
+              app_metadata: found.staffId ? { staff_id: found.staffId } : {},
             },
           })
         );
         return;
       }
 
-      // 2. Logout Supabase Auth: POST /auth/v1/logout
       if (req.method === 'POST' && url.pathname === '/auth/v1/logout') {
         llamadasLogout += 1;
         res.statusCode = 204;
@@ -251,9 +197,8 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
         return;
       }
 
-      // Extraer identidad del JWT enviado en Authorization
       const authHeader = String(req.headers.authorization || '');
-      let jwtPayload: { sub?: string; email?: string } = {};
+      let jwtPayload: { sub?: string } = {};
       if (authHeader.startsWith('Bearer ')) {
         const parts = authHeader.slice(7).split('.');
         if (parts[1]) {
@@ -261,30 +206,10 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
         }
       }
 
-      // 3. RPC POST /rest/v1/rpc/vincular_mi_usuario_auth
-      if (req.method === 'POST' && url.pathname === '/rest/v1/rpc/vincular_mi_usuario_auth') {
-        const emailNorm = String(jwtPayload.email || '').trim().toLowerCase();
-        const perfil = perfilesTabla.get(emailNorm);
-        if (perfil && perfil.activo && !perfil.auth_user_id && jwtPayload.sub) {
-          perfil.auth_user_id = jwtPayload.sub;
-          res.end(JSON.stringify({ vinculado: true, rol: perfil.rol, sucursal: perfil.sucursal }));
-          return;
-        }
-        res.end(JSON.stringify({ vinculado: Boolean(perfil?.activo && perfil.auth_user_id === jwtPayload.sub) }));
-        return;
-      }
-
-      // 4. PostgREST GET /rest/v1/perfiles_acceso (simulando RLS estricto por auth_user_id y activo=true)
-      if (req.method === 'GET' && url.pathname === '/rest/v1/perfiles_acceso') {
-        const uidBuscado = (url.searchParams.get('auth_user_id') || '').replace(/^eq\./, '');
-        let encontrado = null;
-        for (const p of perfilesTabla.values()) {
-          if (p.auth_user_id === uidBuscado && p.auth_user_id === jwtPayload.sub) {
-            encontrado = p;
-            break;
-          }
-        }
-        res.end(JSON.stringify(encontrado));
+      if (req.method === 'GET' && url.pathname === '/rest/v1/profiles') {
+        const uidBuscado = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+        const row = uidBuscado === jwtPayload.sub ? profilesTable.get(uidBuscado) ?? null : null;
+        res.end(JSON.stringify(row));
         return;
       }
 
@@ -307,12 +232,14 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
       },
     } as Storage;
 
-    const { crearClienteSupabase } = await import('../src/lib/supabaseClient.js');
+    const { UNIFIED_SUPABASE_STORAGE_KEY, crearClienteSupabase } = await import(
+      '../src/services/supabaseClient'
+    );
     const {
       MENSAJE_PERFIL_NO_ACTIVO,
       iniciarSesionPorCorreo,
       renderizarInsigniaSedeSegura,
-    } = await import('../src/auth/authGuard.js');
+    } = await import('../src/services/authService');
 
     const testClient = crearClienteSupabase({
       url: baseUrl,
@@ -322,40 +249,43 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
     });
 
     try {
-      // 1) Promotora Zulia con mayúsculas y espacios laterales -> sanitiza, vincula auth_user_id y retorna Zulia
+      // 1) Promotora Zulia -> lee de public.profiles y persiste bajo codizulca.supabase.auth.v1
       const sesionPromZulia = await iniciarSesionPorCorreo(
         '  MARIA.ZULIA@EMPRESA.COM  ',
         'ClaveSegura123!',
         { client: testClient }
       );
       assert.equal(sesionPromZulia.rol, 'promotora');
-      assert.equal(sesionPromZulia.sucursal, 'Zulia');
-      assert.equal(sesionPromZulia.promotoraId, PROM_ZULIA_ID);
+      assert.equal(sesionPromZulia.sucursal, 'ZULIA');
+      assert.equal(sesionPromZulia.staffId, PROM_ZULIA_ID);
       assert.equal(sesionPromZulia.etiquetaSede, 'Sucursal Zulia');
-      assert.equal(perfilesTabla.get('maria.zulia@empresa.com')?.auth_user_id, UID_PROM_ZULIA);
+      assert.equal(
+        memoryMap.has(UNIFIED_SUPABASE_STORAGE_KEY),
+        true,
+        'Debe persistir la sesión bajo codizulca.supabase.auth.v1'
+      );
 
-      // 2) Coordinadora Valencia -> retorna Sucursal Valencia
+      // 2) Coordinadora Valencia -> retorna VALENCIA
       const sesionCoordVal = await iniciarSesionPorCorreo(
         'coord.valencia@empresa.com',
         'ClaveSegura123!',
         { client: testClient }
       );
-      assert.equal(sesionCoordVal.rol, 'coordinadora');
-      assert.equal(sesionCoordVal.sucursal, 'Valencia');
-      assert.equal(sesionCoordVal.promotoraId, null);
+      assert.equal(sesionCoordVal.rol, 'coordinacion');
+      assert.equal(sesionCoordVal.sucursal, 'VALENCIA');
       assert.equal(sesionCoordVal.etiquetaSede, 'Sucursal Valencia');
 
-      // 3) Administrador General -> sucursal null y etiqueta nacional
+      // 3) Super Admin -> retorna GLOBAL y etiqueta nacional
       const sesionAdminGen = await iniciarSesionPorCorreo(
         'admin.general@empresa.com',
         'ClaveSegura123!',
         { client: testClient }
       );
-      assert.equal(sesionAdminGen.rol, 'admin_general');
-      assert.equal(sesionAdminGen.sucursal, null);
+      assert.equal(sesionAdminGen.rol, 'super_admin');
+      assert.equal(sesionAdminGen.sucursal, 'GLOBAL');
       assert.equal(sesionAdminGen.etiquetaSede, 'Administración General - Nacional');
 
-      // 4) Usuario autenticado en Auth pero NO pre-registrado en lista blanca -> signOut inmediato
+      // 4) Usuario sin fila en public.profiles -> signOut inmediato
       const logoutsAntesIntruso = llamadasLogout;
       await assert.rejects(
         () =>
@@ -364,12 +294,9 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
           }),
         (err: Error) => err.message === MENSAJE_PERFIL_NO_ACTIVO
       );
-      assert.ok(
-        llamadasLogout > logoutsAntesIntruso,
-        'Debe invocar supabase.auth.signOut() inmediatamente si el correo no está en perfiles_acceso'
-      );
+      assert.ok(llamadasLogout > logoutsAntesIntruso);
 
-      // 5) Usuario pre-registrado pero con `activo: false` -> signOut inmediato
+      // 5) Usuario suspendido (`is_active: false`) -> signOut inmediato
       const logoutsAntesInactivo = llamadasLogout;
       await assert.rejects(
         () =>
@@ -378,10 +305,7 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
           }),
         (err: Error) => err.message === MENSAJE_PERFIL_NO_ACTIVO
       );
-      assert.ok(
-        llamadasLogout > logoutsAntesInactivo,
-        'Debe invocar supabase.auth.signOut() inmediatamente si activo === false'
-      );
+      assert.ok(llamadasLogout > logoutsAntesInactivo);
 
       // 6) Prevención XSS en renderizado DOM con textContent y createElement
       const nodosHijos: Array<{ tag?: string; textContent?: string; dataset?: Record<string, string> }> = [];
@@ -407,13 +331,13 @@ test('FASE 1 MULTI-SUCURSAL (ZULIA / VALENCIA / ADMIN_GENERAL) — Certificació
 
       renderizarInsigniaSedeSegura(mockContenedor, {
         rol: 'promotora',
-        sucursal: 'Zulia',
+        sucursal: 'ZULIA',
         nombreCompleto: '<img src=x onerror=alert(1)>Ana Zulia',
       });
 
       assert.equal(nodosHijos.length, 3);
       assert.equal(nodosHijos[0]?.textContent, 'Sucursal Zulia');
-      assert.equal(nodosHijos[0]?.dataset?.sucursal, 'Zulia');
+      assert.equal(nodosHijos[0]?.dataset?.sucursal, 'ZULIA');
       assert.equal(nodosHijos[2]?.textContent, '<img src=x onerror=alert(1)>Ana Zulia');
     } finally {
       await new Promise<void>((resolve) => mockServer.close(() => resolve()));

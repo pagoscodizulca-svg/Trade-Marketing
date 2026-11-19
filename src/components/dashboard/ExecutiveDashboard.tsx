@@ -400,6 +400,7 @@ export const ExecutiveDashboard: React.FC = () => {
     tastingReports,
     requests,
     reconciliation,
+    tarifarioCostos,
     module1Bundle,
     isLoadingSupabase,
     createRequisition,
@@ -1239,6 +1240,7 @@ export const ExecutiveDashboard: React.FC = () => {
         priceComparisons: module1Bundle?.priceComparisons,
         formalRequests: requests,
         fallbackVisits: visits,
+        tarifarioCostos,
       });
       return {
         weekNumber: wk,
@@ -1256,6 +1258,7 @@ export const ExecutiveDashboard: React.FC = () => {
     module1Bundle,
     requests,
     visits,
+    tarifarioCostos,
   ]);
 
   const activeFeasibilityReport = useMemo(() => {
@@ -1305,6 +1308,7 @@ export const ExecutiveDashboard: React.FC = () => {
       priceComparisons: module1Bundle?.priceComparisons,
       formalRequests: requests,
       fallbackVisits: visits,
+      tarifarioCostos,
     });
   }, [
     feasibilityScope,
@@ -1319,6 +1323,7 @@ export const ExecutiveDashboard: React.FC = () => {
     module1Bundle,
     requests,
     visits,
+    tarifarioCostos,
     liveClock.currentWeek.mondayYmd,
     liveClock.currentWeek.sundayYmd,
     liveClock.currentWeek.rangeLabel,
@@ -1402,11 +1407,11 @@ export const ExecutiveDashboard: React.FC = () => {
       setReqFormBudgetCap(0);
     }
 
-    setReqFormStatus('APROBADO_CONTRALORIA');
+    setReqFormStatus('VALIDACION_COMERCIAL');
     setIsReqModalOpen(true);
   };
 
-  const handleCreateWeeklyRequisition = (e: React.FormEvent) => {
+  const handleCreateWeeklyRequisition = async (e: React.FormEvent) => {
     e.preventDefault();
     const parsed = parseAnyRecordDate(reqFormDate);
     const formattedDmy = parsed
@@ -1417,12 +1422,12 @@ export const ExecutiveDashboard: React.FC = () => {
     const unitCost = Math.max(0.1, Number(reqFormUnitCost) || 1);
     const totalCost = Number((qty * unitCost).toFixed(2));
 
-    createRequisition({
+    const res = await createRequisition({
       requestCode: reqFormCode.trim() || undefined,
       requestDate: formattedDmy,
       campaignOrPurpose: reqFormPurpose.trim() || 'Activación semanal Trade Marketing',
       approvedBudgetCapUsd: Math.max(totalCost, Number(reqFormBudgetCap) || totalCost),
-      status: reqFormStatus,
+      status: reqFormStatus === 'BORRADOR' ? 'BORRADOR' : 'VALIDACION_COMERCIAL',
       budgetCategory: `Activación Semanal BTL - ${formatYearMonthEs(parsed?.yearMonth || selectedEvalMonth)}`,
       notesAndObservations: `Solicitud semanal radicada desde Torre de Control de KPIs y Costos (Trade Marketing → Contraloría).`,
       items: [
@@ -1440,10 +1445,12 @@ export const ExecutiveDashboard: React.FC = () => {
       ],
     });
 
-    if (parsed && parsed.yearMonth !== selectedEvalMonth) {
-      setSelectedEvalMonth(parsed.yearMonth);
+    if (res.success) {
+      if (parsed && parsed.yearMonth !== selectedEvalMonth) {
+        setSelectedEvalMonth(parsed.yearMonth);
+      }
+      setIsReqModalOpen(false);
     }
-    setIsReqModalOpen(false);
   };
 
   // Preparar filas para exportación PDF Ejecutiva del Módulo 4

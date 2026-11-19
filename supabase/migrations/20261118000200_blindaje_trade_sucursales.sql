@@ -1,6 +1,8 @@
 -- =============================================================================
 -- PROGRAMA DE TRADE MARKETING — FASE 1: BLINDAJE MULTI-SUCURSAL ZERO-TRUST
--- Archivo: supabase/migrations/001_blindaje_trade_sucursales.sql
+-- Archivo: supabase/migrations/20261118000200_blindaje_trade_sucursales.sql
+--   (renombrado desde `001_blindaje_trade_sucursales.sql` para ejecutarse DESPUÉS de
+--    `20261001000100_schema_maestros.sql`, que es quien crea `public.clientes`)
 -- Motor objetivo: PostgreSQL 15+ / 17 (Supabase)
 --
 -- GARANTÍAS DE INTEGRIDAD Y CIBERSEGURIDAD (CUMPLIMIENTO OBLIGATORIO):
@@ -267,23 +269,18 @@ CREATE INDEX IF NOT EXISTS idx_promotoras_sucursal_activo
   ON public.promotoras (sucursal, activo);
 
 -- 3.2 Adaptación no destructiva de `public.clientes` (PK existente: `id uuid`)
-CREATE TABLE IF NOT EXISTS public.clientes (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  codigo_cliente TEXT NOT NULL UNIQUE,
-  rif TEXT,
-  razon_social TEXT NOT NULL,
-  nombre_comercial TEXT,
-  zona TEXT,
-  ruta TEXT,
-  direccion TEXT,
-  ciudad TEXT,
-  estado TEXT,
-  telefono TEXT,
-  sucursal public.sucursal_tipo,
-  activo BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+--     `public.clientes` la crea `20261001000100_schema_maestros.sql` (con `vendedor_id`,
+--     `codigo_vendedor` y sus índices). Esta migración JAMÁS debe recrearla: solo la amplía
+--     con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Si la precondición falla, el orden de
+--     migraciones está roto y es preferible detenerse con un mensaje claro.
+DO $$
+BEGIN
+  IF to_regclass('public.clientes') IS NULL THEN
+    RAISE EXCEPTION
+      'Precondición incumplida: public.clientes no existe. Ejecute primero 20261001000100_schema_maestros.sql (orden de migraciones).'
+      USING ERRCODE = '42P01';
+  END IF;
+END $$;
 
 ALTER TABLE public.clientes
   ADD COLUMN IF NOT EXISTS sucursal public.sucursal_tipo,
