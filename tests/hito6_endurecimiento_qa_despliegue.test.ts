@@ -318,7 +318,7 @@ test('Hito 6 · B-09/P-06 despliegue, CI y ErrorBoundary', async (t) => {
     assert.match(pkg.scripts['build:logistica'], /ruta-degustacion/);
     assert.match(pkg.scripts['build:all'], /build:web.*build:logistica.*build:server/);
     // Render (`bun run build`) debe producir Torre + logística + servidor compilado y bajar deps de ruta-degustacion
-    assert.match(pkg.scripts.build, /ruta-degustacion ci/);
+    assert.match(pkg.scripts.build, /ruta-degustacion ci --include=dev/, 'Render usa NODE_ENV=production: hay que incluir devDependencies (vite-plugin-pwa)');
     assert.match(pkg.scripts.build, /build:all/);
     assert.match(pkg.scripts.test, /--test/);
     assert.match(pkg.scripts['audit:prod'], /--omit=dev --audit-level=high/);
