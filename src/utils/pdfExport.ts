@@ -26,14 +26,31 @@ export const getFormattedTimestamp = () => {
   });
 };
 
+export interface PdfExportRegionOptions {
+  regionLabel?: string;
+}
+
+export function formatPdfSubtitleWithRegion(
+  subtitle: string,
+  regionLabel?: string | null
+): string {
+  const cleanRegion = String(regionLabel ?? '').trim();
+  if (!cleanRegion) return subtitle;
+  const stamp = `Región / Sucursal Activa: ${cleanRegion}`;
+  if (subtitle.includes(stamp)) return subtitle;
+  return `${subtitle} • ${stamp}`;
+}
+
 // Generic Document Header for Codizulca
 const addCodizulcaHeader = (
   doc: jsPDF,
   title: string,
   subtitle: string,
-  docCode: string
+  docCode: string,
+  regionLabel?: string
 ) => {
   const pageWidth = doc.internal.pageSize.getWidth();
+  const cleanRegion = String(regionLabel ?? '').trim();
 
   // Top Accent Bar (Red Codizulca)
   doc.setFillColor(220, 38, 38); // #dc2626
@@ -71,7 +88,14 @@ const addCodizulcaHeader = (
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(100, 100, 100);
   doc.text(`Emisión: ${getFormattedTimestamp()}`, pageWidth - 14, 20, { align: 'right' });
-  doc.text('Soporte de Auditoría & Trazabilidad', pageWidth - 14, 24, { align: 'right' });
+  doc.text(
+    cleanRegion
+      ? `Región / Sucursal Activa: ${cleanRegion}`
+      : 'Soporte de Auditoría & Trazabilidad',
+    pageWidth - 14,
+    24,
+    { align: 'right' }
+  );
 
   // Divider line
   doc.setDrawColor(220, 220, 220);
@@ -87,7 +111,7 @@ const addCodizulcaHeader = (
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
   doc.setTextColor(80, 80, 80);
-  doc.text(subtitle, 14, 41);
+  doc.text(formatPdfSubtitleWithRegion(subtitle, cleanRegion), 14, 41);
 };
 
 // Generic Footer with Signatures & Page Numbers
@@ -153,7 +177,8 @@ const addCodizulcaFooter = (doc: jsPDF, totalPages: number) => {
 // ---------------------------------------------------------------------------------
 export const exportTastingSchedulePdf = async (
   items: TastingScheduleItem[],
-  viewMode: 'actual' | 'historial' = 'actual'
+  viewMode: 'actual' | 'historial' = 'actual',
+  options?: PdfExportRegionOptions
 ): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -171,7 +196,7 @@ export const exportTastingSchedulePdf = async (
     : 'Planificación de degustaciones en tiendas, solicitudes aprobadas de vendedores y avance en tiempo real.';
   const docCode = `CZ-DEG-${isHistory ? 'HIST' : 'ACT'}-${new Date().getFullYear()}-${String(items.length).padStart(3, '0')}`;
 
-  addCodizulcaHeader(doc, title, subtitle, docCode);
+  addCodizulcaHeader(doc, title, subtitle, docCode, options?.regionLabel);
 
   // Metric summary blocks
   const totalTarget = items.reduce((acc, i) => acc + (i.targetSamples || 0), 0);
@@ -274,7 +299,8 @@ export const exportScheduleMatrixPdf = async (
     azucar: number;
     leche: number;
     espalda: number;
-  }
+  },
+  options?: PdfExportRegionOptions
 ): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -287,7 +313,7 @@ export const exportScheduleMatrixPdf = async (
   const subtitle = `Planificación y Llenado por Lote (${visits.length} Puntos de Venta) • Filtro Activo: ${dayFilter}`;
   const docCode = `CZ-MTZ-PDV-${new Date().getFullYear()}-${String(visits.length).padStart(3, '0')}`;
 
-  addCodizulcaHeader(doc, title, subtitle, docCode);
+  addCodizulcaHeader(doc, title, subtitle, docCode, options?.regionLabel);
 
   // Metric Summary Bar
   if (totals) {
@@ -392,7 +418,8 @@ export const exportScheduleMatrixPdf = async (
 export const exportContraloriaPdf = async (
   activeReq: ControllerRequest,
   reconciliation: InventoryReconciliation,
-  _allRequests: ControllerRequest[]
+  _allRequests: ControllerRequest[],
+  options?: PdfExportRegionOptions
 ): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -405,7 +432,7 @@ export const exportContraloriaPdf = async (
   const subtitle = `Departamento de Contraloría Interna • Requisición N° ${activeReq.requestCode}`;
   const docCode = `CZ-AUD-${activeReq.requestCode}-${new Date().getFullYear()}`;
 
-  addCodizulcaHeader(doc, title, subtitle, docCode);
+  addCodizulcaHeader(doc, title, subtitle, docCode, options?.regionLabel);
 
   const startY = 48;
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -561,6 +588,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
   feasibilityPeriodLabel?: string;
   feasibilityVerdictLabel?: string;
   feasibilityRows?: ExecutiveFeasibilityPdfRow[];
+  regionLabel?: string;
 }): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -578,7 +606,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
   const subtitle = periodText;
   const docCode = `CZ-KPI-EXEC-${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
-  addCodizulcaHeader(doc, title, subtitle, docCode);
+  addCodizulcaHeader(doc, title, subtitle, docCode, metrics.regionLabel);
 
   let currentY = 46;
 
@@ -641,7 +669,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
   if (metrics.productComparisonRows && metrics.productComparisonRows.length > 0) {
     if (currentY > 155) {
       doc.addPage();
-      addCodizulcaHeader(doc, title, subtitle, docCode);
+      addCodizulcaHeader(doc, title, subtitle, docCode, metrics.regionLabel);
       currentY = 46;
     }
 
@@ -761,7 +789,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
   if (metrics.weeklyCostRows && metrics.weeklyCostRows.length > 0) {
     if (currentY > 145) {
       doc.addPage();
-      addCodizulcaHeader(doc, title, subtitle, docCode);
+      addCodizulcaHeader(doc, title, subtitle, docCode, metrics.regionLabel);
       currentY = 46;
     }
 
@@ -864,7 +892,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
   if (metrics.feasibilityRows && metrics.feasibilityRows.length > 0) {
     if (currentY > 145) {
       doc.addPage();
-      addCodizulcaHeader(doc, title, subtitle, docCode);
+      addCodizulcaHeader(doc, title, subtitle, docCode, metrics.regionLabel);
       currentY = 46;
     }
 
@@ -1003,7 +1031,8 @@ export const exportPromotoraReportsPdf = async (
     geoverifiedPercent: number;
     totalSamples: number;
     totalPhotos: number;
-  }
+  },
+  options?: PdfExportRegionOptions
 ): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -1016,7 +1045,8 @@ export const exportPromotoraReportsPdf = async (
     doc,
     `REPORTE DE CAMPO: ${reportTitle.toUpperCase()}`,
     'INFORMACIÓN SINCRONIZADA DESDE LA APP MÓVIL DE PROMOTORAS',
-    'CONFIDENCIAL • TRADE MARKETING & CONTRALORÍA'
+    'CONFIDENCIAL • TRADE MARKETING & CONTRALORÍA',
+    options?.regionLabel
   );
 
   // Metrics Bar
@@ -1106,7 +1136,8 @@ export {
 // 8. FORMATO CORPORATIVO OFICIAL: "SOLICITUD DE PRODUCTOS" (MP-07-XXXX)
 // ---------------------------------------------------------------------------------
 export const exportSolicitudProductosPdf = async (
-  solicitud: SolicitudProductoContraloria
+  solicitud: SolicitudProductoContraloria,
+  options?: PdfExportRegionOptions
 ): Promise<void> => {
   const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
@@ -1119,6 +1150,7 @@ export const exportSolicitudProductosPdf = async (
   const leftX = 16;
   const rightX = pageWidth - 16;
   const contentWidth = rightX - leftX;
+  const cleanRegion = String(options?.regionLabel ?? '').trim();
 
   // Identificador institucional superior izquierdo
   doc.setFont('helvetica', 'bold');
@@ -1128,6 +1160,11 @@ export const exportSolicitudProductosPdf = async (
   doc.setFontSize(7.5);
   doc.setTextColor(60, 60, 60);
   doc.text('RIF: J-07011928-0 • MERCADEO Y PUBLICIDAD', leftX, 24.5);
+  if (cleanRegion) {
+    doc.setFontSize(7.5);
+    doc.setTextColor(185, 28, 28);
+    doc.text(`Región / Sucursal Activa: ${cleanRegion}`, leftX, 29);
+  }
 
   // Recuadro superior derecho con bordes negros: SOLICITUD DE PRODUCTOS / MP-07-XXXX
   const boxW = 68;

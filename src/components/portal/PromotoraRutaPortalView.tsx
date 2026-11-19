@@ -13,6 +13,7 @@ import {
   Package,
   Play,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   UserCheck,
   Wifi,
@@ -35,12 +36,16 @@ import {
   type PortalPdvGeofenceRef,
 } from '../../services/promotoraRutaPortalService';
 import {
+  decodeBase64ToBlob,
   enqueuePortalAction,
   flushPortalOfflineQueue,
   isTransientOfflineOrNetworkError,
   listPendingPortalActions,
   type QueuedPortalAction,
 } from '../../services/portalOfflineQueueService';
+import { createIncidenciaPdv } from '../../services/popIncidenciasService';
+import { isOperativeSucursal } from '../../services/userManagementService';
+import { IncidenciaQuickModal } from './IncidenciaQuickModal';
 import {
   captureBrowserGeolocation,
   evaluateGeofenceCheck,
@@ -247,7 +252,16 @@ export const PromotoraRutaPortalView: React.FC = () => {
     motivoFuera: '',
   });
   const [execError, setExecError] = useState<string | null>(null);
+  const [incidenciaModalOpen, setIncidenciaModalOpen] = useState<boolean>(false);
+  const [incidenciaRutaTarget, setIncidenciaRutaTarget] = useState<RutaPromotoraRecord | null>(
+    null
+  );
   const flushingRef = useRef(false);
+
+  const openIncidenciaModalForRuta = useCallback((ruta: RutaPromotoraRecord | null) => {
+    setIncidenciaRutaTarget(ruta);
+    setIncidenciaModalOpen(true);
+  }, []);
 
   const refreshPending = useCallback(async () => {
     try {
@@ -276,6 +290,28 @@ export const PromotoraRutaPortalView: React.FC = () => {
       try {
         const result = await flushPortalOfflineQueue(
           async (action) => {
+            if (action.kind === 'INCIDENCIA_PDV') {
+              const photoBlob = action.photoBase64
+                ? decodeBase64ToBlob(action.photoBase64, action.photoMimeType)
+                : null;
+              await createIncidenciaPdv(
+                {
+                  pdvNombre: action.pdvNombre,
+                  clienteId: action.clienteId ?? null,
+                  rutaId: action.rutaId ?? null,
+                  tipoIncidencia: action.tipoIncidencia,
+                  severidad: action.severidad,
+                  descripcion: action.descripcion,
+                  ...(action.reportadoPorNombre
+                    ? { reportadoPorNombre: action.reportadoPorNombre }
+                    : {}),
+                  ...(action.sucursal ? { sucursal: action.sucursal } : {}),
+                },
+                photoBlob
+              );
+              return;
+            }
+
             await submitPromotoraRouteExecution({
               rutaId: action.rutaId,
               accion: action.accion,
@@ -747,10 +783,21 @@ export const PromotoraRutaPortalView: React.FC = () => {
             ))}
           </div>
 
-          <span className="text-xs font-mono text-zinc-400">
-            {filteredRoutes.length}{' '}
-            {filteredRoutes.length === 1 ? 'degustación autorizada' : 'degustaciones autorizadas'}
-          </span>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <span className="text-xs font-mono text-zinc-400">
+              {filteredRoutes.length}{' '}
+              {filteredRoutes.length === 1 ? 'degustación autorizada' : 'degustaciones autorizadas'}
+            </span>
+            <button
+              type="button"
+              data-testid="btn-open-incidencia-general"
+              onClick={() => openIncidenciaModalForRuta(null)}
+              className="px-3 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              <span>Reportar Incidencia</span>
+            </button>
+          </div>
         </div>
 
         {/* Listado de tarjetas de ruta */}
@@ -876,38 +923,50 @@ export const PromotoraRutaPortalView: React.FC = () => {
 
                   {/* Controles operativos exclusivos para la promotora propietaria */}
                   {ruta.estado_ruta !== 'COMPLETADA' && (
-                    <div className="mt-4 pt-3 border-t border-white/10 flex items-center justify-end gap-2">
-                      {ruta.estado_ruta === 'ASIGNADA' && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void handleRouteStep(ruta, 'CHECKIN')}
-                          className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-red-950/50 cursor-pointer"
-                        >
-                          {isBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Play className="w-3.5 h-3.5 fill-white" />
-                          )}
-                          <span>Iniciar Degustación (Check-in)</span>
-                        </button>
-                      )}
+                    <div className="mt-4 pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        data-testid={`btn-reportar-incidencia-${ruta.id}`}
+                        onClick={() => openIncidenciaModalForRuta(ruta)}
+                        className="px-3.5 py-2 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer"
+                      >
+                        <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Reportar Incidencia</span>
+                      </button>
 
-                      {ruta.estado_ruta === 'EN_CURSO' && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void handleRouteStep(ruta, 'CHECKOUT')}
-                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-emerald-950/50 cursor-pointer"
-                        >
-                          {isBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          )}
-                          <span>Finalizar Degustación (Check-out)</span>
-                        </button>
-                      )}
+                      <div className="flex items-center gap-2 ml-auto">
+                        {ruta.estado_ruta === 'ASIGNADA' && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleRouteStep(ruta, 'CHECKIN')}
+                            className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-red-950/50 cursor-pointer"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Play className="w-3.5 h-3.5 fill-white" />
+                            )}
+                            <span>Iniciar Degustación (Check-in)</span>
+                          </button>
+                        )}
+
+                        {ruta.estado_ruta === 'EN_CURSO' && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleRouteStep(ruta, 'CHECKOUT')}
+                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-emerald-950/50 cursor-pointer"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>Finalizar Degustación (Check-out)</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </article>
@@ -1020,6 +1079,31 @@ export const PromotoraRutaPortalView: React.FC = () => {
           </form>
         </div>
       )}
+
+      <IncidenciaQuickModal
+        isOpen={incidenciaModalOpen}
+        onClose={() => {
+          setIncidenciaModalOpen(false);
+          setIncidenciaRutaTarget(null);
+        }}
+        defaultPdvNombre={incidenciaRutaTarget?.cliente_nombre || ''}
+        defaultClienteId={
+          incidenciaRutaTarget
+            ? (matchRutaPdvGeofence(incidenciaRutaTarget, geofenceCatalog)?.id ?? null)
+            : null
+        }
+        defaultRutaId={incidenciaRutaTarget?.id ?? null}
+        pdvOptions={routes.map((r) => ({
+          id: matchRutaPdvGeofence(r, geofenceCatalog)?.id ?? null,
+          nombre: r.cliente_nombre,
+        }))}
+        sucursal={isOperativeSucursal(profile.sucursal) ? profile.sucursal : null}
+        reportadoPorNombre={profile.displayName}
+        onSuccess={(res) => {
+          showBanner(res.message);
+          void refreshPending();
+        }}
+      />
     </div>
   );
 };

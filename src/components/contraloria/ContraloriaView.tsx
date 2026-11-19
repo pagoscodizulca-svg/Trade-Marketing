@@ -9,8 +9,9 @@ import {
   Upload,
   Lock,
   FileCheck,
-  Plus,
   FileSpreadsheet,
+  FileText,
+  Plus,
   X,
   Inbox,
   Loader2,
@@ -21,9 +22,12 @@ import {
 import { RequisitionStatus } from '../../types';
 import type { PazYSalvoVerificationResult } from '../../types/contraloriaFinancial';
 import { ExportPdfButton } from '../common/ExportPdfButton';
-import { exportContraloriaPdf } from '../../utils/pdfExport';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
 import { ContraloriaSolicitudesInbox } from './ContraloriaSolicitudesInbox';
+import {
+  SUCURSAL_LABELS,
+  type OperativeSucursal,
+} from '../../services/userManagementService';
 
 export type ContraloriaSubTab =
   | 'bandeja_entrada'
@@ -31,9 +35,12 @@ export type ContraloriaSubTab =
   | 'presupuestos_tarifario';
 
 export const ContraloriaView: React.FC = () => {
+  const app = useApp();
   const {
+    currentUser,
     currentRole,
     verifiedIamRole,
+    verifiedSucursal,
     isContraloriaOrAdmin,
     requests,
     reconciliation,
@@ -52,7 +59,13 @@ export const ContraloriaView: React.FC = () => {
     validateFiscalReceipt,
     updateReconciliation,
     closeReconciliationAndIssuePazYSalvo,
-  } = useApp();
+  } = app;
+
+  const effectiveSucursal =
+    (app as unknown as { activeSucursal?: OperativeSucursal | null }).activeSucursal ??
+    verifiedSucursal ??
+    'GLOBAL';
+  const activeRegionLabel = SUCURSAL_LABELS[effectiveSucursal] ?? String(effectiveSucursal);
 
   const [activeSubTab, setActiveSubTab] =
     useState<ContraloriaSubTab>('bandeja_entrada');
@@ -396,6 +409,134 @@ export const ContraloriaView: React.FC = () => {
     reconciliation.deliveredUnits -
     (reconciliation.degustatedUnitsReported + reconciliation.returnedRemanentUnits);
 
+  const handleExportContraloriaPdf = async () => {
+    if (!activeReq) return;
+    const { exportContraloriaPdf } = await import('../../utils/pdfExport');
+    await exportContraloriaPdf(activeReq, reconciliation, requests, {
+      regionLabel: activeRegionLabel,
+    });
+  };
+
+  const handleExportContraloriaXlsx = async () => {
+    const { downloadExecutiveWorkbookXlsx } = await import('../../utils/excelWordExport');
+    const todayIso = new Date().toISOString().slice(0, 10);
+    await downloadExecutiveWorkbookXlsx(
+      {
+        title: 'Contraloría Interna · Requisiciones, Conciliación y Presupuestos',
+        generatedBy: currentUser?.name || 'Contraloría Interna CODIZULCA',
+        regionLabel: activeRegionLabel,
+        sheets: [
+          {
+            name: 'Requisiciones MP-07',
+            headers: [
+              'Código',
+              'Fecha',
+              'Campaña / Propósito',
+              'Solicitante',
+              'Estado',
+              'Tope Aprobado (USD)',
+              'Costo Ejecutado (USD)',
+            ],
+            rows: requests.map((r) => [
+              r.requestCode,
+              r.requestDate,
+              r.campaignOrPurpose,
+              r.applicantName,
+              r.status,
+              r.approvedBudgetCapUsd,
+              r.estimatedCostUsd,
+            ]),
+            currencyColumns: [5, 6],
+          },
+          {
+            name: 'Conciliación Trípode',
+            headers: [
+              'Solicitud',
+              'Entregadas',
+              'Degustadas',
+              'Devueltas',
+              'Diferencia',
+              'Estado Conciliación',
+              'Certificado Paz y Salvo',
+            ],
+            rows: [
+              [
+                activeReq?.requestCode || reconciliation.requestCode || '—',
+                reconciliation.deliveredUnits,
+                reconciliation.degustatedUnitsReported,
+                reconciliation.returnedRemanentUnits,
+                varianceUnits,
+                reconciliation.discrepancyStatus,
+                reconciliation.pazYSalvoCertificateCode || 'PENDIENTE',
+              ],
+            ],
+          },
+          {
+            name: 'Bandeja Solicitudes',
+            headers: ['Correlativo', 'Fecha', 'Solicitado Por', 'Estado', 'Ítems'],
+            rows: solicitudesContraloria.solicitudes.map((s) => [
+              s.codigoCorrelativo,
+              s.fechaSolicitud,
+              s.solicitadoPor,
+              s.estado,
+              s.items.length,
+            ]),
+          },
+        ],
+      },
+      `codizulca-contraloria-${String(effectiveSucursal).toLowerCase()}-${todayIso}`
+    );
+  };
+
+  const handleExportContraloriaDocx = async () => {
+    const { downloadDocxReport } = await import('../../utils/excelWordExport');
+    const todayIso = new Date().toISOString().slice(0, 10);
+    await downloadDocxReport(
+      {
+        title: 'Acta de Auditoría, Conciliación y Paz y Salvo',
+        subtitle: activeReq
+          ? `Requisición N° ${activeReq.requestCode} · Departamento de Contraloría Interna`
+          : 'Reporte Consolidado de Contraloría Interna',
+        regionLabel: activeRegionLabel,
+        metadata: [
+          ['Fecha de emisión', new Date().toLocaleDateString('es-VE')],
+          ['Emitido por', currentUser?.name || 'Contraloría Interna CODIZULCA'],
+          ['Solicitud activa', activeReq?.requestCode || 'Consolidado'],
+          ['Unidades entregadas', String(reconciliation.deliveredUnits)],
+          ['Unidades degustadas', String(reconciliation.degustatedUnitsReported)],
+          ['Unidades devueltas', String(reconciliation.returnedRemanentUnits)],
+          ['Diferencia inventario', String(varianceUnits)],
+        ],
+        sections: [
+          {
+            heading: 'Requisiciones y Control Presupuestario',
+            table: {
+              headers: ['Código', 'Propósito', 'Estado', 'Tope (USD)', 'Ejecutado (USD)'],
+              rows: requests.map((r) => [
+                r.requestCode,
+                r.campaignOrPurpose,
+                r.status,
+                r.approvedBudgetCapUsd.toFixed(2),
+                r.estimatedCostUsd.toFixed(2),
+              ]),
+            },
+          },
+        ],
+        pazYSalvo:
+          reconciliation.pazYSalvoIssued && reconciliation.pazYSalvoCertificateCode
+            ? {
+                codigo: reconciliation.pazYSalvoCertificateCode,
+                sha256:
+                  pysVerification?.stored_sha256 ||
+                  pysVerification?.recomputed_sha256 ||
+                  'VERIFICADO_EN_SERVIDOR',
+              }
+            : null,
+      },
+      `codizulca-acta-contraloria-${String(effectiveSucursal).toLowerCase()}-${todayIso}`
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* Membrete oficial exclusivo para soporte impreso / PDF */}
@@ -403,8 +544,8 @@ export const ContraloriaView: React.FC = () => {
         moduleTitle="MÓDULO 3: CONTRALORÍA - ACTA DE CONCILIACIÓN Y PAZ Y SALVO"
         documentSubtitle={
           activeReq
-            ? `Auditoría de Requisición N° ${activeReq.requestCode} • Conciliación Trípode de Inventarios`
-            : 'Control de Requisiciones, Rendiciones Fiscales y Conciliación de Inventarios'
+            ? `Auditoría de Requisición N° ${activeReq.requestCode} • Región / Sucursal Activa: ${activeRegionLabel}`
+            : `Control de Requisiciones y Conciliación • Región / Sucursal Activa: ${activeRegionLabel}`
         }
         documentCode={activeReq ? `CZ-MOD3-${activeReq.requestCode}` : 'CZ-MOD3-CONTRALORIA'}
       />
@@ -413,9 +554,12 @@ export const ContraloriaView: React.FC = () => {
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-md">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 mb-1.5">
+            <div className="flex flex-wrap items-center gap-2 mb-1.5">
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-red-600/20 text-red-400 uppercase tracking-wider border border-red-500/30">
                 CODIZULCA · Contraloría & Auditoría Interna
+              </span>
+              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-zinc-950 text-zinc-200 border border-white/10">
+                {activeRegionLabel}
               </span>
               <span className="text-xs text-slate-400 font-mono">Trazabilidad Fiscal Inmutable</span>
             </div>
@@ -427,7 +571,7 @@ export const ContraloriaView: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={handleOpenNewReqModal}
@@ -437,29 +581,49 @@ export const ContraloriaView: React.FC = () => {
               <span>Nueva Requisición</span>
             </button>
 
-            {activeSubTab === 'conciliacion_auditoria' && activeReq && (
-              <>
-                <ExportPdfButton
-                  label="Exportar a PDF"
-                  documentTitle={`Acta de Contraloría - ${activeReq.requestCode}`}
-                  onExportPdf={() => exportContraloriaPdf(activeReq, reconciliation, requests)}
-                />
+            <button
+              type="button"
+              data-testid="btn-contraloria-export-xlsx"
+              onClick={() => void handleExportContraloriaXlsx()}
+              className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Exportar Excel (.xlsx)</span>
+            </button>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-400 font-semibold">Solicitud Activa:</span>
-                  <select
-                    value={activeReq.requestCode}
-                    onChange={(e) => handleSelectRequisition(e.target.value)}
-                    className="px-3.5 py-2 rounded-xl bg-slate-950 border border-red-500/60 text-xs font-bold text-red-400 font-mono tracking-wide focus:outline-none focus:border-red-400 shadow-sm"
-                  >
-                    {requests.map((r) => (
-                      <option key={r.id} value={r.requestCode}>
-                        {r.requestCode} - {r.totalUnits} un ({r.status})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </>
+            <button
+              type="button"
+              data-testid="btn-contraloria-export-docx"
+              onClick={() => void handleExportContraloriaDocx()}
+              className="px-3 py-2 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Exportar Word (.docx)</span>
+            </button>
+
+            {activeReq && (
+              <ExportPdfButton
+                label="Exportar a PDF"
+                documentTitle={`Acta de Contraloría - ${activeReq.requestCode} (${activeRegionLabel})`}
+                onExportPdf={handleExportContraloriaPdf}
+              />
+            )}
+
+            {activeSubTab === 'conciliacion_auditoria' && activeReq && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400 font-semibold">Solicitud Activa:</span>
+                <select
+                  value={activeReq.requestCode}
+                  onChange={(e) => handleSelectRequisition(e.target.value)}
+                  className="px-3.5 py-2 rounded-xl bg-slate-950 border border-red-500/60 text-xs font-bold text-red-400 font-mono tracking-wide focus:outline-none focus:border-red-400 shadow-sm"
+                >
+                  {requests.map((r) => (
+                    <option key={r.id} value={r.requestCode}>
+                      {r.requestCode} - {r.totalUnits} un ({r.status})
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
         </div>
@@ -1184,8 +1348,8 @@ export const ContraloriaView: React.FC = () => {
                       </button>
                       <ExportPdfButton
                         label="Exportar a PDF"
-                        documentTitle={`Paz y Salvo Oficial - ${activeReq.requestCode}`}
-                        onExportPdf={() => exportContraloriaPdf(activeReq, reconciliation, requests)}
+                        documentTitle={`Paz y Salvo Oficial - ${activeReq.requestCode} (${activeRegionLabel})`}
+                        onExportPdf={handleExportContraloriaPdf}
                       />
                     </div>
                   </div>

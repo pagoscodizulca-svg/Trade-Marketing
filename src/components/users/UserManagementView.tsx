@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
+  Building2,
   Check,
   CheckCircle2,
   Clock,
@@ -26,14 +27,17 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { isSupabaseConfigured } from '../../services/supabaseClient';
 import {
   MANAGED_USER_ROLES,
   MANAGED_USER_ROLE_LABELS,
   MIN_SUPABASE_PASSWORD_LENGTH,
+  SUCURSAL_CODIGOS,
   SUCURSAL_LABELS,
   createManagedUser,
   generateSecureInitialPassword,
   getAllowedSucursalesForRole,
+  isOperativeSucursal,
   isSucursalValidForRole,
   listManagedUsers,
   listUserManagementAudit,
@@ -42,12 +46,36 @@ import {
   updateManagedUserAccess,
   type ManagedUserProfile,
   type ManagedUserRole,
+  type OperativeSucursal,
   type SucursalCodigo,
   type UserManagementAuditEntry,
 } from '../../services/userManagementService';
+import {
+  SucursalPersonalModule,
+  type RegionActivaItem,
+  type SucursalPersonalBundle,
+} from '../admin/SucursalPersonalModule';
 
 type RoleFilterValue = 'ALL' | ManagedUserRole;
 type StatusFilterValue = 'ALL' | 'ACTIVE' | 'SUSPENDED';
+type SucursalFilterValue = 'ALL' | SucursalCodigo;
+export type UserManagementSectionTab = 'modulos_sucursal' | 'directorio_iam';
+
+export interface UserManagementViewProps {
+  initialSection?: UserManagementSectionTab;
+  viewerIamRole?: ManagedUserRole | null;
+  viewerSucursal?: SucursalCodigo | null;
+  initialModuleBundle?: SucursalPersonalBundle | null;
+  initialRegiones?: RegionActivaItem[];
+}
+
+function useOptionalApp() {
+  try {
+    return useApp();
+  } catch {
+    return null;
+  }
+}
 
 interface PendingRoleConfirmation {
   user: ManagedUserProfile;
@@ -168,12 +196,47 @@ function getRoleBadgeStyle(role: ManagedUserRole): string {
   return 'bg-zinc-800/90 text-zinc-200 border-white/10';
 }
 
-export const UserManagementView: React.FC = () => {
-  const { currentUser } = useApp();
+export const UserManagementView: React.FC<UserManagementViewProps> = ({
+  initialSection = 'modulos_sucursal',
+  viewerIamRole: propViewerIamRole,
+  viewerSucursal: propViewerSucursal,
+  initialModuleBundle,
+  initialRegiones,
+}) => {
+  const app = useOptionalApp();
+  const currentUser = app?.currentUser ?? null;
+
+  const effectiveIamRole: ManagedUserRole | null =
+    propViewerIamRole ?? app?.verifiedIamRole ?? null;
+
+  const effectiveActiveSucursal: OperativeSucursal | null = useMemo(() => {
+    if (isOperativeSucursal(propViewerSucursal)) return propViewerSucursal;
+    const dynamicActive = (
+      app as unknown as { activeSucursal?: OperativeSucursal | null } | null
+    )?.activeSucursal;
+    if (isOperativeSucursal(dynamicActive)) return dynamicActive;
+    if (isOperativeSucursal(app?.verifiedSucursal)) return app.verifiedSucursal;
+    return null;
+  }, [app, propViewerSucursal]);
+
+  const isCoordinatorRole = effectiveIamRole === 'coordinacion';
+
+  const [sectionTab, setSectionTab] = useState<UserManagementSectionTab>(initialSection);
+  const [selectedAdminHub, setSelectedAdminHub] = useState<OperativeSucursal>(
+    () => effectiveActiveSucursal ?? 'ZULIA'
+  );
+
+  useEffect(() => {
+    if (effectiveActiveSucursal) {
+      setSelectedAdminHub(effectiveActiveSucursal);
+    }
+  }, [effectiveActiveSucursal]);
 
   const [users, setUsers] = useState<ManagedUserProfile[]>([]);
   const [auditEntries, setAuditEntries] = useState<UserManagementAuditEntry[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(
+    () => !isCoordinatorRole && isSupabaseConfigured
+  );
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
@@ -181,6 +244,7 @@ export const UserManagementView: React.FC = () => {
   // Filtros instantáneos
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [roleFilter, setRoleFilter] = useState<RoleFilterValue>('ALL');
+  const [sucursalFilter, setSucursalFilter] = useState<SucursalFilterValue>('ALL');
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>('ALL');
 
   // Edición rápida de nombre completo por fila
@@ -202,40 +266,52 @@ export const UserManagementView: React.FC = () => {
   const [createPassword, setCreatePassword] = useState<string>('');
   const [showCreatePassword, setShowCreatePassword] = useState<boolean>(false);
   const [createRole, setCreateRole] = useState<ManagedUserRole>('vendedor');
-  const [createSucursal, setCreateSucursal] = useState<SucursalCodigo>('ZULIA');
+  const [createSucursal, setCreateSucursal] = useState<SucursalCodigo>(
+    () => effectiveActiveSucursal ?? 'ZULIA'
+  );
   const [createMustChangePassword, setCreateMustChangePassword] = useState<boolean>(false);
   const [createSubmitting, setCreateSubmitting] = useState<boolean>(false);
   const [createModalError, setCreateModalError] = useState<string | null>(null);
   const [copiedCredentials, setCopiedCredentials] = useState<boolean>(false);
 
-  const loadAllData = useCallback(async (isSilentRefresh = false) => {
-    if (isSilentRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-    setErrorBanner(null);
+  const loadAllData = useCallback(
+    async (isSilentRefresh = false) => {
+      if (isCoordinatorRole || !isSupabaseConfigured) {
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
 
-    try {
-      const [profilesList, auditList] = await Promise.all([
-        listManagedUsers(),
-        listUserManagementAudit(25),
-      ]);
-      setUsers(profilesList);
-      setAuditEntries(auditList);
-    } catch (err) {
-      setErrorBanner(
-        err instanceof Error ? err.message : 'No se pudo cargar la gestión de usuarios.'
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      if (isSilentRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+      setErrorBanner(null);
+
+      try {
+        const [profilesList, auditList] = await Promise.all([
+          listManagedUsers(),
+          listUserManagementAudit(25),
+        ]);
+        setUsers(profilesList);
+        setAuditEntries(auditList);
+      } catch (err) {
+        setErrorBanner(
+          err instanceof Error ? err.message : 'No se pudo cargar la gestión de usuarios.'
+        );
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [isCoordinatorRole]
+  );
 
   useEffect(() => {
+    if (isCoordinatorRole || sectionTab !== 'directorio_iam') return;
     void loadAllData(false);
-  }, [loadAllData]);
+  }, [isCoordinatorRole, loadAllData, sectionTab]);
 
   useEffect(() => {
     if (!feedbackBanner) return;
@@ -276,6 +352,9 @@ export const UserManagementView: React.FC = () => {
       if (roleFilter !== 'ALL' && row.role !== roleFilter) {
         return false;
       }
+      if (sucursalFilter !== 'ALL' && row.sucursal !== sucursalFilter) {
+        return false;
+      }
       if (statusFilter === 'ACTIVE' && !row.isActive) {
         return false;
       }
@@ -291,7 +370,7 @@ export const UserManagementView: React.FC = () => {
       }
       return true;
     });
-  }, [users, searchQuery, roleFilter, statusFilter]);
+  }, [users, searchQuery, roleFilter, sucursalFilter, statusFilter]);
 
   const startEditingName = (row: ManagedUserProfile) => {
     setEditingUserId(row.id);
@@ -466,7 +545,7 @@ export const UserManagementView: React.FC = () => {
     setCreatePassword('');
     setShowCreatePassword(false);
     setCreateRole('vendedor');
-    setCreateSucursal('ZULIA');
+    setCreateSucursal(effectiveActiveSucursal ?? selectedAdminHub ?? 'ZULIA');
     setCreateMustChangePassword(false);
     setCreateModalError(null);
     setCopiedCredentials(false);
@@ -578,56 +657,140 @@ export const UserManagementView: React.FC = () => {
   };
 
   const hasActiveFilters =
-    searchQuery.trim().length > 0 || roleFilter !== 'ALL' || statusFilter !== 'ALL';
+    searchQuery.trim().length > 0 ||
+    roleFilter !== 'ALL' ||
+    sucursalFilter !== 'ALL' ||
+    statusFilter !== 'ALL';
+
+  // CANDADO DE ROL COORDINACIÓN: bloqueada estrictamente al módulo de su propia sucursal
+  if (isCoordinatorRole) {
+    const lockedCoordinatorHub: OperativeSucursal | null = isOperativeSucursal(propViewerSucursal)
+      ? propViewerSucursal
+      : isOperativeSucursal(app?.verifiedSucursal)
+        ? app.verifiedSucursal
+        : effectiveActiveSucursal;
+
+    return (
+      <div className="space-y-5" data-testid="user-management-view">
+        <SucursalPersonalModule
+          viewerIamRole="coordinacion"
+          lockedSucursal={lockedCoordinatorHub}
+          initialBundle={initialModuleBundle}
+          regiones={initialRegiones}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5" data-testid="user-management-view">
-      {/* Cabecera Ejecutiva */}
-      <div className="rounded-2xl bg-zinc-950/90 border border-white/[0.08] p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex items-start gap-3.5">
-          <div className="w-11 h-11 rounded-xl bg-red-600/15 border border-red-500/30 flex items-center justify-center shrink-0">
-            <ShieldCheck className="w-5 h-5 text-red-400" />
-          </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base sm:text-lg font-extrabold text-white tracking-tight">
-                Gestión de Usuarios
-              </h2>
-              <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-md bg-red-500/15 text-red-300 border border-red-500/25">
-                Exclusivo Super Admin
-              </span>
-            </div>
-            <p className="text-xs text-zinc-400 mt-0.5">
-              Control centralizado de identidad, roles corporativos y acceso inmediato sin fricción.
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2.5 shrink-0">
+      {/* Conmutador Ejecutivo Super Admin: 5 Módulos por Sucursal vs Directorio Corporativo IAM Global */}
+      <div
+        data-testid="super-admin-personal-switcher"
+        className="rounded-2xl bg-zinc-950/95 border border-white/10 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+      >
+        <div className="inline-flex flex-wrap rounded-xl bg-black border border-white/10 p-1 gap-1">
           <button
             type="button"
-            onClick={() => void loadAllData(true)}
-            disabled={loading || refreshing}
-            className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-semibold text-zinc-200 inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+            data-testid="tab-modulos-sucursal"
+            onClick={() => setSectionTab('modulos_sucursal')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer ${
+              sectionTab === 'modulos_sucursal'
+                ? 'bg-red-600 text-white shadow'
+                : 'text-zinc-400 hover:text-white'
+            }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-red-400' : ''}`} />
-            <span>Actualizar</span>
+            <Building2 className="w-3.5 h-3.5" />
+            <span>Módulos de Personal por Sucursal (5 Regiones)</span>
           </button>
 
           <button
             type="button"
-            data-testid="btn-new-user"
-            onClick={() => {
-              resetCreateModal();
-              setIsCreateModalOpen(true);
-            }}
-            className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+            data-testid="tab-directorio-iam"
+            onClick={() => setSectionTab('directorio_iam')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer ${
+              sectionTab === 'directorio_iam'
+                ? 'bg-red-600 text-white shadow'
+                : 'text-zinc-400 hover:text-white'
+            }`}
           >
-            <UserPlus className="w-3.5 h-3.5" />
-            <span>+ Nuevo Usuario</span>
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Directorio Corporativo IAM (Global)</span>
           </button>
         </div>
+
+        <button
+          type="button"
+          data-testid={sectionTab === 'modulos_sucursal' ? 'btn-quick-new-corporate-user' : 'btn-new-user-top'}
+          onClick={() => {
+            resetCreateModal();
+            setIsCreateModalOpen(true);
+          }}
+          className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer self-start sm:self-auto"
+        >
+          <UserPlus className="w-3.5 h-3.5" />
+          <span>+ Nuevo Usuario IAM</span>
+        </button>
       </div>
+
+      {sectionTab === 'modulos_sucursal' ? (
+        <SucursalPersonalModule
+          viewerIamRole={effectiveIamRole ?? 'super_admin'}
+          selectedSucursal={selectedAdminHub}
+          onSelectSucursal={setSelectedAdminHub}
+          initialBundle={initialModuleBundle}
+          regiones={initialRegiones}
+        />
+      ) : (
+        <>
+          {/* Cabecera Ejecutiva IAM Global */}
+          <div className="rounded-2xl bg-zinc-950/90 border border-white/[0.08] p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-red-600/15 border border-red-500/30 flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-5 h-5 text-red-400" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-extrabold text-white tracking-tight">
+                    Directorio Corporativo IAM (Global)
+                  </h2>
+                  <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-md bg-red-500/15 text-red-300 border border-red-500/25">
+                    Exclusivo Super Admin
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Control centralizado de identidad, roles corporativos y asignación de las 5 sucursales nacionales.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => void loadAllData(true)}
+                disabled={loading || refreshing}
+                className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-semibold text-zinc-200 inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-red-400' : ''}`}
+                />
+                <span>Actualizar</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="btn-new-user"
+                onClick={() => {
+                  resetCreateModal();
+                  setIsCreateModalOpen(true);
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>+ Nuevo Usuario</span>
+              </button>
+            </div>
+          </div>
 
       {/* Mensajes de estado */}
       {errorBanner && (
@@ -775,6 +938,20 @@ export const UserManagementView: React.FC = () => {
           </select>
 
           <select
+            value={sucursalFilter}
+            onChange={(e) => setSucursalFilter(e.target.value as SucursalFilterValue)}
+            aria-label="Filtrar por sucursal"
+            className="px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-red-500 cursor-pointer"
+          >
+            <option value="ALL">Todas las sucursales (5 Regiones + Global)</option>
+            {SUCURSAL_CODIGOS.map((sucOpt) => (
+              <option key={sucOpt} value={sucOpt}>
+                {SUCURSAL_LABELS[sucOpt]} ({sucOpt})
+              </option>
+            ))}
+          </select>
+
+          <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as StatusFilterValue)}
             aria-label="Filtrar por estado"
@@ -791,6 +968,7 @@ export const UserManagementView: React.FC = () => {
               onClick={() => {
                 setSearchQuery('');
                 setRoleFilter('ALL');
+                setSucursalFilter('ALL');
                 setStatusFilter('ALL');
               }}
               className="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-semibold text-zinc-300 cursor-pointer"
@@ -1090,6 +1268,8 @@ export const UserManagementView: React.FC = () => {
           </div>
         )}
       </div>
+        </>
+      )}
 
       {/* Modal: Confirmación de Cambio de Rol */}
       {typeof document !== 'undefined' &&
