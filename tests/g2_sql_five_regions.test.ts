@@ -291,6 +291,14 @@ test('COMPUERTA G2 — SQL 5 Regiones Oficiales, Motor Canónico Correo->Región
     );
     assert.match(
       g2Sql,
+      /ALTER TABLE public\.certificados_paz_y_salvo[\s\S]*?ADD CONSTRAINT chk_certificados_paz_y_salvo_sucursal_regional[\s\S]*?'ZULIA'::public\.sucursal_codigo[\s\S]*?'VALENCIA'::public\.sucursal_codigo[\s\S]*?'CENTRO'::public\.sucursal_codigo[\s\S]*?'ORIENTE'::public\.sucursal_codigo[\s\S]*?'CAPITAL'::public\.sucursal_codigo/i
+    );
+    assert.match(
+      g2Sql,
+      /CREATE TRIGGER trg_sellar_sucursal_certificados_paz_y_salvo[\s\S]*?ON public\.certificados_paz_y_salvo[\s\S]*?EXECUTE FUNCTION public\.fn_sellar_y_proteger_sucursal_operativa\(\)/i
+    );
+    assert.match(
+      g2Sql,
       /INSERT INTO public\.tarifario_costos_trade[\s\S]*?'CENTRO'::public\.sucursal_codigo[\s\S]*?'ORIENTE'::public\.sucursal_codigo[\s\S]*?'CAPITAL'::public\.sucursal_codigo[\s\S]*?ON CONFLICT \(line_id,\s*sucursal,\s*vigente_desde\) DO NOTHING/i
     );
 

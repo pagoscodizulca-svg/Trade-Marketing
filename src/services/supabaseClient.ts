@@ -359,8 +359,30 @@ const VALID_ACTIVE_SUCURSAL_HEADERS = new Set<OperativeSucursal>([
 let unifiedClient: SupabaseClient | null = null;
 let dedicatedMasterClient: SupabaseClient<MasterDataDatabase> | null = null;
 let cachedAccessToken: string | null = null;
+let cachedAuthUserId: string | null = null;
 let activeSucursalHeader: OperativeSucursal | null = null;
 let authListenerBound = false;
+const sessionResetCallbacks = new Set<() => void>();
+
+function notifySessionResetCallbacks(): void {
+  for (const cb of sessionResetCallbacks) {
+    try {
+      cb();
+    } catch {
+      // Aísla fallos individuales de suscriptores de limpieza de sesión
+    }
+  }
+}
+
+/**
+ * Registra un callback de limpieza en memoria que se dispara al cerrar o conmutar sesión Auth.
+ */
+export function registerSupabaseSessionResetCallback(callback: () => void): () => void {
+  sessionResetCallbacks.add(callback);
+  return () => {
+    sessionResetCallbacks.delete(callback);
+  };
+}
 
 /**
  * Define o limpia la cabecera activa de sucursal (`x-sucursal-activa`) inyectada en cada
@@ -412,6 +434,7 @@ function bindAuthTokenSync(client: SupabaseClient, fallbackKey: string): void {
   void client.auth.getSession().then(({ data }) => {
     const token = data.session?.access_token || null;
     cachedAccessToken = token;
+    cachedAuthUserId = data.session?.user?.id || null;
     if (token) {
       client.realtime.setAuth(token);
     }
@@ -419,9 +442,13 @@ function bindAuthTokenSync(client: SupabaseClient, fallbackKey: string): void {
 
   client.auth.onAuthStateChange((event, session: Session | null) => {
     const token = session?.access_token || null;
+    const nextUserId = session?.user?.id || null;
+    const switchedUser = cachedAuthUserId !== null && nextUserId !== cachedAuthUserId;
     cachedAccessToken = token;
-    if (event === 'SIGNED_OUT') {
+    cachedAuthUserId = nextUserId;
+    if (event === 'SIGNED_OUT' || !session || switchedUser) {
       activeSucursalHeader = null;
+      notifySessionResetCallbacks();
     }
     client.realtime.setAuth(token ?? fallbackKey);
   });

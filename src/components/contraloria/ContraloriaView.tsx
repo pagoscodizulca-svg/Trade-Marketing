@@ -529,6 +529,14 @@ export const ContraloriaView: React.FC = () => {
                 sha256:
                   pysVerification?.stored_sha256 ||
                   pysVerification?.recomputed_sha256 ||
+                  String(
+                    (activeReq ? app.certificadosPazYSalvo?.[activeReq.id]?.sha256_hash : '') ||
+                      (activeReq
+                        ? app.certificadosPazYSalvo?.[activeReq.id]?.firma_sha256_hex
+                        : '') ||
+                      String(reconciliation.pazYSalvoHash || '').replace(/^SHA256:/i, '') ||
+                      ''
+                  ).trim() ||
                   'VERIFICADO_EN_SERVIDOR',
               }
             : null,
@@ -1218,7 +1226,7 @@ export const ContraloriaView: React.FC = () => {
                           )}
                           {rec.archivoSha256Hex && (
                             <span className="text-[9px] font-mono text-zinc-500">
-                              SHA256: {rec.archivoSha256Hex.slice(0, 14)}…
+                              SHA256: {String(rec.archivoSha256Hex || '').slice(0, 14)}…
                             </span>
                           )}
                         </div>
@@ -1327,14 +1335,33 @@ export const ContraloriaView: React.FC = () => {
                       }`}
                     >
                       {pysVerification.valid
-                        ? `✓ VERIFICADO EN SERVIDOR: hash recomputado coincide 100% (${pysVerification.recomputed_sha256?.slice(0, 20)}…)`
+                        ? `✓ VERIFICADO EN SERVIDOR: hash recomputado coincide 100% (${String(
+                            pysVerification.recomputed_sha256 || pysVerification.stored_sha256 || ''
+                          ).slice(0, 20)}…)`
                         : '✗ ALERTA DE INTEGRIDAD: El hash almacenado no pudo verificarse.'}
                     </div>
                   )}
 
                   <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-zinc-900">
                     <div className="font-mono text-[10px] text-zinc-400 truncate max-w-sm">
-                      Firma SHA-256 (BD): {reconciliation.pazYSalvoHash || '—'}
+                      Firma SHA-256 (BD):{' '}
+                      {(() => {
+                        const certRow = activeReq
+                          ? app.certificadosPazYSalvo?.[activeReq.id]
+                          : undefined;
+                        const rawHash = String(
+                          reconciliation.pazYSalvoHash ||
+                            certRow?.sha256_hash ||
+                            certRow?.firma_sha256_hex ||
+                            ''
+                        ).trim();
+                        if (!rawHash) return '—';
+                        const cleanHash = String(rawHash.replace(/^SHA256:/i, '') || '').slice(
+                          0,
+                          64
+                        );
+                        return cleanHash ? `SHA256:${cleanHash}` : '—';
+                      })()}
                     </div>
                     <div className="flex items-center gap-2">
                       <button

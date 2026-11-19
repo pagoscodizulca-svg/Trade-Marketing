@@ -93,6 +93,7 @@ export interface CertificadoPazYSalvo {
   codigo_correlativo: string;
   payload_canonico: Record<string, unknown>;
   sha256_hash: string;
+  firma_sha256_hex?: string;
   emitido_por_uid: string;
   emitido_por_nombre: string;
   emitido_por_rol: 'contraloria' | 'super_admin';

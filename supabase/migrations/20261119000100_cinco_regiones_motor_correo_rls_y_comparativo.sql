@@ -257,6 +257,8 @@ CREATE INDEX IF NOT EXISTS idx_contraloria_facturas_region_id
   ON public.contraloria_facturas (region_id);
 
 ALTER TABLE public.certificados_paz_y_salvo
+  ADD COLUMN IF NOT EXISTS sucursal public.sucursal_codigo;
+ALTER TABLE public.certificados_paz_y_salvo
   ADD COLUMN IF NOT EXISTS region_id UUID REFERENCES public.regiones(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_certificados_paz_y_salvo_region_id
   ON public.certificados_paz_y_salvo (region_id);
@@ -1302,6 +1304,35 @@ BEGIN
   END LOOP;
 END $$;
 
+ALTER TABLE public.certificados_paz_y_salvo
+  DROP CONSTRAINT IF EXISTS chk_paz_y_salvo_sucursal_operativa;
+
+ALTER TABLE public.certificados_paz_y_salvo
+  DROP CONSTRAINT IF EXISTS chk_certificados_paz_y_salvo_sucursal_regional;
+
+ALTER TABLE public.certificados_paz_y_salvo
+  ADD CONSTRAINT chk_certificados_paz_y_salvo_sucursal_regional
+  CHECK (
+    sucursal IS NULL
+    OR sucursal IN (
+      'ZULIA'::public.sucursal_codigo,
+      'VALENCIA'::public.sucursal_codigo,
+      'CENTRO'::public.sucursal_codigo,
+      'ORIENTE'::public.sucursal_codigo,
+      'CAPITAL'::public.sucursal_codigo
+    )
+  );
+
+DROP POLICY IF EXISTS certificados_paz_y_salvo_select_sede ON public.certificados_paz_y_salvo;
+CREATE POLICY certificados_paz_y_salvo_select_sede
+  ON public.certificados_paz_y_salvo
+  FOR SELECT
+  TO authenticated
+  USING (
+    (SELECT public.is_torre_control_viewer())
+    AND (SELECT public.tiene_acceso_region(region_id, sucursal))
+  );
+
 -- Actualizar el constraint de storage_path en public.contraloria_facturas para los 5 hubs
 DO $$
 DECLARE
@@ -1533,6 +1564,19 @@ BEGIN
       FROM public.contraloria_conciliaciones cc
       WHERE cc.id = (v_json ->> 'conciliacion_id')::uuid
       LIMIT 1;
+    ELSIF TG_TABLE_NAME = 'certificados_paz_y_salvo' THEN
+      IF NULLIF(btrim(COALESCE(v_json ->> 'requisicion_id', '')), '') IS NOT NULL THEN
+        SELECT cr.sucursal INTO v_inferida
+        FROM public.contraloria_requisiciones cr
+        WHERE cr.id = (v_json ->> 'requisicion_id')::uuid
+        LIMIT 1;
+      END IF;
+      IF v_inferida IS NULL AND NULLIF(btrim(COALESCE(v_json ->> 'conciliacion_id', '')), '') IS NOT NULL THEN
+        SELECT cc.sucursal INTO v_inferida
+        FROM public.contraloria_conciliaciones cc
+        WHERE cc.id = (v_json ->> 'conciliacion_id')::uuid
+        LIMIT 1;
+      END IF;
     ELSIF TG_TABLE_NAME = 'clientes' THEN
       IF NULLIF(btrim(COALESCE(v_json ->> 'zona_id', '')), '') IS NOT NULL THEN
         SELECT z.sucursal INTO v_inferida
@@ -1611,6 +1655,12 @@ GRANT EXECUTE ON FUNCTION public.fn_sellar_y_proteger_sucursal_operativa() TO au
 DROP TRIGGER IF EXISTS trg_g2_sellar_sucursal_supervisores ON public.supervisores;
 CREATE TRIGGER trg_g2_sellar_sucursal_supervisores
   BEFORE INSERT OR UPDATE ON public.supervisores
+  FOR EACH ROW
+  EXECUTE FUNCTION public.fn_sellar_y_proteger_sucursal_operativa();
+
+DROP TRIGGER IF EXISTS trg_sellar_sucursal_certificados_paz_y_salvo ON public.certificados_paz_y_salvo;
+CREATE TRIGGER trg_sellar_sucursal_certificados_paz_y_salvo
+  BEFORE INSERT OR UPDATE ON public.certificados_paz_y_salvo
   FOR EACH ROW
   EXECUTE FUNCTION public.fn_sellar_y_proteger_sucursal_operativa();
 

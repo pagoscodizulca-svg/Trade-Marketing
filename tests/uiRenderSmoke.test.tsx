@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -252,6 +254,25 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     assert.ok(!lockedBarHtml.includes('region-bar-comparativo-btn'), 'Sin botón Comparativo para coordinación');
     assert.ok(!/<button\b/i.test(lockedBarHtml), 'Cero botones interactivos en barra bloqueada');
     assert.ok(!/<select\b/i.test(lockedBarHtml), 'Cero selectores en barra bloqueada');
+
+    const rutaGateSource = fs.readFileSync(
+      path.join(process.cwd(), 'ruta-degustacion', 'src', 'components', 'auth', 'RutaAuthGate.tsx'),
+      'utf8'
+    );
+    assert.ok(
+      rutaGateSource.includes('(Zulia, Valencia, Centro, Oriente y Capital)'),
+      'RutaAuthGate (/logistica/) debe listar las 5 sucursales oficiales'
+    );
+    assert.ok(
+      !rutaGateSource.includes('(Zulia / Valencia)'),
+      'RutaAuthGate (/logistica/) no debe mostrar el texto legado de solo 2 sucursales'
+    );
+
+    const appSource = fs.readFileSync(path.join(process.cwd(), 'src', 'App.tsx'), 'utf8');
+    assert.ok(
+      appSource.includes("key={`${profile.userId}:${profile.sucursal || 'GLOBAL'}`}"),
+      'App.tsx debe remontar AppProvider al cambiar de cuenta o sucursal autenticada'
+    );
   });
 
   await t.test('c) RegionalComparisonTab: renderiza 5 hubs lado a lado, KPIs ejecutivos y botones .xlsx / .pdf', () => {

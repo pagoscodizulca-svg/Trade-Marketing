@@ -1652,6 +1652,10 @@ export const AppProvider: React.FC<{
         notes
       );
 
+      const certSha256 = String(
+        certificado.sha256_hash || certificado.firma_sha256_hex || ''
+      ).trim();
+
       const sealedConc: InventoryReconciliation = {
         ...conciliacion,
         receipts: activeConc.receipts,
@@ -1659,13 +1663,13 @@ export const AppProvider: React.FC<{
         cerrada: true,
         pazYSalvoCertificateCode: certificado.codigo_certificado,
         pazYSalvoIssueDate: certificado.emitido_en,
-        pazYSalvoHash: `SHA256:${certificado.sha256_hash}`,
+        pazYSalvoHash: certSha256 ? `SHA256:${certSha256}` : conciliacion.pazYSalvoHash,
       };
 
       syncReconciliationToState(sealedConc);
       setCertificadosPazYSalvo((prev) => ({
         ...prev,
-        [requisicion.id]: certificado,
+        [requisicion.id]: { ...certificado, sha256_hash: certSha256 },
       }));
       setRequests((prev) => prev.map((r) => (r.id === requisicion.id ? requisicion : r)));
 
@@ -1675,7 +1679,7 @@ export const AppProvider: React.FC<{
         'EMISION_PAZ_Y_SALVO_DIGITAL',
         'RENDICION_PENDIENTE',
         'CONCILIADO_CERRADO',
-        `${certificado.codigo_certificado} · SHA256:${certificado.sha256_hash.slice(0, 16)}… · ${notes}`
+        `${certificado.codigo_certificado} · SHA256:${String(certSha256 || '').slice(0, 16) || 'PENDIENTE'}… · ${notes}`
       );
 
       return {

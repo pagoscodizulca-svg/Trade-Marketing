@@ -80,7 +80,7 @@ export function RutaAuthGate({
                   <p>
                     Acceso exclusivo para <strong>Chofer</strong> (Modo Móvil) y{' '}
                     <strong>Coordinación Trade / Super Admin</strong> (Oficina y Supervisión),
-                    con aislamiento estricto por sucursal (Zulia / Valencia).
+                    con aislamiento estricto por sucursal (Zulia, Valencia, Centro, Oriente y Capital).
                   </p>
                 </div>
 

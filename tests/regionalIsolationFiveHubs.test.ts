@@ -67,16 +67,26 @@ import {
   SUCURSAL_CODIGOS,
   SUCURSAL_LABELS,
 } from '../src/services/userManagementService';
-import { obtenerEtiquetaSede } from '../src/services/authService';
+import { obtenerEtiquetaSede, signOutSupabaseSession } from '../src/services/authService';
 import {
+  getActiveClientSucursalHeader,
+  setActiveClientSucursalHeader,
+} from '../src/services/supabaseClient';
+import {
+  clearMasterDataCaches,
   guardarClienteMaestro,
   inferirSucursalDesdeTerritorio,
   invalidarCacheMaestros,
   normalizarSucursalMaestro,
+  obtenerCadenasComerciales,
   obtenerClientesMaestros,
+  obtenerVendedoresMaestros,
+  obtenerZonasComerciales,
 } from '../src/services/masterDataSyncService';
 import {
   fetchPresupuestosTrade,
+  mapDbConciliacionToInventoryReconciliation,
+  resolvePazYSalvoSha256,
   upsertPresupuestoTrade,
 } from '../src/services/contraloriaFinancialService';
 import type { MasterDataDatabase } from '../src/types/masterData';
@@ -1916,5 +1926,210 @@ test('COMPUERTA G2 — Aislamiento Multi-Región en 5 Hubs (ZULIA, VALENCIA, CEN
       assert.equal(badRes.code, 'INVALID_BRANCH');
     }
     assert.equal(globalChoferSignedOut, true);
+  });
+
+  await t.test('5) Regresión G5 E2E: Cachés de Maestros acotados por activeSucursalHeader, purga en signOutSupabaseSession y fallback Paz y Salvo SHA-256', async () => {
+    clearMasterDataCaches();
+    setActiveClientSucursalHeader(null);
+
+    const fetchCounts = {
+      clientes: 0,
+      vendedores: 0,
+      cadenas_comerciales: 0,
+      zonas: 0,
+    };
+
+    const makeChainableQuery = (table: keyof typeof fetchCounts) => {
+      const execute = async () => {
+        fetchCounts[table] += 1;
+        const hub = getActiveClientSucursalHeader() || 'GLOBAL';
+        if (table === 'clientes') {
+          return {
+            data: [
+              {
+                id: hub === 'ZULIA' ? '11111111-0001-4000-8000-000000000001' : '11111111-0005-4000-8000-000000000005',
+                codigo_cliente: `CLI-${hub}-001`,
+                razon_social: `CLIENTE ${hub} C.A.`,
+                nombre_comercial: `PDV ${hub}`,
+                activo: true,
+                sucursal: hub === 'GLOBAL' ? 'ZULIA' : hub,
+              },
+            ],
+            error: null,
+          };
+        }
+        if (table === 'vendedores') {
+          return {
+            data: [
+              {
+                id: hub === 'ZULIA' ? '22222222-0001-4000-8000-000000000001' : '22222222-0005-4000-8000-000000000005',
+                codigo_vendedor: `VEND-${hub}-001`,
+                nombre_completo: `Vendedor ${hub}`,
+                activo: true,
+                sucursal: hub === 'GLOBAL' ? 'ZULIA' : hub,
+              },
+            ],
+            error: null,
+          };
+        }
+        if (table === 'cadenas_comerciales') {
+          return {
+            data: [
+              {
+                id: hub === 'ZULIA' ? '33333333-0001-4000-8000-000000000001' : '33333333-0005-4000-8000-000000000005',
+                codigo: `CAD-${hub}`,
+                nombre: `Cadena ${hub}`,
+                tipo_canal: 'Supermercado',
+                activo: true,
+                sucursal: hub === 'GLOBAL' ? 'ZULIA' : hub,
+              },
+            ],
+            error: null,
+          };
+        }
+        return {
+          data: [
+            {
+              id: hub === 'ZULIA' ? '44444444-0001-4000-8000-000000000001' : '44444444-0005-4000-8000-000000000005',
+              codigo: `ZON-${hub}`,
+              nombre: `Zona ${hub}`,
+              activo: true,
+              sucursal: hub === 'GLOBAL' ? 'ZULIA' : hub,
+            },
+          ],
+          error: null,
+        };
+      };
+
+      const builder: Record<string, unknown> = {
+        select: () => builder,
+        order: () => builder,
+        range: () => builder,
+        eq: () => builder,
+        ilike: () => builder,
+        or: () => builder,
+        then: (
+          onFulfilled?: ((val: unknown) => unknown) | null,
+          onRejected?: ((reason: unknown) => unknown) | null
+        ) => execute().then(onFulfilled ?? undefined, onRejected ?? undefined),
+      };
+      return builder;
+    };
+
+    const mockMasterClient = {
+      from: (table: keyof typeof fetchCounts) => makeChainableQuery(table),
+    } as unknown as SupabaseClient<MasterDataDatabase>;
+
+    try {
+      // 1. Sesión ZULIA: puebla caché bajo prefijo "ZULIA::"
+      setActiveClientSucursalHeader('ZULIA');
+      assert.equal(getActiveClientSucursalHeader(), 'ZULIA');
+
+      const zuliaCli1 = await obtenerClientesMaestros({ incluirVendedor: false }, mockMasterClient);
+      const zuliaVend1 = await obtenerVendedoresMaestros({}, mockMasterClient);
+      const zuliaCad1 = await obtenerCadenasComerciales({}, mockMasterClient);
+      const zuliaZon1 = await obtenerZonasComerciales({}, mockMasterClient);
+
+      assert.equal(zuliaCli1[0]?.codigo_cliente, 'CLI-ZULIA-001');
+      assert.equal(zuliaVend1[0]?.codigo_vendedor, 'VEND-ZULIA-001');
+      assert.equal(zuliaCad1[0]?.codigo, 'CAD-ZULIA');
+      assert.equal(zuliaZon1[0]?.codigo, 'ZON-ZULIA');
+      assert.deepEqual(fetchCounts, {
+        clientes: 1,
+        vendedores: 1,
+        cadenas_comerciales: 1,
+        zonas: 1,
+      });
+
+      // Segunda lectura en ZULIA sin forzarRefresco usa caché de ZULIA
+      const zuliaCliCached = await obtenerClientesMaestros(
+        { incluirVendedor: false },
+        mockMasterClient
+      );
+      assert.equal(zuliaCliCached[0]?.codigo_cliente, 'CLI-ZULIA-001');
+      assert.equal(fetchCounts.clientes, 1);
+
+      // 2. Cambio de sesión/contexto a CAPITAL SIN forzarRefresco: jamás devuelve datos en caché de ZULIA
+      setActiveClientSucursalHeader('CAPITAL');
+      assert.equal(getActiveClientSucursalHeader(), 'CAPITAL');
+
+      const capitalCli = await obtenerClientesMaestros(
+        { incluirVendedor: false },
+        mockMasterClient
+      );
+      const capitalVend = await obtenerVendedoresMaestros({}, mockMasterClient);
+      const capitalCad = await obtenerCadenasComerciales({}, mockMasterClient);
+      const capitalZon = await obtenerZonasComerciales({}, mockMasterClient);
+
+      assert.equal(capitalCli[0]?.codigo_cliente, 'CLI-CAPITAL-001');
+      assert.equal(capitalVend[0]?.codigo_vendedor, 'VEND-CAPITAL-001');
+      assert.equal(capitalCad[0]?.codigo, 'CAD-CAPITAL');
+      assert.equal(capitalZon[0]?.codigo, 'ZON-CAPITAL');
+      assert.deepEqual(fetchCounts, {
+        clientes: 2,
+        vendedores: 2,
+        cadenas_comerciales: 2,
+        zonas: 2,
+      });
+
+      // 3. signOutSupabaseSession() limpia activeSucursalHeader y purga los 4 mapas de caché
+      await signOutSupabaseSession();
+      assert.equal(getActiveClientSucursalHeader(), null);
+
+      setActiveClientSucursalHeader('ZULIA');
+      const zuliaAfterSignOut = await obtenerClientesMaestros(
+        { incluirVendedor: false },
+        mockMasterClient
+      );
+      const vendAfterSignOut = await obtenerVendedoresMaestros({}, mockMasterClient);
+      const cadAfterSignOut = await obtenerCadenasComerciales({}, mockMasterClient);
+      const zonAfterSignOut = await obtenerZonasComerciales({}, mockMasterClient);
+
+      assert.equal(zuliaAfterSignOut[0]?.codigo_cliente, 'CLI-ZULIA-001');
+      assert.equal(vendAfterSignOut[0]?.codigo_vendedor, 'VEND-ZULIA-001');
+      assert.equal(cadAfterSignOut[0]?.codigo, 'CAD-ZULIA');
+      assert.equal(zonAfterSignOut[0]?.codigo, 'ZON-ZULIA');
+      assert.deepEqual(
+        fetchCounts,
+        {
+          clientes: 3,
+          vendedores: 3,
+          cadenas_comerciales: 3,
+          zonas: 3,
+        },
+        'signOutSupabaseSession debe purgar los 4 cachés en memoria forzando lectura limpia en el siguiente login'
+      );
+
+      // 4. Resiliencia SHA-256 en Paz y Salvo ante sha256_hash vacío o fallback firma_sha256_hex
+      const fallbackHash = 'f'.repeat(64);
+      assert.equal(resolvePazYSalvoSha256({ firma_sha256_hex: fallbackHash }), fallbackHash);
+      assert.equal(resolvePazYSalvoSha256({ sha256_hash: '' }), '');
+      assert.equal(resolvePazYSalvoSha256(null), '');
+
+      const mappedFallback = mapDbConciliacionToInventoryReconciliation(
+        { id: 'c1', requisicion_id: 'r1', codigo_correlativo: 'MP-07-9999', cerrada: true },
+        [],
+        {
+          id: 'cert1',
+          codigo_certificado: 'PYS-MP-07-9999',
+          requisicion_id: 'r1',
+          conciliacion_id: 'c1',
+          codigo_correlativo: 'MP-07-9999',
+          payload_canonico: {},
+          sha256_hash: '',
+          firma_sha256_hex: fallbackHash,
+          emitido_por_uid: 'u1',
+          emitido_por_nombre: 'Auditoría',
+          emitido_por_rol: 'contraloria',
+          emitido_en: '2026-11-19T12:00:00Z',
+          notas_cierre: 'Conforme',
+          sucursal: 'CAPITAL',
+        }
+      );
+      assert.equal(mappedFallback.pazYSalvoHash, `SHA256:${fallbackHash}`);
+    } finally {
+      clearMasterDataCaches();
+      setActiveClientSucursalHeader(null);
+    }
   });
 });

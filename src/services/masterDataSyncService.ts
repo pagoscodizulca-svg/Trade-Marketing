@@ -25,7 +25,11 @@ import type {
   ZonaComercial,
   ZonaComercialInput,
 } from '../types/masterData';
-import { getMasterDataSupabaseClient } from './supabaseClient';
+import {
+  getActiveClientSucursalHeader,
+  getMasterDataSupabaseClient,
+  registerSupabaseSessionResetCallback,
+} from './supabaseClient';
 import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
 
 export type {
@@ -1177,6 +1181,12 @@ export function clearMasterDataCaches(): void {
   cacheZonas.clear();
 }
 
+registerSupabaseSessionResetCallback(clearMasterDataCaches);
+
+function buildScopedMasterCacheKey(params: Record<string, unknown>): string {
+  return `${getActiveClientSucursalHeader() || 'GLOBAL'}::${JSON.stringify(params)}`;
+}
+
 export function invalidarCacheMaestros(): void {
   clearMasterDataCaches();
   for (const listener of suscriptoresLocales) {
@@ -1207,7 +1217,7 @@ export async function obtenerVendedoresMaestros(
   supabaseClient?: SupabaseClient<MasterDataDatabase>
 ): Promise<Vendedor[]> {
   const soloActivos = filtros.soloActivos !== false;
-  const claveCache = JSON.stringify({
+  const claveCache = buildScopedMasterCacheKey({
     soloActivos,
     zona: filtros.zona?.trim().toUpperCase() || '',
     supervisor: filtros.supervisor?.trim().toUpperCase() || '',
@@ -1278,7 +1288,7 @@ export async function obtenerClientesMaestros(
 ): Promise<ClienteConVendedor[]> {
   const soloActivos = filtros.soloActivos !== false;
   const incluirVendedor = filtros.incluirVendedor !== false;
-  const claveCache = JSON.stringify({
+  const claveCache = buildScopedMasterCacheKey({
     soloActivos,
     incluirVendedor,
     zona: filtros.zona?.trim().toUpperCase() || '',
@@ -1484,7 +1494,7 @@ export async function obtenerCadenasComerciales(
   supabaseClient?: SupabaseClient<MasterDataDatabase>
 ): Promise<CadenaComercial[]> {
   const soloActivos = filtros.soloActivos !== false;
-  const claveCache = JSON.stringify({
+  const claveCache = buildScopedMasterCacheKey({
     soloActivos,
     busqueda: filtros.busqueda?.trim().toUpperCase() || '',
   });
@@ -1569,7 +1579,7 @@ export async function obtenerZonasComerciales(
   supabaseClient?: SupabaseClient<MasterDataDatabase>
 ): Promise<ZonaComercial[]> {
   const soloActivos = filtros.soloActivos !== false;
-  const claveCache = JSON.stringify({
+  const claveCache = buildScopedMasterCacheKey({
     soloActivos,
     busqueda: filtros.busqueda?.trim().toUpperCase() || '',
   });

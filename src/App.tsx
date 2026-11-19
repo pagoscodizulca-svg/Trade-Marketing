@@ -485,7 +485,10 @@ export default function App() {
           );
         }
         return (
-          <AppProvider verifiedProfile={profile}>
+          <AppProvider
+            key={`${profile.userId}:${profile.sucursal || 'GLOBAL'}`}
+            verifiedProfile={profile}
+          >
             <MainAppContent
               authProfile={profile}
               isLocalDevWorkstation={isLocalDevWorkstation}

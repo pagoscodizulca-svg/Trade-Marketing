@@ -180,6 +180,14 @@ export function mapDbRequisicionToControllerRequest(row: Record<string, unknown>
   };
 }
 
+export function resolvePazYSalvoSha256(
+  cert: Partial<CertificadoPazYSalvo> | Record<string, unknown> | null | undefined
+): string {
+  if (!cert || typeof cert !== 'object') return '';
+  const rec = cert as Record<string, unknown>;
+  return String(rec.sha256_hash || rec.firma_sha256_hex || '').trim();
+}
+
 export function mapDbConciliacionToInventoryReconciliation(
   row: Record<string, unknown>,
   receipts: FiscalReceipt[] = [],
@@ -197,6 +205,7 @@ export function mapDbConciliacionToInventoryReconciliation(
       ? Number(receipts.reduce((s, r) => s + r.totalUsd, 0).toFixed(2))
       : Number(row.total_gastos_reportados_usd || 0);
   const pettyCash = Number(row.fondo_asignado_usd || 0);
+  const certHash = resolvePazYSalvoSha256(cert);
 
   return {
     id: String(row.id || ''),
@@ -222,7 +231,7 @@ export function mapDbConciliacionToInventoryReconciliation(
     pazYSalvoIssued: Boolean(row.cerrada || cert),
     pazYSalvoCertificateCode: cert?.codigo_certificado,
     pazYSalvoIssueDate: cert?.emitido_en || (row.cerrada_en ? String(row.cerrada_en) : undefined),
-    pazYSalvoHash: cert?.sha256_hash ? `SHA256:${cert.sha256_hash}` : undefined,
+    pazYSalvoHash: certHash ? `SHA256:${certHash}` : undefined,
   };
 }
 
@@ -419,7 +428,10 @@ export async function fetchContraloriaFinancialBundle(
 
   const certificadosByReqId: Record<string, CertificadoPazYSalvo> = {};
   for (const row of (certRes.data ?? []) as Array<Record<string, unknown>>) {
-    const cert = row as unknown as CertificadoPazYSalvo;
+    const cert: CertificadoPazYSalvo = {
+      ...(row as unknown as CertificadoPazYSalvo),
+      sha256_hash: resolvePazYSalvoSha256(row),
+    };
     certificadosByReqId[cert.requisicion_id] = cert;
   }
 
@@ -748,13 +760,19 @@ export async function issuePazYSalvoInSupabase(
     conciliacion: Record<string, unknown>;
   };
 
+  const rawCert = (body.certificado ?? {}) as unknown as Record<string, unknown>;
+  const normalizedCert: CertificadoPazYSalvo = {
+    ...(rawCert as unknown as CertificadoPazYSalvo),
+    sha256_hash: resolvePazYSalvoSha256(rawCert),
+  };
+
   return {
-    certificado: body.certificado,
+    certificado: normalizedCert,
     requisicion: mapDbRequisicionToControllerRequest(body.requisicion),
     conciliacion: mapDbConciliacionToInventoryReconciliation(
       body.conciliacion,
       [],
-      body.certificado
+      normalizedCert
     ),
   };
 }
@@ -770,5 +788,12 @@ export async function verifyPazYSalvoInSupabase(
   if (error || !data) {
     throw new Error(error?.message || 'Error verificando la firma criptográfica del Paz y Salvo.');
   }
-  return data as PazYSalvoVerificationResult;
+  const raw = data as Record<string, unknown>;
+  const stored = String(raw.stored_sha256 || raw.sha256_hash || raw.firma_sha256_hex || '').trim();
+  const recomputed = String(raw.recomputed_sha256 || raw.sha256_recalculado || stored || '').trim();
+  return {
+    ...(raw as unknown as PazYSalvoVerificationResult),
+    ...(stored ? { stored_sha256: stored } : {}),
+    ...(recomputed ? { recomputed_sha256: recomputed } : {}),
+  };
 }

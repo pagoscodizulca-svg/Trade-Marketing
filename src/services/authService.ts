@@ -4,8 +4,11 @@ import {
   UNIFIED_SUPABASE_STORAGE_KEY,
   getSupabaseClient,
   isSupabaseConfigured,
+  setActiveClientSucursalHeader,
 } from './supabaseClient';
+import { clearMasterDataCaches } from './masterDataSyncService';
 import {
+  isOperativeSucursal,
   isSucursalValidForRole,
   normalizeManagedUserRole,
   normalizeSucursalCodigo,
@@ -481,6 +484,9 @@ export async function iniciarSesionPorCorreo(
     throw new Error('Ingresa tu contraseña para continuar.');
   }
 
+  clearMasterDataCaches();
+  setActiveClientSucursalHeader(null);
+
   const client = opciones.client ?? getSupabaseClient();
   const { data: authData, error: authError } = await client.auth.signInWithPassword({
     email,
@@ -500,6 +506,8 @@ export async function iniciarSesionPorCorreo(
 
     if (perfilError || !filaPerfil || filaPerfil.is_active !== true) {
       await client.auth.signOut();
+      clearMasterDataCaches();
+      setActiveClientSucursalHeader(null);
       throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
     }
 
@@ -511,6 +519,8 @@ export async function iniciarSesionPorCorreo(
 
     if (!rol || !sucursal || !isSucursalValidForRole(rol, sucursal)) {
       await client.auth.signOut();
+      clearMasterDataCaches();
+      setActiveClientSucursalHeader(null);
       throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
     }
 
@@ -520,6 +530,9 @@ export async function iniciarSesionPorCorreo(
     const staffId = esUuidValido(rawStaffId) ? rawStaffId : null;
     const nombreCompleto =
       sanitizarTextoEntrada(filaPerfil.full_name, 160) || 'Usuario Trade Marketing';
+
+    setActiveClientSucursalHeader(isOperativeSucursal(sucursal) ? sucursal : null);
+    clearMasterDataCaches();
 
     return {
       userId: authData.user.id,
@@ -535,6 +548,8 @@ export async function iniciarSesionPorCorreo(
       throw err;
     }
     await client.auth.signOut().catch(() => {});
+    clearMasterDataCaches();
+    setActiveClientSucursalHeader(null);
     throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
   }
 }
@@ -645,6 +660,9 @@ export async function signInPromotoraPortalWithPassword(
     throw new Error('Ingresa un correo electrónico válido y tu contraseña.');
   }
 
+  clearMasterDataCaches();
+  setActiveClientSucursalHeader(null);
+
   const client = getSupabaseClient();
   const { data, error } = await client.auth.signInWithPassword({
     email,
@@ -660,6 +678,13 @@ export async function signInPromotoraPortalWithPassword(
     throw new Error(verification.unauthorizedReason || PORTAL_UNAUTHORIZED_ACCESS_MESSAGE);
   }
 
+  setActiveClientSucursalHeader(
+    verification.profile.sucursal && isOperativeSucursal(verification.profile.sucursal)
+      ? verification.profile.sucursal
+      : null
+  );
+  clearMasterDataCaches();
+
   return { session: data.session, profile: verification.profile };
 }
 
@@ -674,6 +699,9 @@ export async function signInWithSupabaseCredentials(
     throw new Error('Ingrese su correo corporativo y contraseña.');
   }
 
+  clearMasterDataCaches();
+  setActiveClientSucursalHeader(null);
+
   const client = getSupabaseClient();
   const { data, error } = await client.auth.signInWithPassword({
     email,
@@ -687,19 +715,32 @@ export async function signInWithSupabaseCredentials(
   const profile = await resolveVerifiedProfileWithStaffFallback(data.session);
   if (!profile || !profile.appRole) {
     await client.auth.signOut();
+    clearMasterDataCaches();
+    setActiveClientSucursalHeader(null);
     throw new Error(
       'Tu cuenta autenticada no tiene un perfil operativo asignado. Contacta a Coordinación.'
     );
   }
 
+  setActiveClientSucursalHeader(
+    profile.sucursal && isOperativeSucursal(profile.sucursal) ? profile.sucursal : null
+  );
+  clearMasterDataCaches();
   client.realtime.setAuth(data.session.access_token);
   return { session: data.session, profile };
 }
 
 export async function signOutSupabaseSession(): Promise<void> {
+  clearMasterDataCaches();
+  setActiveClientSucursalHeader(null);
   if (!isSupabaseConfigured) return;
   const client = getSupabaseClient();
-  await client.auth.signOut();
+  try {
+    await client.auth.signOut();
+  } finally {
+    clearMasterDataCaches();
+    setActiveClientSucursalHeader(null);
+  }
 }
 
 export async function getActiveAccessToken(): Promise<string | null> {
