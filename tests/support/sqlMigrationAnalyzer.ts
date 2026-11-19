@@ -40,6 +40,7 @@ export interface AnalysisResult {
   tables: Map<string, Set<string>>;
   functions: Set<string>;
   types: Set<string>;
+  enumValues: Map<string, Set<string>>;
   policies: Map<string, Set<string>>;
 }
 
@@ -395,6 +396,7 @@ class SchemaState {
   tables = new Map<string, Set<string>>();
   functions = new Set<string>();
   types = new Set<string>();
+  enumValues = new Map<string, Set<string>>();
   policies = new Map<string, Set<string>>();
 }
 
@@ -408,6 +410,7 @@ export function analyzeMigrations(files: MigrationFile[]): AnalysisResult {
     const segments = tokenize(file.sql);
     const masked = maskComments(file.sql, segments);
     const statements = splitStatements(masked, segments);
+    let inExplicitTransaction = false;
 
     const report = (
       severity: IssueSeverity,
@@ -494,10 +497,70 @@ export function analyzeMigrations(files: MigrationFile[]): AnalysisResult {
       // --- Funciones y tipos -------------------------------------------------
       registerFunctions(text);
 
-      const typeCreate = new RegExp(`^CREATE\\s+TYPE\\s+(${QUALIFIED})`, 'i').exec(text);
+      const typeCreate = new RegExp(
+        `^CREATE\\s+TYPE\\s+(${QUALIFIED})(?:\\s+AS\\s+ENUM\\s*\\(([\\s\\S]*)\\))?`,
+        'i'
+      ).exec(text);
       if (typeCreate) {
         const q = parseQualified(typeCreate[1]!);
-        if (q.schema === 'public') state.types.add(q.name);
+        if (q.schema === 'public') {
+          state.types.add(q.name);
+          const labels = state.enumValues.get(q.name) ?? new Set<string>();
+          if (typeCreate[2]) {
+            const labelMatches = typeCreate[2].match(/'((?:[^']|'')*)'/g) ?? [];
+            for (const rawLbl of labelMatches) {
+              labels.add(rawLbl.slice(1, -1).replace(/''/g, "'"));
+            }
+          }
+          state.enumValues.set(q.name, labels);
+        }
+        return;
+      }
+
+      const alterType = new RegExp(
+        `^ALTER\\s+TYPE\\s+(IF\\s+EXISTS\\s+)?(${QUALIFIED})\\s+([\\s\\S]*)$`,
+        'i'
+      ).exec(text);
+      if (alterType) {
+        const ifExists = Boolean(alterType[1]);
+        const q = parseQualified(alterType[2]!);
+        const action = alterType[3]!.trim();
+        if (q.schema === 'public') {
+          if (!state.types.has(q.name) && !optional && !ifExists) {
+            report(
+              'error',
+              'TYPE_NOT_FOUND',
+              offset,
+              `ALTER TYPE: el tipo public.${q.name} no existe en este punto.`
+            );
+            return;
+          }
+          const addVal = /^ADD\s+VALUE\s+(IF\s+NOT\s+EXISTS\s+)?'((?:[^']|'')*)'/i.exec(action);
+          if (addVal) {
+            const label = addVal[2]!.replace(/''/g, "'");
+            const labels = state.enumValues.get(q.name) ?? new Set<string>();
+            if (inExplicitTransaction) {
+              report(
+                'error',
+                'UNSAFE_ENUM_ADD_IN_TX',
+                offset,
+                `ALTER TYPE public.${q.name} ADD VALUE '${label}' dentro de bloque BEGIN..COMMIT arriesga SQLSTATE 55P04 en PostgreSQL 15+/17; colóquelo antes de BEGIN;.`
+              );
+              return;
+            }
+            if (labels.has(label) && !addVal[1] && !optional) {
+              report(
+                'error',
+                'DUPLICATE_ENUM_VALUE',
+                offset,
+                `ALTER TYPE public.${q.name} ADD VALUE '${label}' sin IF NOT EXISTS: el valor ya existe.`
+              );
+              return;
+            }
+            labels.add(label);
+            state.enumValues.set(q.name, labels);
+          }
+        }
         return;
       }
 
@@ -765,7 +828,17 @@ export function analyzeMigrations(files: MigrationFile[]): AnalysisResult {
         continue;
       }
 
-      if (/^(BEGIN|COMMIT|ROLLBACK|SET|RESET|SELECT|COMMENT|CREATE\s+(?:EXTENSION|SCHEMA|SEQUENCE|VIEW|OR\s+REPLACE\s+VIEW))\b/i.test(head)) {
+      if (/^BEGIN\b/i.test(head)) {
+        inExplicitTransaction = true;
+        continue;
+      }
+
+      if (/^(COMMIT|ROLLBACK)\b/i.test(head)) {
+        inExplicitTransaction = false;
+        continue;
+      }
+
+      if (/^(SET|RESET|SELECT|COMMENT|CREATE\s+(?:EXTENSION|SCHEMA|SEQUENCE|VIEW|OR\s+REPLACE\s+VIEW))\b/i.test(head)) {
         registerFunctions(head);
         continue;
       }
@@ -781,6 +854,7 @@ export function analyzeMigrations(files: MigrationFile[]): AnalysisResult {
     tables: state.tables,
     functions: state.functions,
     types: state.types,
+    enumValues: state.enumValues,
     policies: state.policies,
   };
 }
