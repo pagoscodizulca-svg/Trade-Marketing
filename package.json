@@ -9,9 +9,11 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "cross-env NODE_ENV=production node dist-server/server.js",
-    "build": "vite build",
+    "build": "npm --prefix ruta-degustacion ci --no-audit --no-fund && npm run build:all",
+    "build:web": "vite build",
+    "build:logistica": "npm --prefix ruta-degustacion run build",
     "build:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --target=node22 --outfile=dist-server/server.js",
-    "build:all": "npm run build && npm --prefix ruta-degustacion run build && npm run build:server",
+    "build:all": "npm run build:web && npm run build:logistica && npm run build:server",
     "test": "node --import tsx --import ./tests/antigravity_audit/networkEgressGuard.mjs --test \"tests/**/*.test.ts\"",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "preview": "vite preview",
