@@ -12,6 +12,7 @@ export default defineConfig(() => {
       },
     },
     build: {
+      chunkSizeWarningLimit: 600,
       rollupOptions: {
         output: {
           manualChunks(id: string) {
@@ -27,8 +28,24 @@ export default defineConfig(() => {
             if (norm.includes('/node_modules/@supabase/')) {
               return 'vendor-supabase';
             }
+            if (
+              norm.includes('/node_modules/jszip/') ||
+              norm.includes('/node_modules/pako/')
+            ) {
+              return 'vendor-jszip';
+            }
+            if (
+              norm.includes('/node_modules/readable-stream/') ||
+              norm.includes('/node_modules/saxes/') ||
+              norm.includes('/node_modules/fast-csv/') ||
+              norm.includes('/node_modules/@fast-csv/') ||
+              norm.includes('/node_modules/archiver/') ||
+              norm.includes('/node_modules/unzipper/')
+            ) {
+              return 'vendor-excel-streams';
+            }
             if (norm.includes('/node_modules/exceljs/')) {
-              return 'vendor-exceljs';
+              return 'vendor-exceljs-core';
             }
             if (norm.includes('/node_modules/read-excel-file/')) {
               return 'vendor-excel-reader';

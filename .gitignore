@@ -18,3 +18,7 @@ supabase/.temp/
 supabase/.temp/*
 
 dist-server/
+bun.lock
+bun.lockb
+.bun-version
+

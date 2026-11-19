@@ -1861,9 +1861,12 @@ test('COMPUERTA G2 — Aislamiento Multi-Región en 5 Hubs (ZULIA, VALENCIA, CEN
             realtimeAuthToken = tok;
           },
         },
-      } as unknown as SupabaseClient;
+      } as unknown as Parameters<typeof verifyRutaProfileAccess>[0];
 
-      const result = await verifyRutaProfileAccess(mockClient, session);
+      const result = await verifyRutaProfileAccess(
+        mockClient,
+        session as unknown as Parameters<typeof verifyRutaProfileAccess>[1]
+      );
       assert.equal(result.ok, true, `Chofer de ${hub} debe autenticar correctamente`);
       if (result.ok) {
         assert.equal(result.user.role, 'chofer');
@@ -1902,12 +1905,12 @@ test('COMPUERTA G2 — Aislamiento Multi-Región en 5 Hubs (ZULIA, VALENCIA, CEN
         },
       },
       realtime: { setAuth: () => {} },
-    } as unknown as SupabaseClient;
+    } as unknown as Parameters<typeof verifyRutaProfileAccess>[0];
 
     const badRes = await verifyRutaProfileAccess(badClient, {
       access_token: buildMockJwt({ sub: badChoferUid, role: 'authenticated' }),
       user: { id: badChoferUid, email: 'chofer.global@codizulca.com' },
-    } as unknown as Session);
+    } as unknown as Parameters<typeof verifyRutaProfileAccess>[1]);
     assert.equal(badRes.ok, false);
     if (!badRes.ok) {
       assert.equal(badRes.code, 'INVALID_BRANCH');

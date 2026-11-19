@@ -21,3 +21,9 @@ qa-sync-suite/.env.test
 
 tests
 supabase/.temp
+
+# Gestores alternativos prohibidos (estándar único: npm + package-lock.json)
+bun.lock
+bun.lockb
+.bun-version
+
