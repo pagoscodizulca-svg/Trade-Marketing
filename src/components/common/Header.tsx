@@ -89,7 +89,7 @@ export const Header: React.FC<HeaderProps> = ({
   ];
 
   return (
-    <aside className="w-full md:w-64 shrink-0 bg-[#09090b]/95 border-b md:border-b-0 md:border-r border-white/[0.07] flex flex-col justify-between md:min-h-screen md:sticky md:top-0 z-30 backdrop-blur-xl no-print">
+    <aside className="cz-obsidian-anchor w-full md:w-64 shrink-0 bg-[#09090b] border-b md:border-b-0 md:border-r border-[#27272A] flex flex-col justify-between md:min-h-screen md:sticky md:top-0 z-30 no-print">
       <div>
         {/* Línea fina superior en rojo corporativo */}
         <div className="h-[2px] w-full bg-gradient-to-r from-red-700 via-red-500 to-transparent" />

@@ -45,6 +45,7 @@ import {
 import { RequisitionStatus } from '../../types';
 import { RegionGateSelector } from '../region/RegionGateSelector';
 import { RegionalComparisonTab } from './RegionalComparisonTab';
+import { AnimatedTabContainer, SlidingTabRail } from '../ui/AnimatedTabContainer';
 
 // ============================================================================
 // CONSTANTES Y UTILIDADES DE NORMALIZACIÓN COMERCIAL CODIZULCA
@@ -1649,47 +1650,29 @@ export const ExecutiveDashboard: React.FC<{
   const topViewSwitcherBar = isContraloriaOrAdmin ? (
     <div
       data-testid="executive-dashboard-view-switcher"
-      className="bg-zinc-900/95 border border-zinc-800 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3 no-print"
+      className="bg-zinc-900/95 border border-zinc-800 rounded-2xl px-4 pt-2 pb-2.5 flex flex-wrap items-center justify-between gap-3 no-print"
     >
-      <div
-        className="inline-flex rounded-xl bg-zinc-950 p-1 border border-zinc-800"
-        role="tablist"
-        aria-label="Selector de vista ejecutiva"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={dashboardTopView === 'sucursal_activa'}
-          data-testid="tab-sucursal-activa"
-          onClick={() => setDashboardTopView('sucursal_activa')}
-          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
-            dashboardTopView === 'sucursal_activa'
-              ? 'bg-red-600 text-white shadow-sm'
-              : 'text-zinc-400 hover:text-white'
-          }`}
-        >
-          <Building2 className="w-3.5 h-3.5" />
-          <span>Indicadores de Sucursal Activa</span>
-        </button>
+      <SlidingTabRail
+        ariaLabel="Selector de vista ejecutiva"
+        activeTab={dashboardTopView}
+        onSelectTab={(nextTab) => setDashboardTopView(nextTab)}
+        tabs={[
+          {
+            id: 'sucursal_activa',
+            label: 'Indicadores de Sucursal Activa',
+            icon: <Building2 className="w-3.5 h-3.5 text-red-500" />,
+            testId: 'tab-sucursal-activa',
+          },
+          {
+            id: 'comparativo_regiones',
+            label: 'Comparativo por Región',
+            icon: <BarChart3 className="w-3.5 h-3.5 text-red-500" />,
+            testId: 'tab-comparativo-regiones',
+          },
+        ]}
+      />
 
-        <button
-          type="button"
-          role="tab"
-          aria-selected={dashboardTopView === 'comparativo_regiones'}
-          data-testid="tab-comparativo-regiones"
-          onClick={() => setDashboardTopView('comparativo_regiones')}
-          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
-            dashboardTopView === 'comparativo_regiones'
-              ? 'bg-red-600 text-white shadow-sm'
-              : 'text-zinc-400 hover:text-white'
-          }`}
-        >
-          <BarChart3 className="w-3.5 h-3.5" />
-          <span>Comparativo por Región</span>
-        </button>
-      </div>
-
-      <span className="text-[11px] font-mono text-zinc-400 px-2">
+      <span className="text-[11px] font-mono tabular-nums text-zinc-400 px-2">
         {dashboardTopView === 'comparativo_regiones'
           ? 'Consolidado Nacional · 5 Hubs (Solo Lectura)'
           : `Contexto aislado: ${activeSucursalLabel}`}
@@ -1699,37 +1682,43 @@ export const ExecutiveDashboard: React.FC<{
 
   if (isContraloriaOrAdmin && dashboardTopView === 'comparativo_regiones') {
     return (
-      <div className="space-y-6">
+      <div className="space-y-6 tabular-nums">
         {topViewSwitcherBar}
-        <RegionalComparisonTab
-          onSelectSucursalToInspect={(suc) => {
-            setActiveSucursal(suc);
-            setDashboardTopView('sucursal_activa');
-          }}
-        />
+        <AnimatedTabContainer tabKey="comparativo_regiones">
+          <RegionalComparisonTab
+            onSelectSucursalToInspect={(suc) => {
+              setActiveSucursal(suc);
+              setDashboardTopView('sucursal_activa');
+            }}
+          />
+        </AnimatedTabContainer>
       </div>
     );
   }
 
   if (requiresSucursalSelection) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-6 tabular-nums">
         {topViewSwitcherBar}
-        <RegionGateSelector
-          mode="gate"
-          onOpenComparativo={
-            isContraloriaOrAdmin
-              ? () => setDashboardTopView('comparativo_regiones')
-              : undefined
-          }
-        />
+        <AnimatedTabContainer tabKey="gate_sucursal_requerida">
+          <RegionGateSelector
+            mode="gate"
+            onOpenComparativo={
+              isContraloriaOrAdmin
+                ? () => setDashboardTopView('comparativo_regiones')
+                : undefined
+            }
+          />
+        </AnimatedTabContainer>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 tabular-nums">
       {topViewSwitcherBar}
+      <AnimatedTabContainer tabKey={`sucursal_activa:${activeSucursalLabel}`}>
+      <div className="space-y-6">
       {/* Membrete oficial exclusivo para soporte impreso / PDF */}
       <PrintSupportHeader
         moduleTitle="MÓDULO 4: KPI, COMPARATIVA MENSUAL DE MERCADO Y COSTOS SEMANALES"
@@ -4031,6 +4020,8 @@ export const ExecutiveDashboard: React.FC<{
 
       {/* Bloque oficial de firmas para soporte impreso / PDF */}
       <PrintSignatureBlock />
+      </div>
+      </AnimatedTabContainer>
     </div>
   );
 };

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, LogOut, MapPin, ShieldCheck, Truck } from 'lucide-react';
+import { Building2, LogOut, MapPin, Monitor, ShieldCheck, Sun, Truck } from 'lucide-react';
+import {
+  persistRutaUiThemeMode,
+  readStoredRutaUiThemeMode,
+  UI_THEME_STORAGE_KEY,
+  type RutaUiThemeMode,
+} from './bootTheme';
 import type { AppMode, RutaAuthUser } from './types';
 import { ChoferView } from './components/chofer/ChoferView';
 import { OficinaView } from './components/oficina/OficinaView';
@@ -33,7 +39,22 @@ export default function App() {
   const [authUser, setAuthUser] = useState<RutaAuthUser | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [modoSolicitado, setModoSolicitado] = useState<AppMode>(modoInicial);
+  const [uiTheme, setUiTheme] = useState<RutaUiThemeMode>(() => readStoredRutaUiThemeMode());
   const { entregas, repo, sync, refresh } = useEntregas();
+
+  useEffect(() => {
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key === UI_THEME_STORAGE_KEY) {
+        setUiTheme(persistRutaUiThemeMode(ev.newValue === 'control-room' ? 'control-room' : 'default'));
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  const toggleRutaTheme = useCallback(() => {
+    setUiTheme((prev) => persistRutaUiThemeMode(prev === 'control-room' ? 'default' : 'control-room'));
+  }, []);
   const headerRef = useRef<HTMLElement>(null);
 
   const { configError } = useMemo(() => resolveRutaSupabaseConfig(), []);
@@ -149,7 +170,7 @@ export default function App() {
       <header ref={headerRef} className="bg-ink text-white sticky top-0 z-40 shadow-lg border-b-4 border-brand">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 pb-2.5">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-2.5">
-            <div className="w-11 h-11 rounded-xl bg-white p-1 grid place-items-center shrink-0 shadow">
+            <div className="cz-logo-badge w-11 h-11 rounded-xl bg-white p-1 grid place-items-center shrink-0 shadow">
               <img src="/codizulca-logo.png" alt="Logo CODIZULCA C.A." className="w-full h-full object-contain" />
             </div>
             <div className="min-w-0 flex-1 basis-40">
@@ -178,6 +199,27 @@ export default function App() {
                 <MapPin className="w-3 h-3 shrink-0" />
                 {formatSucursalLabel(authUser.sucursal)}
               </span>
+              <button
+                type="button"
+                onClick={toggleRutaTheme}
+                aria-pressed={uiTheme === 'control-room'}
+                data-testid="ruta-theme-toggle"
+                className="inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-200 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-white/15 rounded-full px-2.5 py-1 transition-colors"
+                title={
+                  uiTheme === 'control-room'
+                    ? 'Modo Sala de Control activo — cambiar a Día Ejecutivo'
+                    : 'Activar Modo Oscuro Nocturno (Sala de Control)'
+                }
+              >
+                {uiTheme === 'control-room' ? (
+                  <Monitor className="w-3.5 h-3.5 text-red-400" />
+                ) : (
+                  <Sun className="w-3.5 h-3.5 text-red-400" />
+                )}
+                <span className="hidden sm:inline">
+                  {uiTheme === 'control-room' ? 'Sala de Control' : 'Día Ejecutivo'}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => void handleSignOut()}
@@ -225,11 +267,13 @@ export default function App() {
       </header>
 
       <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 py-4">
-        {modo === 'oficina' && puedeOficina ? (
-          <OficinaView entregas={entregas} repo={repo} sync={sync} />
-        ) : (
-          <ChoferView entregas={entregas} repo={repo} sync={sync} />
-        )}
+        <div key={modo} className="cz-tab-panel-enter">
+          {modo === 'oficina' && puedeOficina ? (
+            <OficinaView entregas={entregas} repo={repo} sync={sync} />
+          ) : (
+            <ChoferView entregas={entregas} repo={repo} sync={sync} />
+          )}
+        </div>
       </main>
 
       <footer className="bg-ink text-zinc-400 text-[11px] border-t-2 border-brand">

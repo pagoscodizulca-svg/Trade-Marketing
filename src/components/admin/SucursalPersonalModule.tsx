@@ -48,6 +48,7 @@ import {
   type PortalClientePdvOption,
   type PortalClienteUserOption,
 } from './ClientePortalAccesosManager';
+import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 
 export interface RegionActivaItem {
   id: string;
@@ -716,9 +717,9 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                   type="button"
                   data-testid={`hub-module-tab-${reg.codigo.toLowerCase()}`}
                   onClick={() => handleSelectHub(reg.codigo)}
-                  className={`px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                  className={`relative overflow-hidden px-3 py-2.5 rounded-xl border text-left transition cursor-pointer ${
                     isSelected
-                      ? 'bg-red-600/20 border-red-500 text-white shadow-md shadow-red-950/40'
+                      ? 'bg-red-600/15 border-red-500 text-white'
                       : 'bg-black/70 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-white'
                   }`}
                 >
@@ -728,6 +729,12 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                   <span className="text-xs font-extrabold block truncate">
                     {SUCURSAL_PERSONAL_MODULE_TITLES[reg.codigo]}
                   </span>
+                  {isSelected && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-[#DC2626]"
+                    />
+                  )}
                 </button>
               );
             })}
@@ -736,6 +743,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
       )}
 
       {/* Cabecera del Módulo Independiente de la Sucursal Activa */}
+      <AnimatedTabContainer tabKey={activeHub} className="space-y-5">
       <div className="rounded-2xl bg-zinc-950/95 border border-white/10 p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex items-start gap-3.5">
           <div className="w-11 h-11 rounded-xl bg-red-600/15 border border-red-500/30 flex items-center justify-center shrink-0">
@@ -1385,6 +1393,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
           </form>
         </div>
       )}
+      </AnimatedTabContainer>
     </div>
   );
 };

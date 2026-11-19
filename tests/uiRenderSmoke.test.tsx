@@ -6,11 +6,20 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ClientePortalAccesosManager } from '../src/components/admin/ClientePortalAccesosManager';
+import { CadenaLogoUploaderModal } from '../src/components/admin/CadenaLogoUploaderModal';
 import { SucursalPersonalModule } from '../src/components/admin/SucursalPersonalModule';
+import { ClienteReadOnlyPortalView } from '../src/components/cliente/ClienteReadOnlyPortalView';
 import { ErrorBoundary } from '../src/components/common/ErrorBoundary';
 import { RegionalComparisonTab } from '../src/components/dashboard/RegionalComparisonTab';
 import { IncidenciaQuickModal } from '../src/components/portal/IncidenciaQuickModal';
 import { RegionGateSelector } from '../src/components/region/RegionGateSelector';
+import { AnimatedTabContainer, SlidingTabRail } from '../src/components/ui/AnimatedTabContainer';
+import { ControlRoomThemeToggle } from '../src/components/ui/ControlRoomThemeToggle';
+import { ThemeModeProvider, UI_THEME_STORAGE_KEY } from '../src/context/ThemeModeContext';
+import { esClaveAuth } from '../ruta-degustacion/src/services/cleanSync';
+import { computeCadenaInitials, isSafeLocalLogoSrc } from '../src/services/cadenaLogoService';
+import { isPreservedKey } from '../src/services/cleanSync';
+import type { ClientePortalResumen } from '../src/services/clientePortalService';
 import { SLA_HOURS_BY_SEVERIDAD } from '../src/services/popIncidenciasService';
 import {
   PORTAL_OFFLINE_IDB_NAME,
@@ -645,5 +654,161 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
       documentXml.includes('Región / Sucursal Activa: Sucursal Capital'),
       'El documento .docx debe estampar la Región / Sucursal Activa en portada'
     );
+  });
+
+  await t.test('f) v1.8.0: Alternancia default <-> control-room, cleanSync, AnimatedTabContainer (GPU + reduced-motion) y Co-Branding B2B en /cliente', () => {
+    // 1. Preservación garantizada de `codizulca.ui_theme` en ambos cleanSync.ts
+    assert.equal(UI_THEME_STORAGE_KEY, 'codizulca.ui_theme');
+    assert.equal(isPreservedKey(UI_THEME_STORAGE_KEY), true);
+    assert.equal(esClaveAuth(UI_THEME_STORAGE_KEY), true);
+
+    // 2. Renderizado SSR de ControlRoomThemeToggle en Modo Día Ejecutivo vs Modo Sala de Control
+    const dayToggleHtml = renderToStaticMarkup(
+      <ThemeModeProvider initialMode="default">
+        <ControlRoomThemeToggle />
+      </ThemeModeProvider>
+    );
+    assert.match(dayToggleHtml, /data-testid="control-room-theme-toggle"/);
+    assert.match(dayToggleHtml, /data-theme-state="default"/);
+    assert.match(dayToggleHtml, /aria-pressed="false"/);
+    assert.match(dayToggleHtml, /Día Ejecutivo/);
+
+    const controlRoomToggleHtml = renderToStaticMarkup(
+      <ThemeModeProvider initialMode="control-room">
+        <ControlRoomThemeToggle />
+      </ThemeModeProvider>
+    );
+    assert.match(controlRoomToggleHtml, /data-theme-state="control-room"/);
+    assert.match(controlRoomToggleHtml, /aria-pressed="true"/);
+    assert.match(controlRoomToggleHtml, /Sala de Control/);
+
+    // 3. AnimatedTabContainer + SlidingTabRail (modo GPU vs prefers-reduced-motion)
+    const gpuTabHtml = renderToStaticMarkup(
+      <div>
+        <SlidingTabRail
+          ariaLabel="Pestañas prueba"
+          activeTab="comparativo"
+          onSelectTab={() => undefined}
+          tabs={[
+            { id: 'sucursal', label: 'Sucursal Activa' },
+            { id: 'comparativo', label: 'Comparativo por Región' },
+          ]}
+        />
+        <AnimatedTabContainer tabKey="comparativo" reducedMotion={false}>
+          <p>Contenido GPU</p>
+        </AnimatedTabContainer>
+      </div>
+    );
+    assert.match(gpuTabHtml, /data-motion="gpu"/);
+    assert.match(gpuTabHtml, /cz-tab-panel-enter/);
+    assert.match(gpuTabHtml, /role="tablist"/);
+
+    const reducedMotionHtml = renderToStaticMarkup(
+      <AnimatedTabContainer tabKey="comparativo" reducedMotion={true}>
+        <p>Contenido Accesible Sin Desplazamiento</p>
+      </AnimatedTabContainer>
+    );
+    assert.match(reducedMotionHtml, /data-motion="reduced"/);
+    assert.match(reducedMotionHtml, /cz-tab-panel-static/);
+    assert.ok(!reducedMotionHtml.includes('cz-tab-panel-enter'));
+
+    // 4. CadenaLogoUploaderModal con vista previa dual Día Ejecutivo + Sala de Control
+    const uploaderHtml = renderToStaticMarkup(
+      <CadenaLogoUploaderModal
+        isOpen={true}
+        inlineForSsr={true}
+        cadena={{
+          id: '71000000-0000-4000-8000-000000000005',
+          codigo: 'CAD-CAPITAL',
+          nombre: 'Excelsior Gama Capital',
+          sucursal: 'CAPITAL',
+          hasLogo: false,
+        }}
+        onClose={() => undefined}
+      />
+    );
+    assert.match(uploaderHtml, /data-testid="cobrand-preview-default"/);
+    assert.match(uploaderHtml, /data-testid="cobrand-preview-control-room"/);
+    assert.match(uploaderHtml, /Excelsior Gama Capital/);
+
+    // 5. Co-Branding en /cliente: CON logotipo válido (cápsula h-9 max-w-[160px]) vs SIN logotipo (monograma limpio)
+    const validPngDataUri = `data:image/png;base64,${Buffer.from(VALID_1X1_PNG_BYTES).toString('base64')}`;
+    assert.equal(isSafeLocalLogoSrc(validPngDataUri), true);
+    assert.equal(isSafeLocalLogoSrc('blob:http://localhost:4188/abc-123'), true);
+    assert.equal(isSafeLocalLogoSrc('https://evil.example.com/tracker.png'), false);
+    assert.equal(isSafeLocalLogoSrc('data:image/svg+xml;base64,PHN2Zz48L3N2Zz4='), false);
+    assert.equal(computeCadenaInitials('Excelsior Gama Capital', 'CAD-CAP'), 'EG');
+
+    const samplePortalData: ClientePortalResumen = {
+      pdvs: [
+        {
+          id: '80000000-0000-4000-8000-000000000005',
+          codigoCliente: 'CLI-CAP-001',
+          nombreComercial: 'Excelsior Gama Chacao',
+          cadenaId: '71000000-0000-4000-8000-000000000005',
+          cadenaCodigo: 'CAD-CAPITAL',
+          cadenaNombre: 'Excelsior Gama Capital',
+          cadenaHasLogo: true,
+          cadenaLogoMimeType: 'image/png',
+          cadenaLogoUpdatedAt: '2026-11-19T12:00:00Z',
+          ciudad: 'Caracas',
+          estado: 'Distrito Capital',
+          sucursal: 'CAPITAL',
+        },
+      ],
+      cadenasBranding: [
+        {
+          id: '71000000-0000-4000-8000-000000000005',
+          codigo: 'CAD-CAPITAL',
+          nombre: 'Excelsior Gama Capital',
+          tipoCanal: 'Supermercado',
+          sucursal: 'CAPITAL',
+          hasLogo: true,
+          logoMimeType: 'image/png',
+          logoUpdatedAt: '2026-11-19T12:00:00Z',
+        },
+      ],
+      activaciones: [],
+      kpis: {
+        totalPdvs: 1,
+        totalActivaciones: 0,
+        completadas: 0,
+        programadas: 0,
+        muestras: 0,
+        ventasAsistidas: 0,
+        cumplimientoPct: 0,
+      },
+    };
+
+    const withLogoHtml = renderToStaticMarkup(
+      <ThemeModeProvider initialMode="control-room">
+        <ClienteReadOnlyPortalView
+          initialData={samplePortalData}
+          initialLogoPreviewSrc={validPngDataUri}
+        />
+      </ThemeModeProvider>
+    );
+    assert.match(withLogoHtml, /data-testid="cliente-cobrand-logo-capsule"/);
+    assert.match(withLogoHtml, /cz-cobrand-capsule h-9 max-w-\[160px\]/);
+    assert.match(withLogoHtml, /data-testid="cliente-cobrand-secondary-img"/);
+    assert.ok(!withLogoHtml.includes('data-testid="cliente-cobrand-typographic-badge"'));
+
+    // Sin logotipo (o si alguien intentara pasar una URL externa maliciosa): cae limpiamente en insignia tipográfica
+    const withoutLogoHtml = renderToStaticMarkup(
+      <ThemeModeProvider initialMode="control-room">
+        <ClienteReadOnlyPortalView
+          initialData={{
+            ...samplePortalData,
+            cadenasBranding: [{ ...samplePortalData.cadenasBranding[0]!, hasLogo: false }],
+          }}
+          initialLogoPreviewSrc="https://external-attacker.invalid/logo.png"
+        />
+      </ThemeModeProvider>
+    );
+    assert.match(withoutLogoHtml, /data-testid="cliente-cobrand-typographic-badge"/);
+    assert.match(withoutLogoHtml, />EG</);
+    assert.match(withoutLogoHtml, /Excelsior Gama Capital/);
+    assert.ok(!withoutLogoHtml.includes('external-attacker.invalid'));
+    assert.ok(!withoutLogoHtml.includes('data-testid="cliente-cobrand-secondary-img"'));
   });
 });

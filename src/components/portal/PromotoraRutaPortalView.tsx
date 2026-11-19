@@ -46,6 +46,8 @@ import {
 import { createIncidenciaPdv } from '../../services/popIncidenciasService';
 import { isOperativeSucursal } from '../../services/userManagementService';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
+import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
+import { ControlRoomThemeToggle } from '../ui/ControlRoomThemeToggle';
 import {
   captureBrowserGeolocation,
   evaluateGeofenceCheck,
@@ -696,6 +698,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <ControlRoomThemeToggle compact />
             {(pendingOffline.length > 0 || !isOnline) && (
               <button
                 type="button"

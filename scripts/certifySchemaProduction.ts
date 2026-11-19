@@ -328,6 +328,26 @@ export function runStaticCertification(
         : `Columnas faltantes en public.surveys: ${missingSurveyCols.join(', ')}`,
   });
 
+  const cadenasCols = analysis.tables.get('cadenas_comerciales');
+  const requiredCadenaLogoCols = [
+    'sucursal',
+    'region_id',
+    'logo_storage_path',
+    'logo_mime_type',
+    'logo_updated_at',
+    'logo_updated_by',
+  ];
+  const missingCadenaLogoCols = requiredCadenaLogoCols.filter((c) => !cadenasCols?.has(c));
+  checks.push({
+    id: 'static.cadenas_cobranding_columns',
+    passed: missingCadenaLogoCols.length === 0,
+    severity: 'error',
+    detail:
+      missingCadenaLogoCols.length === 0
+        ? 'public.cadenas_comerciales posee metadatos idempotentes de Co-Branding (logo_storage_path, logo_mime_type, logo_updated_at, logo_updated_by).'
+        : `Columnas faltantes en public.cadenas_comerciales: ${missingCadenaLogoCols.join(', ')}`,
+  });
+
   const legacyDeprecatedOk =
     !analysis.tables.has('perfiles_acceso') &&
     analysis.tables.has('perfiles_acceso_deprecado_hito1');

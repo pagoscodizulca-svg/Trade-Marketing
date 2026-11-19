@@ -6,9 +6,13 @@ export const APP_CLEAN_SYNC_VERSION = 'production-v1';
 
 const VERSION_KEY = 'rutadegustacion:clean_sync_version';
 const PREFIJO_PROPIO = 'rutadegustacion:v1:';
-/** Claves de sesión de Supabase Auth y perfil corporativo que se conservan siempre. */
+export const UI_THEME_STORAGE_KEY = 'codizulca.ui_theme';
+/** Claves de sesión de Supabase Auth, tema visual y perfil corporativo que se conservan siempre. */
 export const esClaveAuth = (k: string) =>
-  k.startsWith('sb-') || k.startsWith('codizulca.') || k.startsWith('codizulca_');
+  k === UI_THEME_STORAGE_KEY ||
+  k.startsWith('sb-') ||
+  k.startsWith('codizulca.') ||
+  k.startsWith('codizulca_');
 /**
  * Bases IndexedDB que se conservan: autenticación y la base OFFLINE del chofer, que solo contiene datos reales
  * (copia del servidor + acciones pendientes de subir). Borrarla haría perder entregas aún no sincronizadas.

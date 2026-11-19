@@ -24,6 +24,7 @@ import type { PazYSalvoVerificationResult } from '../../types/contraloriaFinanci
 import { ExportPdfButton } from '../common/ExportPdfButton';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
 import { ContraloriaSolicitudesInbox } from './ContraloriaSolicitudesInbox';
+import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import {
   SUCURSAL_LABELS,
   type OperativeSucursal,
@@ -603,7 +604,7 @@ export const ContraloriaView: React.FC = () => {
               type="button"
               data-testid="btn-contraloria-export-docx"
               onClick={() => void handleExportContraloriaDocx()}
-              className="px-3 py-2 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+              className="cz-keep-inverse px-3 py-2 rounded-xl bg-[#09090B] hover:bg-zinc-800 border border-zinc-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm transition cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
               <span>Exportar Word (.docx)</span>
@@ -782,6 +783,7 @@ export const ContraloriaView: React.FC = () => {
       )}
 
       {/* Vista 1: Bandeja de Entrada en Tiempo Real de Solicitudes de Productos (Trade Marketing -> Contraloría) */}
+      <AnimatedTabContainer tabKey={activeSubTab} className="space-y-6">
       {activeSubTab === 'bandeja_entrada' && (
         <ContraloriaSolicitudesInbox
           onSelectApprovedRequisitionCode={(code) => {
@@ -1713,6 +1715,7 @@ export const ContraloriaView: React.FC = () => {
           </div>
         </div>
       )}
+      </AnimatedTabContainer>
 
       {/* Modal: Radicar Nueva Requisición Oficial */}
       {isNewReqModalOpen && (

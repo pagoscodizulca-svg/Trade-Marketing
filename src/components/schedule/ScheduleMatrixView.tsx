@@ -29,6 +29,7 @@ import {
 } from '../../utils/pdfExport';
 import type { TastingScheduleItem } from '../field/FieldPromotoraView';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
+import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import {
   useLiveVenezuelaClock,
   getRollingWeekWindow,
@@ -1942,7 +1943,7 @@ export const ScheduleMatrixView: React.FC = () => {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        <AnimatedTabContainer tabKey={`${selectedDay}:${tableWeekOffset}`} className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-black border-b border-zinc-800 text-zinc-400 font-black uppercase text-[10px] tracking-wider">
@@ -2495,7 +2496,7 @@ export const ScheduleMatrixView: React.FC = () => {
               })}
             </tbody>
           </table>
-        </div>
+        </AnimatedTabContainer>
       </div>
 
       {/* Modal de Confirmación: Cancelación Lógica por Lote de la Tabla General */}

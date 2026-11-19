@@ -42,7 +42,7 @@ export function buildCorsMiddleware(options: {
     origin(origin, cb) {
       cb(null, isOriginAllowed(origin, options.allowedOrigins, options.isProduction));
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
       'Authorization',
       'Content-Type',
@@ -90,6 +90,8 @@ export function buildSecurityHeaders(options: {
     "'self'",
     'https://*.supabase.co',
     'wss://*.supabase.co',
+    'https://dashboard-fdv-planificador.onrender.com',
+    'https://ve.dolarapi.com',
     ...(options.extraConnectSrc ?? []),
   ];
 

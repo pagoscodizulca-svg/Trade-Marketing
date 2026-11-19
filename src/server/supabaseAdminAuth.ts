@@ -539,6 +539,11 @@ export function isTorreViewerRole(rawRole: string): boolean {
   return ALLOWED_TORRE_VIEWER_ROLES.has(String(rawRole || '').trim().toLowerCase());
 }
 
+export function isCadenaLogoViewerRole(rawRole: string): boolean {
+  const clean = String(rawRole || '').trim().toLowerCase();
+  return clean === 'cliente' || ALLOWED_TORRE_VIEWER_ROLES.has(clean);
+}
+
 export function isFdvIngestionRole(rawRole: string): boolean {
   const clean = String(rawRole || '').trim().toLowerCase();
   return clean === 'vendedor' || ALLOWED_COORDINATOR_ROLES.has(clean);
@@ -617,6 +622,103 @@ export async function requireFdvOrTradeAuth(
       res.status(403).json({
         error:
           'Acceso denegado: solo vendedores, coordinación o administración pueden registrar solicitudes de degustación.',
+        code: 'FORBIDDEN_ROLE',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: normalizeCanonicalEmail(data.user.email),
+      appRole,
+      sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
+}
+
+/**
+ * Middleware Zero Trust para lectura autenticada de logotipos secundarios de cadenas comerciales
+ * (`GET /api/cadenas-comerciales/:id/logo`):
+ * - Valida criptográficamente el Bearer JWT contra Supabase Auth (cero acceso `anon`).
+ * - Acepta perfiles activos de Torre (`super_admin`, `contraloria`, `coordinacion`) y `cliente`
+ *   (el aislamiento regional y vínculo en `cliente_portal_accesos` se aplica en `cadenaLogoHandler.ts`).
+ */
+export async function requireCadenaLogoViewerAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
+      .trim()
+      .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal,
+      data.user.email
+    );
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
+
+    if (!isCadenaLogoViewerRole(appRole)) {
+      res.status(403).json({
+        error:
+          'Acceso denegado: tu perfil no cuenta con autorización para consultar logotipos de cadenas comerciales.',
         code: 'FORBIDDEN_ROLE',
       });
       return;

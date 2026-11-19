@@ -17,6 +17,8 @@ import type { VerifiedAuthProfile } from './services/authService';
 import { DegustacionNotificationItem } from './types';
 import { SyncStatusBadge } from './components/common/SyncStatusBadge';
 import { RegionGateSelector } from './components/region/RegionGateSelector';
+import { AnimatedTabContainer } from './components/ui/AnimatedTabContainer';
+import { ControlRoomThemeToggle } from './components/ui/ControlRoomThemeToggle';
 import { useLiveVenezuelaClock } from './utils/weekCalendar';
 import { pathForTab, resolveRoute } from './utils/appRouter';
 
@@ -105,6 +107,7 @@ const MainAppContent: React.FC<{
     setFocusedTastingSnapshot,
     requiresSucursalSelection,
     isContraloriaOrAdmin,
+    activeSucursal,
   } = useApp();
 
   const [comparativoOpenTick, setComparativoOpenTick] = useState<number>(0);
@@ -148,7 +151,7 @@ const MainAppContent: React.FC<{
   };
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-white flex flex-col md:flex-row font-sans selection:bg-red-600 selection:text-white relative overflow-x-hidden">
+    <div className="cz-workspace-canvas min-h-screen bg-[var(--cz-bg-canvas)] text-[var(--cz-text-primary)] flex flex-col md:flex-row font-sans selection:bg-red-600 selection:text-white relative overflow-x-hidden">
       
       {/* Panel Lateral Izquierdo con los 4 Módulos en Vertical (Negro, Rojo y Blanco) */}
       <Header
@@ -200,6 +203,9 @@ const MainAppContent: React.FC<{
               <span className="hidden xl:inline-flex px-3 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/25 text-xs font-semibold">
                 {activeModuleTitle[activeTab].badge}
               </span>
+
+              {/* Selector opcional de Modo Oscuro Nocturno Completo (Sala de Control) */}
+              <ControlRoomThemeToggle />
 
               {/* Estado de sincronización con el servidor + sincronización manual */}
               <SyncStatusBadge />
@@ -271,12 +277,16 @@ const MainAppContent: React.FC<{
         <main className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <Suspense
             fallback={
-              <div className="flex items-center justify-center py-24 text-sm text-zinc-300 font-mono" role="status" aria-live="polite">
+              <div className="flex items-center justify-center py-24 text-sm text-zinc-400 font-mono" role="status" aria-live="polite">
                 <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping mr-2.5" />
                 Cargando módulo corporativo...
               </div>
             }
           >
+            <AnimatedTabContainer
+              tabKey={`${activeTab}:${activeSucursal || 'GLOBAL'}`}
+              data-testid="main-module-tab-transition"
+            >
             {/* Modulo 1: Promotoras y FDV */}
             {activeTab === 'promotoras' && (
               <RoleGuard
@@ -407,11 +417,12 @@ const MainAppContent: React.FC<{
                 )}
               </RoleGuard>
             )}
+            </AnimatedTabContainer>
           </Suspense>
         </main>
 
         {/* Codizulca Corporate Footer (Negro, Rojo y Blanco) */}
-        <footer className="bg-black border-t border-white/10 py-5 mt-8 text-xs text-zinc-400 relative overflow-hidden">
+        <footer className="cz-obsidian-anchor bg-[#09090B] border-t border-[#27272A] py-5 mt-8 text-xs text-zinc-400 relative overflow-hidden no-print">
           <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-red-600 to-transparent opacity-80" />
           <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-3">

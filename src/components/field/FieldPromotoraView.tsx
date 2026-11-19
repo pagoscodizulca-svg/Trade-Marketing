@@ -69,6 +69,7 @@ import {
   Metric360SwitcherItem,
 } from '../common/Metric360DashboardModal';
 import { AttendanceEvidenceSubTab } from './AttendanceEvidenceSubTab';
+import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import { buildDailyPromotoraAttendanceViewModels } from '../../services/attendanceEvidencesService';
 import {
   DegustacionNotificationItem,
@@ -3225,6 +3226,7 @@ export const FieldPromotoraView: React.FC = () => {
       {/* ========================================================================= */}
       {/* SUBMÓDULO: SOLICITUDES A CONTRALORÍA - DEGUSTACIONES ("SOLICITUD DE PRODUCTOS") */}
       {/* ========================================================================= */}
+      <AnimatedTabContainer tabKey={activeSubTab} className="space-y-6">
       {activeSubTab === 'solicitudes_contraloria' && (
         <TradeContraloriaSolicitudesTab />
       )}
@@ -7169,6 +7171,7 @@ export const FieldPromotoraView: React.FC = () => {
           </div>
         );
       })()}
+      </AnimatedTabContainer>
 
       {/* Dashboard 360° Interactivo al Seleccionar Cualquier Tarjeta de Métrica */}
       {FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS && (

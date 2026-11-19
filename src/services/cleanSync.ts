@@ -10,10 +10,12 @@
  */
 export const APP_CLEAN_SYNC_VERSION = 'production-v1';
 export const APP_CLEAN_SYNC_VERSION_KEY = 'app_clean_sync_version';
+export const UI_THEME_STORAGE_KEY = 'codizulca.ui_theme';
 
 const PRESERVED_EXACT_KEYS = new Set<string>([
   APP_CLEAN_SYNC_VERSION_KEY,
   'codizulca_trade_read_degustaciones_v1',
+  UI_THEME_STORAGE_KEY,
 ]);
 
 /** Prefijos de claves de Web Storage que jamás se purgan (sesión y preferencias reales). */

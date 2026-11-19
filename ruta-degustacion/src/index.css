@@ -1,25 +1,124 @@
 @import "tailwindcss";
 
 @theme {
-  /* Paleta corporativa CODIZULCA: negro, rojo y blanco */
-  --color-ink: #0a0a0a;
-  --color-brand: #c1121f;
-  --color-brand-dark: #9b0e18;
+  /* Paleta corporativa suiza CODIZULCA: Negro Obsidiana, Rojo Corporativo y Blanco */
+  --color-ink: #09090b;
+  --color-brand: #dc2626;
+  --color-brand-dark: #b91c1c;
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+:root,
+:root[data-theme="default"] {
+  --cz-bg-canvas: #f8f9fa;
+  --cz-bg-surface: #ffffff;
+  --cz-bg-elevated: #f1f3f5;
+  --cz-border-subtle: #e4e4e7;
+  --cz-text-primary: #09090b;
+  --cz-text-secondary: #52525b;
+  --cz-accent-red: #dc2626;
+  color-scheme: light;
+}
+
+:root[data-theme="control-room"] {
+  --cz-bg-canvas: #09090b;
+  --cz-bg-surface: #121215;
+  --cz-bg-elevated: #18181b;
+  --cz-border-subtle: #27272a;
+  --cz-text-primary: #fafafa;
+  --cz-text-secondary: #a1a1aa;
+  --cz-accent-red: #dc2626;
+  color-scheme: dark;
 }
 
 @layer base {
   html {
     -webkit-tap-highlight-color: transparent;
   }
+  body {
+    background-color: var(--cz-bg-canvas);
+    color: var(--cz-text-primary);
+  }
+  table td,
+  table th,
+  .tabular-nums,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
   button {
     cursor: pointer;
+    transition:
+      background-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   button:disabled {
     cursor: not-allowed;
   }
   ::selection {
-    background: #c1121f;
+    background: #dc2626;
     color: #fff;
+  }
+}
+
+/* Adaptación de tarjetas/tablas de /logistica en Modo Sala de Control */
+:root[data-theme="control-room"] .bg-zinc-100,
+:root[data-theme="control-room"] .bg-zinc-50,
+:root[data-theme="control-room"] .bg-neutral-50 {
+  background-color: #09090b !important;
+  color: #fafafa !important;
+}
+
+:root[data-theme="control-room"] .bg-white:not(.cz-logo-badge) {
+  background-color: #121215 !important;
+  color: #fafafa !important;
+  border-color: #27272a !important;
+}
+
+:root[data-theme="control-room"] :is(.text-ink, .text-zinc-900, .text-zinc-800, .text-zinc-700, .text-neutral-900, .text-neutral-800) {
+  color: #fafafa !important;
+}
+
+:root[data-theme="control-room"] :is(.text-zinc-600, .text-zinc-500, .text-neutral-600, .text-neutral-500) {
+  color: #a1a1aa !important;
+}
+
+:root[data-theme="control-room"] :is(.border-zinc-200, .border-zinc-300, .border-neutral-200, .border-neutral-300) {
+  border-color: #27272a !important;
+}
+
+@keyframes cz-ruta-tab-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.cz-tab-panel-enter {
+  animation: cz-ruta-tab-enter 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: opacity, transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cz-tab-panel-enter,
+  button {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+@media print {
+  :root,
+  :root[data-theme="control-room"] {
+    --cz-bg-canvas: #ffffff !important;
+    --cz-bg-surface: #ffffff !important;
+    --cz-text-primary: #111827 !important;
+    color-scheme: light !important;
   }
 }

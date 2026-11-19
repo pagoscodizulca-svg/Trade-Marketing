@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Loader2, Package, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { AnimatedTabContainer, SlidingTabRail } from '../ui/AnimatedTabContainer';
 import {
   createIncidenciaPdv,
   evaluateIncidenciaSlaStatus,
@@ -107,25 +108,17 @@ export const PopAndIncidenciasView: React.FC = () => {
   );
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 tabular-nums">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="inline-flex rounded-xl bg-zinc-950 border border-white/10 p-1 gap-1">
-          {(
-            [
-              ['pop', 'Inventario y Entregas POP'],
-              ['incidencias', 'Incidencias y SLA'],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setTab(id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${tab === id ? 'bg-red-600 text-white' : 'text-zinc-400'}`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <SlidingTabRail
+          ariaLabel="Submódulos de Material POP e Incidencias"
+          activeTab={tab}
+          onSelectTab={(next) => setTab(next)}
+          tabs={[
+            { id: 'pop', label: 'Inventario y Entregas POP' },
+            { id: 'incidencias', label: 'Incidencias y SLA' },
+          ]}
+        />
         <button type="button" onClick={() => void load()} className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 cursor-pointer" title="Actualizar">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -136,6 +129,7 @@ export const PopAndIncidenciasView: React.FC = () => {
       {notice && <div className="rounded-xl bg-emerald-950/50 border border-emerald-500/40 px-4 py-2 text-xs text-emerald-200">{notice}</div>}
       {loading && <div className="flex items-center gap-2 text-sm text-zinc-400"><Loader2 className="w-4 h-4 animate-spin" />Cargando...</div>}
 
+      <AnimatedTabContainer tabKey={tab}>
       {tab === 'pop' && (
         <div className="space-y-4">
           {lowStock.length > 0 && (
@@ -306,6 +300,7 @@ export const PopAndIncidenciasView: React.FC = () => {
           </div>
         </div>
       )}
+      </AnimatedTabContainer>
     </div>
   );
 };

@@ -1,11 +1,12 @@
 @import "tailwindcss";
 
 /* =========================================================================
-   DISEÑO EJECUTIVO ESTILIZADO CODIZULCA C.A. (NEGRO GRAFITO, ROJO Y BLANCO)
-   Inspiración: Linear / Stripe / Enterprise SaaS de alta precisión
+   SISTEMA DE DISEÑO SUIZO CORPORATIVO CODIZULCA C.A. (v1.8.0)
+   Identidad estricta: Negro Obsidiana (#09090B), Rojo Corporativo (#DC2626)
+   y Blanco / Hielo (#FFFFFF / #F8F9FA) — Cero estética genérica de IA.
    ========================================================================= */
 @theme {
-  /* Escala Grafito & Obsidiana Suave (Sin tonos azules ni contrastes bruscos) */
+  /* Escala Grafito & Obsidiana Suiza (Sin tintes azules ni neón) */
   --color-slate-50: #fafafa;
   --color-slate-100: #f4f4f5;
   --color-slate-200: #e4e4e7;
@@ -14,7 +15,7 @@
   --color-slate-500: #71717a;
   --color-slate-600: #52525b;
   --color-slate-700: #27272a;
-  --color-slate-800: #1f1f23;
+  --color-slate-800: #18181b;
   --color-slate-900: #121215;
   --color-slate-950: #09090b;
 
@@ -26,11 +27,11 @@
   --color-zinc-500: #71717a;
   --color-zinc-600: #52525b;
   --color-zinc-700: #27272a;
-  --color-zinc-800: #1f1f23;
+  --color-zinc-800: #18181b;
   --color-zinc-900: #121215;
   --color-zinc-950: #09090b;
 
-  /* Rojo Corporativo Codizulca Refinado */
+  /* Rojo Corporativo Codizulca Calibrado */
   --color-red-50: #fef2f2;
   --color-red-100: #fee2e2;
   --color-red-200: #fecaca;
@@ -50,72 +51,458 @@
   --color-rose-950: #2d0a0a;
 }
 
+/* =========================================================================
+   VARIABLES SEMÁNTICAS POR MODO (`default` 60/30/10 vs `control-room`)
+   ========================================================================= */
+:root,
+:root[data-theme="default"],
+[data-theme-preview="default"] {
+  --cz-bg-canvas: #f8f9fa;
+  --cz-bg-surface: #ffffff;
+  --cz-bg-elevated: #f1f3f5;
+  --cz-bg-obsidian: #09090b;
+  --cz-border-subtle: #e4e4e7;
+  --cz-border-strong: #d4d4d8;
+  --cz-text-primary: #09090b;
+  --cz-text-secondary: #52525b;
+  --cz-text-muted: #52525b;
+  --cz-accent-red: #dc2626;
+  --cz-accent-red-focal: #b91c1c;
+  --cz-accent-red-soft: rgba(220, 38, 38, 0.08);
+  --cz-chart-grid: #e4e4e7;
+  --cz-chart-axis: #52525b;
+  --cz-chart-surface: #ffffff;
+  --cz-cobrand-capsule-bg: #f8f9fa;
+  --cz-cobrand-capsule-border: #e4e4e7;
+  --cz-scrollbar-track: #f1f3f5;
+  --cz-scrollbar-thumb: #d4d4d8;
+}
+
+:root[data-theme="control-room"],
+[data-theme-preview="control-room"] {
+  --cz-bg-canvas: #09090b;
+  --cz-bg-surface: #121215;
+  --cz-bg-elevated: #18181b;
+  --cz-bg-obsidian: #09090b;
+  --cz-border-subtle: #27272a;
+  --cz-border-strong: #3f3f46;
+  --cz-text-primary: #fafafa;
+  --cz-text-secondary: #a1a1aa;
+  --cz-text-muted: #a1a1aa;
+  --cz-accent-red: #dc2626;
+  --cz-accent-red-focal: #ef4444;
+  --cz-accent-red-soft: rgba(220, 38, 38, 0.14);
+  --cz-chart-grid: #27272a;
+  --cz-chart-axis: #a1a1aa;
+  --cz-chart-surface: #121215;
+  --cz-cobrand-capsule-bg: #f4f4f5;
+  --cz-cobrand-capsule-border: #3f3f46;
+  --cz-scrollbar-track: #09090b;
+  --cz-scrollbar-thumb: #27272a;
+}
+
 @layer base {
   :root {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    color-scheme: dark;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
+  :root[data-theme="default"] {
+    color-scheme: light;
+  }
+
+  :root[data-theme="control-room"] {
+    color-scheme: dark;
+  }
+
   body {
-    background-color: #09090b;
-    color: #fafafa;
-    background-image:
-      radial-gradient(ellipse 75% 35% at 50% -10%, rgba(220, 38, 38, 0.11), transparent 70%),
-      radial-gradient(ellipse 50% 30% at 90% 100%, rgba(220, 38, 38, 0.05), transparent 65%);
-    background-attachment: fixed;
+    background-color: var(--cz-bg-canvas);
+    color: var(--cz-text-primary);
+    background-image: none;
     letter-spacing: -0.011em;
   }
 
-  /* Estilizado global de botones: bisel superior fino, transiciones fluidas y tacto ejecutivo */
+  /* Disciplina numérica obligatoria (tabular-nums) en tablas, métricas y códigos */
+  table td,
+  table th,
+  .tabular-nums,
+  .font-mono,
+  [data-metric],
+  .cz-metric {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Transiciones precisas en controles (sin rebotes artificiales ni sombras neón) */
   button {
-    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    transition:
+      background-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 150ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   button:not(:disabled):active {
-    transform: scale(0.985);
+    transform: scale(0.99);
   }
 
-  /* Botones primarios rojos con acabado satinado y bisel de luz */
   button.bg-red-600,
   a.bg-red-600 {
-    background-image: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);
-    box-shadow:
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.22),
-      0 2px 10px -2px rgba(220, 38, 38, 0.4);
+    background-color: #dc2626;
+    background-image: none;
+    color: #ffffff !important;
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.18);
   }
 
   button.bg-red-600:hover,
   a.bg-red-600:hover {
-    background-image: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
-    box-shadow:
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.3),
-      0 4px 16px -2px rgba(220, 38, 38, 0.55);
+    background-color: #b91c1c;
+    background-image: none;
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.24);
   }
 
-  /* Tablas ejecutivas limpias */
+  :root[data-theme="control-room"] button.bg-red-600:hover,
+  :root[data-theme="control-room"] a.bg-red-600:hover {
+    background-color: #ef4444;
+    box-shadow: none;
+  }
+
+  /* Tablas ejecutivas arquitectónicas */
   table thead tr {
-    background-color: rgba(15, 15, 18, 0.95);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background-color: var(--cz-bg-elevated);
+    border-bottom: 1px solid var(--cz-border-subtle);
   }
 
   table tbody tr {
-    transition: background-color 0.15s ease;
+    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
-  /* Inputs y Selects estilizados */
   input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+    transition: border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), background-color 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   input:not([type="checkbox"]):not([type="radio"]):focus,
   select:focus,
   textarea:focus {
-    border-color: rgba(239, 68, 68, 0.7) !important;
-    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.14);
+    border-color: var(--cz-accent-red) !important;
+    box-shadow: 0 0 0 2px var(--cz-accent-red-soft);
+  }
+}
+
+/* =========================================================================
+   CALIBRACIÓN SALA DE CONTROL (`[data-theme="control-room"]`)
+   Lienzo #09090B, Superficies #121215, Cabeceras #18181B, Bordes 1px #27272A,
+   Texto #FAFAFA / #A1A1AA (WCAG AA >= 4.5:1), cero resplandores neón.
+   ========================================================================= */
+:root[data-theme="control-room"] .glass-panel,
+:root[data-theme="control-room"] .glass-card,
+:root[data-theme="control-room"] .cz-surface {
+  background: #121215;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid #27272a;
+  box-shadow: none;
+}
+
+:root[data-theme="control-room"] .glass-card:hover {
+  border-color: #dc2626;
+  box-shadow: none;
+}
+
+:root[data-theme="control-room"] .text-zinc-400,
+:root[data-theme="control-room"] .text-zinc-500,
+:root[data-theme="control-room"] .text-slate-400,
+:root[data-theme="control-room"] .text-slate-500 {
+  color: #a1a1aa;
+}
+
+:root[data-theme="control-room"] .border-white\/10,
+:root[data-theme="control-room"] .border-white\/5,
+:root[data-theme="control-room"] .border-white\/\[0\.06\],
+:root[data-theme="control-room"] .border-white\/\[0\.07\],
+:root[data-theme="control-room"] .border-zinc-800,
+:root[data-theme="control-room"] .border-slate-800 {
+  border-color: #27272a;
+}
+
+/* =========================================================================
+   CALIBRACIÓN MODO DÍA EJECUTIVO (`:root:not([data-theme="control-room"])`)
+   60 % Blanco/Hielo (#FFFFFF / #F8F9FA), 30 % Negro Obsidiana (.cz-obsidian-anchor
+   + tipografía #09090B), 10 % Rojo Corporativo (#DC2626).
+   ========================================================================= */
+:root:not([data-theme="control-room"]) .cz-workspace-canvas {
+  background-color: #f8f9fa !important;
+  color: #09090b !important;
+}
+
+:root:not([data-theme="control-room"]) :is(
+    .bg-\[\#09090b\],
+    .bg-\[\#09090B\],
+    .bg-\[\#09090c\],
+    .bg-\[\#050505\],
+    .bg-\[\#121215\],
+    .bg-black,
+    .bg-zinc-950,
+    .bg-zinc-950\/95,
+    .bg-zinc-950\/90,
+    .bg-zinc-950\/85,
+    .bg-zinc-950\/80,
+    .bg-zinc-950\/60,
+    .bg-slate-950,
+    .bg-slate-950\/90,
+    .glass-panel,
+    .glass-card,
+    .cz-surface
+  ):not(.cz-obsidian-anchor):not(.cz-obsidian-anchor *):not(.cz-theme-toggle):not([data-theme-preview="control-room"]):not([data-theme-preview="control-room"] *) {
+  background-color: #ffffff !important;
+  background-image: none !important;
+  color: #09090b;
+  border-color: #e4e4e7;
+  box-shadow: 0 1px 2px 0 rgba(9, 9, 11, 0.04);
+}
+
+:root:not([data-theme="control-room"]) :is(
+    .bg-\[\#18181b\],
+    .bg-\[\#18181B\],
+    .bg-\[\#18181B\]\/90,
+    .bg-\[\#18181B\]\/70,
+    .bg-zinc-900,
+    .bg-zinc-900\/95,
+    .bg-zinc-900\/90,
+    .bg-zinc-900\/80,
+    .bg-zinc-900\/70,
+    .bg-zinc-900\/60,
+    .bg-zinc-900\/50,
+    .bg-zinc-900\/40,
+    .bg-zinc-800,
+    .bg-zinc-800\/90,
+    .bg-zinc-800\/80,
+    .bg-zinc-800\/60,
+    .bg-slate-900,
+    .bg-slate-900\/80,
+    .bg-slate-800,
+    .bg-black\/70,
+    .bg-black\/40,
+    .bg-black\/30,
+    .bg-black\/20,
+    .cz-elevated
+  ):not(.cz-obsidian-anchor):not(.cz-obsidian-anchor *):not(.cz-theme-toggle):not([data-theme-preview="control-room"]):not([data-theme-preview="control-room"] *) {
+  background-color: #f1f3f5 !important;
+  color: #09090b;
+  border-color: #e4e4e7;
+}
+
+:root:not([data-theme="control-room"]) :is(
+    .text-white,
+    .text-\[\#FFFFFF\],
+    .text-\[\#FAFAFA\],
+    .text-zinc-50,
+    .text-zinc-100,
+    .text-zinc-200,
+    .text-slate-50,
+    .text-slate-100,
+    .text-slate-200
+  ):not(.cz-obsidian-anchor):not(.cz-obsidian-anchor *):not(.cz-theme-toggle):not([data-theme-preview="control-room"]):not([data-theme-preview="control-room"] *):not(.bg-red-600):not(.bg-red-700):not(.bg-\[\#DC2626\]):not(.from-red-600):not(.bg-emerald-600):not(.bg-emerald-700):not(.bg-amber-600):not(.cz-keep-inverse) {
+  color: #09090b !important;
+}
+
+/* Preservar texto blanco únicamente dentro de botones/insignias con fondo sólido real */
+:root:not([data-theme="control-room"]) :is(
+    button.bg-red-600,
+    a.bg-red-600,
+    .bg-red-600,
+    .bg-red-700,
+    .bg-\[\#DC2626\],
+    .from-red-600,
+    .bg-emerald-600,
+    .bg-emerald-700,
+    .cz-keep-inverse
+  ),
+:root:not([data-theme="control-room"]) :is(
+    button.bg-red-600,
+    a.bg-red-600,
+    .bg-red-600,
+    .bg-red-700,
+    .bg-\[\#DC2626\],
+    .from-red-600,
+    .bg-emerald-600,
+    .bg-emerald-700,
+    .cz-keep-inverse
+  ) :is(span, svg, strong) {
+  color: #ffffff !important;
+}
+
+:root:not([data-theme="control-room"]) :is(
+    .text-zinc-300,
+    .text-zinc-400,
+    .text-zinc-500,
+    .text-slate-300,
+    .text-slate-400,
+    .text-slate-500
+  ):not(.cz-obsidian-anchor):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"]):not([data-theme-preview="control-room"] *) {
+  color: #52525b !important;
+}
+
+/* Contraste WCAG AA >= 4.5:1 para píldoras semánticas sobre blanco en Modo Día Ejecutivo */
+:root:not([data-theme="control-room"]) :is(.text-red-200, .text-red-300, .text-red-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  color: #b91c1c !important;
+}
+:root:not([data-theme="control-room"]) :is(.bg-red-950, .bg-red-950\/50, .bg-red-950\/40, .bg-red-950\/30, .bg-red-500\/10, .bg-red-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  background-color: #fef2f2 !important;
+  border-color: #fecaca !important;
+}
+:root:not([data-theme="control-room"]) :is(.text-emerald-200, .text-emerald-300, .text-emerald-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  color: #047857 !important;
+}
+:root:not([data-theme="control-room"]) :is(.bg-emerald-950, .bg-emerald-950\/50, .bg-emerald-950\/40, .bg-emerald-500\/10, .bg-emerald-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  background-color: #ecfdf5 !important;
+  border-color: #a7f3d0 !important;
+}
+:root:not([data-theme="control-room"]) :is(.text-amber-200, .text-amber-300, .text-amber-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  color: #b45309 !important;
+}
+:root:not([data-theme="control-room"]) :is(.bg-amber-950, .bg-amber-950\/40, .bg-amber-500\/10, .bg-amber-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  background-color: #fffbeb !important;
+  border-color: #fde68a !important;
+}
+:root:not([data-theme="control-room"]) :is(.text-cyan-200, .text-cyan-300, .text-blue-200, .text-blue-300):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  color: #18181b !important;
+}
+
+:root:not([data-theme="control-room"]) :is(
+    .border-white\/5,
+    .border-white\/10,
+    .border-white\/15,
+    .border-white\/20,
+    .border-white\/\[0\.06\],
+    .border-white\/\[0\.07\],
+    .border-white\/\[0\.08\],
+    .border-zinc-800,
+    .border-zinc-700,
+    .border-slate-800,
+    .border-slate-700,
+    .divide-white\/5,
+    .divide-white\/10,
+    .divide-zinc-800
+  ):not(.cz-obsidian-anchor):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"]):not([data-theme-preview="control-room"] *) {
+  border-color: #e4e4e7 !important;
+}
+
+:root:not([data-theme="control-room"]) :is(
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea
+  ):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #d4d4d8 !important;
+}
+
+/* Hoja formal MP-07 en pantalla durante Sala de Control: elimina deslumbramiento blanco */
+@media screen {
+  :root[data-theme="control-room"] .cz-format-sheet,
+  :root[data-theme="control-room"] .cz-format-sheet .bg-\[\#FFFFFF\],
+  :root[data-theme="control-room"] .cz-format-sheet .bg-neutral-50,
+  :root[data-theme="control-room"] .cz-format-sheet .bg-neutral-100 {
+    background-color: #121215 !important;
+    color: #fafafa !important;
+    border-color: #27272a !important;
+  }
+
+  :root[data-theme="control-room"] .cz-format-sheet .text-\[\#000000\],
+  :root[data-theme="control-room"] .cz-format-sheet .text-neutral-700,
+  :root[data-theme="control-room"] .cz-format-sheet .text-neutral-800 {
+    color: #fafafa !important;
+  }
+
+  :root[data-theme="control-room"] .cz-format-sheet .bg-\[\#FCA5A5\] {
+    background-color: #18181b !important;
+    color: #fafafa !important;
+  }
+}
+
+/* =========================================================================
+   CÁPSULA ADAPTATIVA DE CO-BRANDING B2B (.cz-cobrand-capsule)
+   Garantiza legibilidad en logotipos negros/transparentes tanto en Día como
+   en Modo Oscuro Nocturno Completo de Sala de Control.
+   ========================================================================= */
+.cz-cobrand-capsule {
+  background-color: var(--cz-cobrand-capsule-bg) !important;
+  border: 1px solid var(--cz-cobrand-capsule-border) !important;
+}
+
+/* =========================================================================
+   MICRO-TRANSICIONES ACELERADAS POR GPU (150ms cubic-bezier(0.16, 1, 0.3, 1))
+   ========================================================================= */
+@keyframes cz-tab-panel-fade-slide {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.cz-tab-panel-enter {
+  animation: cz-tab-panel-fade-slide 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: opacity, transform;
+}
+
+.cz-tab-panel-static {
+  opacity: 1;
+  transform: none;
+}
+
+.cz-tab-indicator {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  background-color: #dc2626;
+  pointer-events: none;
+  transition:
+    transform 150ms cubic-bezier(0.16, 1, 0.3, 1),
+    width 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.cz-tab-indicator-static {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  background-color: #dc2626;
+  pointer-events: none;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cz-tab-panel-enter {
+    animation: none !important;
+    transform: none !important;
+    will-change: auto;
+  }
+
+  .cz-tab-indicator {
+    transition: none !important;
+    will-change: auto;
+  }
+
+  button,
+  table tbody tr,
+  input,
+  select,
+  textarea {
+    transition: none !important;
+  }
+
+  button:not(:disabled):active {
+    transform: none !important;
   }
 }
 
@@ -126,11 +513,11 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #09090b;
+  background: var(--cz-scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: var(--cz-scrollbar-thumb);
   border-radius: 9999px;
 }
 
@@ -138,43 +525,32 @@
   background: #dc2626;
 }
 
-/* Glassmorphism & Elevation Utilities */
-.glass-panel {
-  background: rgba(18, 18, 21, 0.8);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7), inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
-}
-
-.glass-card {
-  background: rgba(18, 18, 21, 0.65);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.glass-card:hover {
-  border-color: rgba(220, 38, 38, 0.35);
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 0 15px -3px rgba(220, 38, 38, 0.12);
-}
-
 /* Interactive focus ring standard */
 *:focus-visible {
-  outline: 2px solid #ef4444;
+  outline: 2px solid #dc2626;
   outline-offset: 2px;
 }
 
 /* =========================================================================
    ESTILOS DE IMPRESIÓN Y SOPORTE FÍSICO / PDF PARA CODIZULCA C.A.
-   Optimizado para cero gasto de tinta negra: fondo blanco, tipografía nítida
-   y membrete corporativo oficial en papel.
+   Inmune al Modo Sala de Control: siempre papel blanco (#FFFFFF) y tinta
+   negra nítida (#111827) con membrete corporativo rojo (#B91C1C).
    ========================================================================= */
-
 @media print {
-  /* Ocultar elementos no imprimibles de interfaz */
-  header,
+  :root,
+  :root[data-theme="default"],
+  :root[data-theme="control-room"] {
+    --cz-bg-canvas: #ffffff !important;
+    --cz-bg-surface: #ffffff !important;
+    --cz-bg-elevated: #f3f4f6 !important;
+    --cz-border-subtle: #d1d5db !important;
+    --cz-text-primary: #111827 !important;
+    --cz-text-secondary: #374151 !important;
+    color-scheme: light !important;
+  }
+
+  header.no-print,
+  aside.no-print,
   footer,
   .no-print,
   button:not(.force-print),
@@ -185,7 +561,6 @@
     display: none !important;
   }
 
-  /* Fondo blanco y texto oscuro nítido */
   html, body, #root, main {
     background-color: #ffffff !important;
     background-image: none !important;
@@ -198,21 +573,21 @@
     max-width: 100% !important;
   }
 
-  /* Contenedores y tarjetas */
   .bg-black,
   .bg-zinc-950,
   .bg-zinc-900,
   .bg-zinc-900\/50,
   .bg-zinc-800,
   .glass-panel,
-  .glass-card {
+  .glass-card,
+  .cz-surface,
+  .cz-elevated {
     background-color: #ffffff !important;
     border-color: #e5e7eb !important;
     color: #111827 !important;
     box-shadow: none !important;
   }
 
-  /* Colores de texto en impresión */
   .text-white,
   .text-zinc-200,
   .text-zinc-300,
@@ -234,7 +609,6 @@
     color: #4b5563 !important;
   }
 
-  /* Tablas para impresión */
   table {
     width: 100% !important;
     border-collapse: collapse !important;
@@ -263,19 +637,16 @@
     text-transform: uppercase !important;
   }
 
-  /* Elementos específicos que solo aparecen en impresión */
   .print-only {
     display: block !important;
   }
 
-  /* Paginación y márgenes */
   @page {
     margin: 1.2cm 1cm 1.5cm 1cm;
     size: auto;
   }
 }
 
-/* Ocultar elementos print-only en pantalla normal */
 @media screen {
   .print-only {
     display: none !important;

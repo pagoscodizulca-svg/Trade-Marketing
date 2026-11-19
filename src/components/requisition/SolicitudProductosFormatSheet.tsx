@@ -170,7 +170,7 @@ export const SolicitudProductosFormatSheet: React.FC<
 
   return (
     <div className="w-full overflow-x-auto">
-      <div className="min-w-[680px] max-w-[860px] mx-auto bg-[#FFFFFF] text-[#000000] p-6 sm:p-9 rounded-md shadow-[0_20px_50px_rgba(0,0,0,0.65)] border-2 border-[#000000] font-sans select-text print:shadow-none print:border print:p-4">
+      <div className="cz-format-sheet min-w-[680px] max-w-[860px] mx-auto bg-[#FFFFFF] text-[#000000] p-6 sm:p-9 rounded-md shadow-[0_20px_50px_rgba(0,0,0,0.65)] border-2 border-[#000000] font-sans select-text print:shadow-none print:border print:p-4">
         {/* Catálogo de productos Codizulca para sugerencia rápida sin bloquear texto libre */}
         {isEdit && (
           <datalist id={datalistId}>

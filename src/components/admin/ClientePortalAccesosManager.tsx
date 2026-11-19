@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Building2,
   CheckCircle2,
+  Image as ImageIcon,
   KeyRound,
   Loader2,
   Plus,
@@ -16,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { getSupabaseClient, isSupabaseConfigured } from '../../services/supabaseClient';
+import { CadenaLogoUploaderModal } from './CadenaLogoUploaderModal';
 import {
   SUCURSAL_LABELS,
   normalizeManagedUserEmail,
@@ -67,6 +69,9 @@ export interface PortalCadenaOption {
   sucursal?: OperativeSucursal | string | null;
   regionId?: string | null;
   region_id?: string | null;
+  logo_storage_path?: string | null;
+  logo_mime_type?: string | null;
+  logo_updated_at?: string | null;
 }
 
 export interface ClientePortalAccesoRecord {
@@ -186,6 +191,7 @@ export const ClientePortalAccesosManager: React.FC<ClientePortalAccesosManagerPr
     () => initialScoped?.cadenas[0]?.id ?? ''
   );
   const [notas, setNotas] = useState<string>('');
+  const [logoModalCadena, setLogoModalCadena] = useState<PortalCadenaOption | null>(null);
 
   const sucursalLabel = SUCURSAL_LABELS[sucursal] ?? `Sucursal ${sucursal}`;
 
@@ -641,24 +647,38 @@ export const ClientePortalAccesosManager: React.FC<ClientePortalAccesosManagerPr
                   )}
                 </select>
               ) : (
-                <select
-                  id={`portal-acceso-target-${sucursal}`}
-                  value={selectedCadenaId}
-                  onChange={(e) => setSelectedCadenaId(e.target.value)}
-                  disabled={submitting || cadenas.length === 0}
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer disabled:opacity-60"
-                >
-                  {cadenas.length === 0 ? (
-                    <option value="">Sin cadenas comerciales activas en {sucursalLabel}</option>
-                  ) : (
-                    cadenas.map((cad) => (
-                      <option key={cad.id} value={cad.id}>
-                        {cad.nombre}
-                        {cad.codigo ? ` (${cad.codigo})` : ''}
-                      </option>
-                    ))
+                <div className="flex items-center gap-2">
+                  <select
+                    id={`portal-acceso-target-${sucursal}`}
+                    value={selectedCadenaId}
+                    onChange={(e) => setSelectedCadenaId(e.target.value)}
+                    disabled={submitting || cadenas.length === 0}
+                    className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer disabled:opacity-60"
+                  >
+                    {cadenas.length === 0 ? (
+                      <option value="">Sin cadenas comerciales activas en {sucursalLabel}</option>
+                    ) : (
+                      cadenas.map((cad) => (
+                        <option key={cad.id} value={cad.id}>
+                          {cad.nombre}
+                          {cad.codigo ? ` (${cad.codigo})` : ''}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  {selectedCadenaId && cadenasById.get(selectedCadenaId) && (
+                    <button
+                      type="button"
+                      data-testid="btn-open-cadena-logo-from-accesos"
+                      onClick={() => setLogoModalCadena(cadenasById.get(selectedCadenaId) ?? null)}
+                      title="Personalizar logotipo secundario Co-Branding (/cliente)"
+                      className="px-2.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[11px] font-bold text-white inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      <ImageIcon className="w-3.5 h-3.5 text-red-400" />
+                      <span>Logo</span>
+                    </button>
                   )}
-                </select>
+                </div>
               )}
             </div>
           </div>
@@ -754,10 +774,22 @@ export const ClientePortalAccesosManager: React.FC<ClientePortalAccesosManagerPr
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 text-zinc-200">
-                            <Building2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                            <Building2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
                             <span>
                               Cadena: {cadObj ? cadObj.nombre : row.cadena_id || '—'}
                             </span>
+                            {!readOnly && cadObj && (
+                              <button
+                                type="button"
+                                onClick={() => setLogoModalCadena(cadObj)}
+                                data-testid={`btn-row-cadena-logo-${cadObj.id}`}
+                                className="ml-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                                title="Gestionar logotipo secundario Co-Branding"
+                              >
+                                <ImageIcon className="w-2.5 h-2.5 text-red-400" />
+                                <span>{cadObj.logo_storage_path ? 'Logo OK' : 'Logo'}</span>
+                              </button>
+                            )}
                           </span>
                         )}
                       </td>
@@ -811,6 +843,39 @@ export const ClientePortalAccesosManager: React.FC<ClientePortalAccesosManagerPr
           </table>
         </div>
       </div>
+
+      <CadenaLogoUploaderModal
+        isOpen={Boolean(logoModalCadena)}
+        cadena={
+          logoModalCadena
+            ? {
+                id: logoModalCadena.id,
+                codigo: logoModalCadena.codigo,
+                nombre: logoModalCadena.nombre,
+                sucursal: String(logoModalCadena.sucursal || sucursal),
+                hasLogo: Boolean(
+                  logoModalCadena.logo_storage_path && logoModalCadena.logo_mime_type
+                ),
+                logoMimeType: logoModalCadena.logo_mime_type ?? null,
+              }
+            : null
+        }
+        onClose={() => setLogoModalCadena(null)}
+        onUpdated={async ({ id, hasLogo, logoMimeType }) => {
+          setCadenas((prev) =>
+            prev.map((c) =>
+              c.id === id
+                ? {
+                    ...c,
+                    logo_storage_path: hasLogo ? c.logo_storage_path || 'configured' : null,
+                    logo_mime_type: logoMimeType,
+                  }
+                : c
+            )
+          );
+          await onChanged?.();
+        }}
+      />
     </section>
   );
 };

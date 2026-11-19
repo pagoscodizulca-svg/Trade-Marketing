@@ -23,6 +23,7 @@ import {
   handleCreateCorporateUser,
   handleProvisionStaffAuth,
   requireAttendanceActorAuth,
+  requireCadenaLogoViewerAuth,
   requireCoordinatorOrAdminAuth,
   requireFdvOrTradeAuth,
   requireIncidenciaActorAuth,
@@ -41,6 +42,11 @@ import {
   handleBatchIncidenciaSignedUrls,
   handleUploadIncidenciaEvidence,
 } from './src/server/incidenciasEvidencesHandler';
+import {
+  handleDeleteCadenaLogo,
+  handleGetCadenaLogo,
+  handleUploadCadenaLogo,
+} from './src/server/cadenaLogoHandler';
 import { handleCreateFdvSolicitudDegustacion } from './src/server/fdvSolicitudesHandler';
 import {
   handleWeeklyTastingCutoffCron,
@@ -393,6 +399,45 @@ app.post(
   requireIncidenciaActorAuth,
   incidenciaSignedUrlRateLimiter,
   handleBatchIncidenciaSignedUrls
+);
+
+// ============================================================================
+// 1.I. CO-BRANDING B2B: LOGOTIPOS SECUNDARIOS DE CADENAS COMERCIALES (v1.8.0)
+//      Magic Bytes PNG/WebP <= 512 KB, Cero SVG/HTML, Bucket Privado + Rollback
+// ============================================================================
+const cadenaLogoWriteRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 25,
+});
+
+const cadenaLogoReadRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 120,
+});
+
+app.post(
+  '/api/cadenas-comerciales/:id/logo',
+  requireCoordinatorOrAdminAuth,
+  cadenaLogoWriteRateLimiter,
+  express.raw({
+    type: ['image/png', 'image/webp', 'image/svg+xml', 'application/octet-stream', '*/*'],
+    limit: '600kb',
+  }),
+  handleUploadCadenaLogo
+);
+
+app.delete(
+  '/api/cadenas-comerciales/:id/logo',
+  requireCoordinatorOrAdminAuth,
+  cadenaLogoWriteRateLimiter,
+  handleDeleteCadenaLogo
+);
+
+app.get(
+  '/api/cadenas-comerciales/:id/logo',
+  requireCadenaLogoViewerAuth,
+  cadenaLogoReadRateLimiter,
+  handleGetCadenaLogo
 );
 
 // ============================================================================

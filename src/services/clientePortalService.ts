@@ -5,10 +5,26 @@ export interface ClientePortalPdv {
   id: string;
   codigoCliente: string;
   nombreComercial: string;
+  cadenaId: string | null;
+  cadenaCodigo: string | null;
   cadenaNombre: string;
+  cadenaHasLogo: boolean;
+  cadenaLogoMimeType: string | null;
+  cadenaLogoUpdatedAt: string | null;
   ciudad: string;
   estado: string;
   sucursal: string | null;
+}
+
+export interface ClientePortalCadenaBranding {
+  id: string;
+  codigo: string;
+  nombre: string;
+  tipoCanal: string;
+  sucursal: string | null;
+  hasLogo: boolean;
+  logoMimeType: string | null;
+  logoUpdatedAt: string | null;
 }
 
 export interface ClientePortalActivacion {
@@ -28,6 +44,7 @@ export interface ClientePortalActivacion {
 
 export interface ClientePortalResumen {
   pdvs: ClientePortalPdv[];
+  cadenasBranding: ClientePortalCadenaBranding[];
   activaciones: ClientePortalActivacion[];
   kpis: {
     totalPdvs: number;
@@ -62,6 +79,7 @@ export function computeClienteKpis(
 export function mapClientePortalPayload(raw: unknown): ClientePortalResumen {
   const obj = (raw ?? {}) as Record<string, unknown>;
   const pdvRaw = Array.isArray(obj.pdvs_autorizados) ? obj.pdvs_autorizados : [];
+  const cadRaw = Array.isArray(obj.cadenas_branding) ? obj.cadenas_branding : [];
   const actRaw = Array.isArray(obj.activaciones) ? obj.activaciones : [];
 
   const pdvs: ClientePortalPdv[] = pdvRaw.map((r) => {
@@ -70,12 +88,50 @@ export function mapClientePortalPayload(raw: unknown): ClientePortalResumen {
       id: String(x.id || ''),
       codigoCliente: String(x.codigo_cliente || ''),
       nombreComercial: String(x.nombre_comercial || ''),
+      cadenaId: x.cadena_id ? String(x.cadena_id) : null,
+      cadenaCodigo: x.cadena_codigo ? String(x.cadena_codigo) : null,
       cadenaNombre: String(x.cadena_nombre || ''),
+      cadenaHasLogo: Boolean(x.cadena_has_logo),
+      cadenaLogoMimeType: x.cadena_logo_mime_type ? String(x.cadena_logo_mime_type) : null,
+      cadenaLogoUpdatedAt: x.cadena_logo_updated_at ? String(x.cadena_logo_updated_at) : null,
       ciudad: String(x.ciudad || ''),
       estado: String(x.estado || ''),
       sucursal: x.sucursal ? String(x.sucursal) : null,
     };
   });
+
+  const cadenasMap = new Map<string, ClientePortalCadenaBranding>();
+  for (const r of cadRaw) {
+    const x = r as Record<string, unknown>;
+    const id = String(x.id || '').trim();
+    if (!id) continue;
+    cadenasMap.set(id, {
+      id,
+      codigo: String(x.codigo || ''),
+      nombre: String(x.nombre || ''),
+      tipoCanal: String(x.tipo_canal || 'Supermercado'),
+      sucursal: x.sucursal ? String(x.sucursal) : null,
+      hasLogo: Boolean(x.has_logo),
+      logoMimeType: x.logo_mime_type ? String(x.logo_mime_type) : null,
+      logoUpdatedAt: x.logo_updated_at ? String(x.logo_updated_at) : null,
+    });
+  }
+
+  // Respaldo de compatibilidad si `cadenas_branding` aún no viene poblado pero el PDV referencia cadena
+  for (const pdv of pdvs) {
+    if (pdv.cadenaId && !cadenasMap.has(pdv.cadenaId)) {
+      cadenasMap.set(pdv.cadenaId, {
+        id: pdv.cadenaId,
+        codigo: pdv.cadenaCodigo || '',
+        nombre: pdv.cadenaNombre || 'Cadena Comercial',
+        tipoCanal: 'Supermercado',
+        sucursal: pdv.sucursal,
+        hasLogo: pdv.cadenaHasLogo,
+        logoMimeType: pdv.cadenaLogoMimeType,
+        logoUpdatedAt: pdv.cadenaLogoUpdatedAt,
+      });
+    }
+  }
 
   const activaciones: ClientePortalActivacion[] = actRaw.map((r) => {
     const x = r as Record<string, unknown>;
@@ -95,7 +151,12 @@ export function mapClientePortalPayload(raw: unknown): ClientePortalResumen {
     };
   });
 
-  return { pdvs, activaciones, kpis: computeClienteKpis(pdvs, activaciones) };
+  return {
+    pdvs,
+    cadenasBranding: Array.from(cadenasMap.values()),
+    activaciones,
+    kpis: computeClienteKpis(pdvs, activaciones),
+  };
 }
 
 /** Solo lectura: invoca la RPC `rpc_obtener_resumen_portal_cliente` (aislada por RLS/sucursal). */

@@ -34,7 +34,12 @@ export interface CadenaComercial {
   nombre: string;
   tipo_canal: string;
   sucursal: SucursalMaestro | null;
+  region_id?: string | null;
   activo: boolean;
+  logo_storage_path?: string | null;
+  logo_mime_type?: 'image/png' | 'image/webp' | string | null;
+  logo_updated_at?: string | null;
+  logo_updated_by?: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;

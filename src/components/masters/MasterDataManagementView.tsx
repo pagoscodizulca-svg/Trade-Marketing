@@ -5,6 +5,7 @@ import {
   Database,
   Edit3,
   FileSpreadsheet,
+  Image as ImageIcon,
   Loader2,
   MapPin,
   Plus,
@@ -18,6 +19,8 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { CadenaLogoUploaderModal } from '../admin/CadenaLogoUploaderModal';
+import { AnimatedTabContainer, SlidingTabRail } from '../ui/AnimatedTabContainer';
 import {
   cambiarEstadoCadenaComercial,
   cambiarEstadoClienteMaestro,
@@ -41,10 +44,11 @@ import type {
 type MasterSubTab = 'clientes' | 'cadenas' | 'zonas' | 'vendedores';
 
 export const MasterDataManagementView: React.FC = () => {
-  const { masterData, verifiedSucursal } = useApp();
+  const { masterData, verifiedSucursal, activeSucursal } = useApp();
   const isGlobalUser = verifiedSucursal === 'GLOBAL';
   const defaultRegionalBranch: SucursalMaestro =
-    verifiedSucursal === 'VALENCIA' ? 'VALENCIA' : 'ZULIA';
+    activeSucursal ??
+    (verifiedSucursal && verifiedSucursal !== 'GLOBAL' ? verifiedSucursal : 'ZULIA');
 
   const [subTab, setSubTab] = useState<MasterSubTab>('clientes');
   const [searchTerm, setSearchTerm] = useState('');
@@ -90,6 +94,7 @@ export const MasterDataManagementView: React.FC = () => {
   const [cadNombre, setCadNombre] = useState('');
   const [cadCanal, setCadCanal] = useState('Supermercado');
   const [cadSucursal, setCadSucursal] = useState<SucursalMaestro>(defaultRegionalBranch);
+  const [logoTargetCadena, setLogoTargetCadena] = useState<CadenaComercial | null>(null);
 
   // Modal Zona
   const [zonaModalOpen, setZonaModalOpen] = useState(false);
@@ -432,7 +437,7 @@ export const MasterDataManagementView: React.FC = () => {
                 FUENTE ÚNICA DE VERDAD · DATA MAESTRA
               </span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-300 border border-white/10">
-                Sede activa: {verifiedSucursal || 'GLOBAL'}
+                Sede activa: {activeSucursal || verifiedSucursal || 'GLOBAL'}
               </span>
             </div>
             <h2 className="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
@@ -441,7 +446,7 @@ export const MasterDataManagementView: React.FC = () => {
             </h2>
             <p className="text-xs text-zinc-400 mt-1 max-w-3xl">
               Administra la cartera real de clientes en PostgreSQL/Supabase con geocercas GPS configurables,
-              cadenas comerciales y zonas territoriales aisladas por sucursal (Zulia / Valencia).
+              cadenas comerciales (con Co-Branding B2B) y zonas territoriales aisladas por región (Zulia, Valencia, Centro, Oriente y Capital).
             </p>
           </div>
 
@@ -578,35 +583,37 @@ export const MasterDataManagementView: React.FC = () => {
       {/* Sub-pestañas + barra de filtros */}
       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
         <div className="p-4 border-b border-zinc-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Entidades Maestras">
-            {(
-              [
-                { id: 'clientes', label: 'Clientes / PDVs', count: filteredClientes.length, icon: <StoreIcon className="w-3.5 h-3.5" /> },
-                { id: 'cadenas', label: 'Cadenas Comerciales', count: filteredCadenas.length, icon: <Building2 className="w-3.5 h-3.5" /> },
-                { id: 'zonas', label: 'Zonas', count: filteredZonas.length, icon: <MapPin className="w-3.5 h-3.5" /> },
-                { id: 'vendedores', label: 'Vendedores', count: filteredVendedores.length, icon: <Users className="w-3.5 h-3.5" /> },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={subTab === t.id}
-                onClick={() => setSubTab(t.id)}
-                className={`px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition cursor-pointer ${
-                  subTab === t.id
-                    ? 'bg-red-600 text-white shadow'
-                    : 'bg-zinc-900 text-zinc-400 hover:text-white border border-white/5'
-                }`}
-              >
-                {t.icon}
-                <span>{t.label}</span>
-                <span className="px-1.5 py-0.5 rounded-md bg-black/30 font-mono text-[10px]">
-                  {t.count}
-                </span>
-              </button>
-            ))}
-          </div>
+          <SlidingTabRail
+            ariaLabel="Entidades Maestras"
+            activeTab={subTab}
+            onSelectTab={(next) => setSubTab(next)}
+            tabs={[
+              {
+                id: 'clientes',
+                label: 'Clientes / PDVs',
+                icon: <StoreIcon className="w-3.5 h-3.5 text-red-500" />,
+                badge: <span className="px-1.5 py-0.5 rounded-md bg-zinc-900 font-mono tabular-nums text-[10px]">{filteredClientes.length}</span>,
+              },
+              {
+                id: 'cadenas',
+                label: 'Cadenas Comerciales',
+                icon: <Building2 className="w-3.5 h-3.5 text-red-500" />,
+                badge: <span className="px-1.5 py-0.5 rounded-md bg-zinc-900 font-mono tabular-nums text-[10px]">{filteredCadenas.length}</span>,
+              },
+              {
+                id: 'zonas',
+                label: 'Zonas',
+                icon: <MapPin className="w-3.5 h-3.5 text-red-500" />,
+                badge: <span className="px-1.5 py-0.5 rounded-md bg-zinc-900 font-mono tabular-nums text-[10px]">{filteredZonas.length}</span>,
+              },
+              {
+                id: 'vendedores',
+                label: 'Vendedores',
+                icon: <Users className="w-3.5 h-3.5 text-red-500" />,
+                badge: <span className="px-1.5 py-0.5 rounded-md bg-zinc-900 font-mono tabular-nums text-[10px]">{filteredVendedores.length}</span>,
+              },
+            ]}
+          />
 
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative flex-1 min-w-[210px]">
@@ -674,7 +681,7 @@ export const MasterDataManagementView: React.FC = () => {
         </div>
 
         {/* Tabla dinámica según sub-pestaña */}
-        <div className="overflow-x-auto">
+        <AnimatedTabContainer tabKey={subTab} className="overflow-x-auto">
           {subTab === 'clientes' && (
             <table className="w-full text-left border-collapse text-xs">
               <thead>
@@ -786,6 +793,7 @@ export const MasterDataManagementView: React.FC = () => {
                   <th className="p-3">Cadena Comercial</th>
                   <th className="p-3">Tipo Canal</th>
                   <th className="p-3">Sede</th>
+                  <th className="p-3 text-center">Co-Branding (/cliente)</th>
                   <th className="p-3 text-center">Estado</th>
                   <th className="p-3 text-right">Acciones</th>
                 </tr>
@@ -793,19 +801,36 @@ export const MasterDataManagementView: React.FC = () => {
               <tbody className="divide-y divide-zinc-900 text-zinc-200">
                 {filteredCadenas.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-zinc-500 font-mono">
+                    <td colSpan={7} className="p-8 text-center text-zinc-500 font-mono">
                       No hay cadenas comerciales registradas todavía.
                     </td>
                   </tr>
                 )}
                 {filteredCadenas.map((c) => {
                   const busy = busyAction === `cadenas:${c.id}`;
+                  const hasLogo = Boolean(c.logo_storage_path && c.logo_mime_type);
                   return (
                     <tr key={c.id} className="hover:bg-zinc-900/50 transition">
                       <td className="p-3 font-mono font-bold text-white">{c.codigo}</td>
                       <td className="p-3 font-bold text-white">{c.nombre}</td>
                       <td className="p-3 text-zinc-300">{c.tipo_canal}</td>
                       <td className="p-3 font-mono text-[10px]">{c.sucursal || 'SIN SEDE'}</td>
+                      <td className="p-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setLogoTargetCadena(c)}
+                          data-testid={`btn-cadena-logo-${c.id}`}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                            hasLogo
+                              ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/50 hover:border-emerald-500'
+                              : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:border-red-500'
+                          }`}
+                          title="Subir, reemplazar o retirar logotipo secundario para /cliente"
+                        >
+                          <ImageIcon className="w-3 h-3 text-red-400" />
+                          <span>{hasLogo ? 'Logo Activo' : 'Subir Logo'}</span>
+                        </button>
+                      </td>
                       <td className="p-3 text-center">
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
@@ -819,6 +844,14 @@ export const MasterDataManagementView: React.FC = () => {
                       </td>
                       <td className="p-3 text-right">
                         <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setLogoTargetCadena(c)}
+                            title="Co-Branding / Logotipo secundario"
+                            className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-white/10 cursor-pointer"
+                          >
+                            <ImageIcon className="w-3.5 h-3.5 text-red-400" />
+                          </button>
                           <button
                             type="button"
                             onClick={() => openCadenaModal(c)}
@@ -984,7 +1017,7 @@ export const MasterDataManagementView: React.FC = () => {
               </tbody>
             </table>
           )}
-        </div>
+        </AnimatedTabContainer>
       </div>
 
       {/* Modal Cliente / PDV */}
@@ -1180,6 +1213,9 @@ export const MasterDataManagementView: React.FC = () => {
                   >
                     <option value="ZULIA">ZULIA</option>
                     <option value="VALENCIA">VALENCIA</option>
+                    <option value="CENTRO">CENTRO</option>
+                    <option value="ORIENTE">ORIENTE</option>
+                    <option value="CAPITAL">CAPITAL</option>
                   </select>
                 </div>
               )}
@@ -1265,6 +1301,9 @@ export const MasterDataManagementView: React.FC = () => {
                 >
                   <option value="ZULIA">ZULIA</option>
                   <option value="VALENCIA">VALENCIA</option>
+                  <option value="CENTRO">CENTRO</option>
+                  <option value="ORIENTE">ORIENTE</option>
+                  <option value="CAPITAL">CAPITAL</option>
                 </select>
               </div>
             )}
@@ -1352,6 +1391,9 @@ export const MasterDataManagementView: React.FC = () => {
                 >
                   <option value="ZULIA">ZULIA</option>
                   <option value="VALENCIA">VALENCIA</option>
+                  <option value="CENTRO">CENTRO</option>
+                  <option value="ORIENTE">ORIENTE</option>
+                  <option value="CAPITAL">CAPITAL</option>
                 </select>
               </div>
             )}
@@ -1457,6 +1499,9 @@ export const MasterDataManagementView: React.FC = () => {
                 >
                   <option value="ZULIA">ZULIA</option>
                   <option value="VALENCIA">VALENCIA</option>
+                  <option value="CENTRO">CENTRO</option>
+                  <option value="ORIENTE">ORIENTE</option>
+                  <option value="CAPITAL">CAPITAL</option>
                 </select>
               </div>
             )}
@@ -1480,6 +1525,28 @@ export const MasterDataManagementView: React.FC = () => {
           </form>
         </div>
       )}
+
+      <CadenaLogoUploaderModal
+        isOpen={Boolean(logoTargetCadena)}
+        cadena={
+          logoTargetCadena
+            ? {
+                id: logoTargetCadena.id,
+                codigo: logoTargetCadena.codigo,
+                nombre: logoTargetCadena.nombre,
+                sucursal: logoTargetCadena.sucursal,
+                hasLogo: Boolean(
+                  logoTargetCadena.logo_storage_path && logoTargetCadena.logo_mime_type
+                ),
+                logoMimeType: logoTargetCadena.logo_mime_type ?? null,
+              }
+            : null
+        }
+        onClose={() => setLogoTargetCadena(null)}
+        onUpdated={async () => {
+          await masterData.refrescar();
+        }}
+      />
     </div>
   );
 };

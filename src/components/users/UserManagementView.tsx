@@ -55,6 +55,7 @@ import {
   type RegionActivaItem,
   type SucursalPersonalBundle,
 } from '../admin/SucursalPersonalModule';
+import { AnimatedTabContainer, SlidingTabRail } from '../ui/AnimatedTabContainer';
 
 type RoleFilterValue = 'ALL' | ManagedUserRole;
 type StatusFilterValue = 'ALL' | 'ACTIVE' | 'SUSPENDED';
@@ -182,7 +183,7 @@ function getRoleBadgeStyle(role: ManagedUserRole): string {
     return 'bg-red-500/15 text-red-200 border-red-500/35';
   }
   if (role === 'contraloria') {
-    return 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35';
+    return 'bg-zinc-900 text-zinc-200 border-zinc-700';
   }
   if (role === 'coordinacion') {
     return 'bg-amber-500/15 text-amber-200 border-amber-500/30';
@@ -191,7 +192,7 @@ function getRoleBadgeStyle(role: ManagedUserRole): string {
     return 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30';
   }
   if (role === 'chofer') {
-    return 'bg-blue-500/15 text-blue-200 border-blue-500/30';
+    return 'bg-zinc-800/90 text-zinc-200 border-zinc-700';
   }
   return 'bg-zinc-800/90 text-zinc-200 border-white/10';
 }
@@ -687,37 +688,27 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       {/* Conmutador Ejecutivo Super Admin: 5 Módulos por Sucursal vs Directorio Corporativo IAM Global */}
       <div
         data-testid="super-admin-personal-switcher"
-        className="rounded-2xl bg-zinc-950/95 border border-white/10 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        className="rounded-2xl bg-zinc-950/95 border border-white/10 px-4 pt-2 pb-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
       >
-        <div className="inline-flex flex-wrap rounded-xl bg-black border border-white/10 p-1 gap-1">
-          <button
-            type="button"
-            data-testid="tab-modulos-sucursal"
-            onClick={() => setSectionTab('modulos_sucursal')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              sectionTab === 'modulos_sucursal'
-                ? 'bg-red-600 text-white shadow'
-                : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <Building2 className="w-3.5 h-3.5" />
-            <span>Módulos de Personal por Sucursal (5 Regiones)</span>
-          </button>
-
-          <button
-            type="button"
-            data-testid="tab-directorio-iam"
-            onClick={() => setSectionTab('directorio_iam')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              sectionTab === 'directorio_iam'
-                ? 'bg-red-600 text-white shadow'
-                : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Directorio Corporativo IAM (Global)</span>
-          </button>
-        </div>
+        <SlidingTabRail
+          ariaLabel="Secciones de Personal e IAM"
+          activeTab={sectionTab}
+          onSelectTab={(next) => setSectionTab(next)}
+          tabs={[
+            {
+              id: 'modulos_sucursal',
+              label: 'Módulos de Personal por Sucursal (5 Regiones)',
+              icon: <Building2 className="w-3.5 h-3.5 text-red-500" />,
+              testId: 'tab-modulos-sucursal',
+            },
+            {
+              id: 'directorio_iam',
+              label: 'Directorio Corporativo IAM (Global)',
+              icon: <ShieldCheck className="w-3.5 h-3.5 text-red-500" />,
+              testId: 'tab-directorio-iam',
+            },
+          ]}
+        />
 
         <button
           type="button"
@@ -733,6 +724,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
         </button>
       </div>
 
+      <AnimatedTabContainer tabKey={sectionTab}>
       {sectionTab === 'modulos_sucursal' ? (
         <SucursalPersonalModule
           viewerIamRole={effectiveIamRole ?? 'super_admin'}
@@ -1270,6 +1262,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       </div>
         </>
       )}
+      </AnimatedTabContainer>
 
       {/* Modal: Confirmación de Cambio de Rol */}
       {typeof document !== 'undefined' &&

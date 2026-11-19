@@ -40,6 +40,12 @@ export interface DocxReportInput {
   signatures?: string[];
 }
 
+export const CORPORATE_PRINT_PALETTE = {
+  paperBgHex: '#FFFFFF',
+  primaryInkHex: '#09090B',
+  headerAccentHex: '#DC2626',
+} as const;
+
 /** Neutraliza `=`, `+`, `-`, `@`, TAB y CR iniciales para que Excel los trate como texto literal. */
 export function neutralizeFormulaInjection(value: unknown): string {
   const text = String(value ?? '');
