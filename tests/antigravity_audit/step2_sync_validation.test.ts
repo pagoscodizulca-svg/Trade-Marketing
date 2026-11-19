@@ -1,6 +1,7 @@
 ﻿import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { Request, Response } from 'express';
@@ -92,7 +93,11 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
   }> = [];
 
   t.after(async () => {
-    const outDir = path.resolve('tests/antigravity_audit/results');
+    const useTmpArtifactDir =
+      Boolean(process.env.NODE_TEST_CONTEXT) && process.env.WRITE_AUDIT_ARTIFACTS !== '1';
+    const outDir = useTmpArtifactDir
+      ? path.join(os.tmpdir(), 'codizulca-antigravity-audit')
+      : path.resolve('tests/antigravity_audit/results');
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(
       path.join(outDir, 'step2_sync_results.json'),
