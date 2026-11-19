@@ -17,6 +17,18 @@ import type { VerifiedAuthProfile } from './services/authService';
 import { DegustacionNotificationItem } from './types';
 import { SyncStatusBadge } from './components/common/SyncStatusBadge';
 import { useLiveVenezuelaClock } from './utils/weekCalendar';
+import { pathForTab, resolveRoute } from './utils/appRouter';
+
+const PopAndIncidenciasView = lazy(() =>
+  import('./components/pop/PopAndIncidenciasView').then((m) => ({
+    default: m.PopAndIncidenciasView,
+  }))
+);
+const ClienteReadOnlyPortalView = lazy(() =>
+  import('./components/cliente/ClienteReadOnlyPortalView').then((m) => ({
+    default: m.ClienteReadOnlyPortalView,
+  }))
+);
 
 // Carga diferida por módulo: reduce el bundle inicial (jsPDF y vistas pesadas se descargan bajo demanda)
 const ContraloriaView = lazy(() => import('./components/contraloria/ContraloriaView').then((m) => ({ default: m.ContraloriaView })));
@@ -46,11 +58,11 @@ function isPromotoraPortalPath(pathname?: string): boolean {
   return cleanPath === '/portal' || cleanPath.startsWith('/portal/');
 }
 
-function isUserManagementPath(pathname?: string): boolean {
-  const rawPath =
-    pathname ?? (typeof window !== 'undefined' ? window.location.pathname : '');
-  const cleanPath = rawPath.replace(/\/+$/, '').toLowerCase();
-  return cleanPath === '/admin/usuarios' || cleanPath === '/usuarios';
+function navigateToTabPath(tab: MainNavTab): void {
+  if (typeof window === 'undefined') return;
+  const target = pathForTab(tab);
+  const current = window.location.pathname.replace(/\/+$/, '').toLowerCase() || '/';
+  if (current !== target) window.history.pushState({}, '', target);
 }
 
 const MainAppContent: React.FC<{
@@ -61,35 +73,29 @@ const MainAppContent: React.FC<{
   const defaultHomeTab: MainNavTab =
     authProfile.iamRole === 'contraloria' ? 'contraloria' : 'promotoras';
 
+  const initialRoute = resolveRoute(typeof window !== 'undefined' ? window.location.pathname : '/');
   const [activeTab, setActiveTabState] = useState<MainNavTab>(() =>
-    isUserManagementPath() ? 'gestion_usuarios' : defaultHomeTab
+    initialRoute.kind === 'tab' ? initialRoute.tab : defaultHomeTab
   );
 
   const setActiveTab = useCallback((nextTab: MainNavTab) => {
     setActiveTabState(nextTab);
-    if (typeof window !== 'undefined') {
-      const currentPath = window.location.pathname.replace(/\/+$/, '').toLowerCase();
-      if (nextTab === 'gestion_usuarios' && currentPath !== '/admin/usuarios') {
-        window.history.pushState({}, '', '/admin/usuarios');
-      } else if (
-        nextTab !== 'gestion_usuarios' &&
-        (currentPath === '/admin/usuarios' || currentPath === '/usuarios')
-      ) {
-        window.history.pushState({}, '', '/');
-      }
-    }
+    navigateToTabPath(nextTab);
   }, []);
 
   useEffect(() => {
+    // URL canónica al entrar por "/"
+    if (typeof window !== 'undefined' && resolveRoute(window.location.pathname).kind === 'home') {
+      window.history.replaceState({}, '', pathForTab(activeTab));
+    }
     const syncTabFromUrl = () => {
-      if (isUserManagementPath()) {
-        setActiveTabState('gestion_usuarios');
-      } else {
-        setActiveTabState((prev) => (prev === 'gestion_usuarios' ? defaultHomeTab : prev));
-      }
+      const r = resolveRoute(window.location.pathname);
+      if (r.kind === 'tab') setActiveTabState(r.tab);
+      else if (r.kind === 'home') setActiveTabState(defaultHomeTab);
     };
     window.addEventListener('popstate', syncTabFromUrl);
     return () => window.removeEventListener('popstate', syncTabFromUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultHomeTab]);
   const liveClock = useLiveVenezuelaClock();
   const {
@@ -125,6 +131,7 @@ const MainAppContent: React.FC<{
     promotoras: { title: 'Módulo 1 · Promotoras y Fuerza de Ventas (FDV)', badge: 'Campo & Merchandising' },
     llenado_cronograma: { title: 'Módulo 2 · Cronograma y Matriz de Productos', badge: 'Llenado por Lote' },
     maestros: { title: 'Data Maestra · Clientes, Cadenas Comerciales y Zonas', badge: 'Fuente Única' },
+    pop_incidencias: { title: 'Operación Trade · Material POP e Incidencias en PDV', badge: 'POP & SLA' },
     contraloria: { title: 'Módulo 3 · Contraloría y Auditoría Interna', badge: 'Conciliación & Paz y Salvo' },
     kpis_trazabilidad: { title: 'Módulo 4 · KPIs y Trazabilidad Ejecutiva', badge: 'Torre de Control' },
     gestion_usuarios: { title: 'Seguridad IAM · Gestión de Usuarios Corporativos', badge: 'Super Admin' },
@@ -293,6 +300,19 @@ const MainAppContent: React.FC<{
               </RoleGuard>
             )}
 
+            {/* Operación Trade: Material POP e Incidencias */}
+            {activeTab === 'pop_incidencias' && (
+              <RoleGuard
+                allowedRoles={MODULE_ALLOWED_ROLES.pop_incidencias}
+                variant="route"
+                deniedTitle="Material POP e Incidencias"
+                deniedDescription="Este módulo está reservado para Coordinación Trade, Contraloría (lectura) y Super Admin."
+                onReturnHome={() => setActiveTab(defaultHomeTab)}
+              >
+                <PopAndIncidenciasView />
+              </RoleGuard>
+            )}
+
             {/* Modulo 3: Contraloría */}
             {activeTab === 'contraloria' && (
               <RoleGuard
@@ -391,15 +411,31 @@ export default function App() {
 
   return (
     <TradeAuthGate>
-      {({ profile, isLocalDevWorkstation, onSignOut }) => (
-        <AppProvider verifiedProfile={profile}>
-          <MainAppContent
-            authProfile={profile}
-            isLocalDevWorkstation={isLocalDevWorkstation}
-            onSignOut={onSignOut}
-          />
-        </AppProvider>
-      )}
+      {({ profile, isLocalDevWorkstation, onSignOut }) => {
+        const route = resolveRoute(window.location.pathname);
+        if (route.kind === 'standalone' && route.route === 'cliente') {
+          return (
+            <Suspense
+              fallback={
+                <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center text-sm font-mono">
+                  Cargando Portal Cliente...
+                </div>
+              }
+            >
+              <ClienteReadOnlyPortalView onSignOut={() => void onSignOut()} />
+            </Suspense>
+          );
+        }
+        return (
+          <AppProvider verifiedProfile={profile}>
+            <MainAppContent
+              authProfile={profile}
+              isLocalDevWorkstation={isLocalDevWorkstation}
+              onSignOut={onSignOut}
+            />
+          </AppProvider>
+        );
+      }}
     </TradeAuthGate>
   );
 }

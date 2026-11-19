@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ruta-degustacion/package-lock.json
+
+      - name: Instalar dependencias (raíz)
+        run: npm ci
+
+      - name: Instalar dependencias (ruta-degustacion)
+        run: npm --prefix ruta-degustacion ci
+
+      - name: Tipado (tsc) — raíz
+        run: npx tsc --noEmit
+
+      - name: Tipado (tsc) — ruta-degustacion
+        run: npm --prefix ruta-degustacion run lint
+
+      - name: Auditoría de dependencias de producción (alta o crítica)
+        run: npm run audit:prod
+
+      - name: Certificador estático de esquema SQL
+        run: npx tsx scripts/certifySchemaProduction.ts --mode static
+
+      - name: Pruebas automatizadas (sin red externa)
+        run: npm test
+
+      - name: Build completo (Torre + logística + servidor)
+        run: npm run build:all
+        env:
+          # Solo valores públicos de marcador: el build no necesita credenciales reales
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+
+  # Reconstrucción limpia de las migraciones en un Postgres/Supabase local real (P-06).
+  # Informativo: las migraciones históricas 20261029/20261112/20261116 repiten versión y
+  # `supabase db reset` las rechaza hasta que se renombren (requiere confirmar que no se
+  # aplicaron en remoto). Se vuelve bloqueante al resolver ese punto.
+  db-migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Levantar Supabase local y reconstruir esquema
+        run: |
+          supabase start --exclude gotrue,realtime,storage-api,imgproxy,edge-runtime,logflare,vector,studio,mailpit
+          supabase db reset --local

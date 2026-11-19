@@ -660,6 +660,18 @@ export const PromotoraRutaPortalView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {(pendingOffline.length > 0 || !isOnline) && (
+              <button
+                type="button"
+                onClick={() => void flushOfflineQueue(true)}
+                disabled={!isOnline}
+                title="Registros pendientes de sincronizar (cola offline). Toca para reintentar."
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-mono font-bold border bg-amber-950/70 text-amber-300 border-amber-700/60 cursor-pointer disabled:opacity-60"
+              >
+                <WifiOff className="w-3 h-3" />
+                {isOnline ? 'Sincronizar' : 'Offline'} · {pendingOffline.length}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void refreshRoutes()}
@@ -849,6 +861,13 @@ export const PromotoraRutaPortalView: React.FC = () => {
                     </div>
                   </div>
 
+                  {geoFeedback[ruta.id] && (
+                    <p className="mt-2.5 text-xs font-mono text-amber-200 bg-amber-950/40 border border-amber-700/40 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 shrink-0" />
+                      <span>{geoFeedback[ruta.id]}</span>
+                    </p>
+                  )}
+
                   {ruta.observaciones && (
                     <p className="mt-2.5 text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800/80 rounded-xl px-3 py-2">
                       {ruta.observaciones}
@@ -897,6 +916,110 @@ export const PromotoraRutaPortalView: React.FC = () => {
           </div>
         )}
       </main>
+
+      {executionTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-3"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Formulario de ejecución en punto de venta"
+        >
+          <form
+            onSubmit={handleSubmitExecution}
+            noValidate
+            className="w-full max-w-lg rounded-2xl bg-zinc-950 border border-white/15 p-5 space-y-3 max-h-[92vh] overflow-y-auto"
+          >
+            <h2 className="text-base font-extrabold text-white">
+              Ejecución en PDV · {executionTarget.cliente_nombre}
+            </h2>
+            <p className="text-[11px] text-zinc-400">
+              Completa el reporte antes de finalizar. Se registrará tu ubicación GPS y la distancia al PDV.
+            </p>
+
+            <label className="block text-xs font-bold text-zinc-200">
+              Lote del producto
+              <input
+                value={execForm.lote}
+                maxLength={60}
+                onChange={(e) => setExecForm((p) => ({ ...p, lote: e.target.value }))}
+                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
+              />
+            </label>
+            <label className="block text-xs font-bold text-zinc-200">
+              Fecha de vencimiento
+              <input
+                type="date"
+                value={execForm.vencimiento}
+                onChange={(e) => setExecForm((p) => ({ ...p, vencimiento: e.target.value }))}
+                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
+              />
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  ['abiertas', 'Unid. abiertas'],
+                  ['muestras', 'Muestras'],
+                  ['ventas', 'Ventas asist.'],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key} className="block text-[11px] font-bold text-zinc-200">
+                  {label}
+                  <input
+                    type="number"
+                    min={0}
+                    inputMode="numeric"
+                    value={execForm[key]}
+                    onChange={(e) => setExecForm((p) => ({ ...p, [key]: e.target.value }))}
+                    className="mt-1 w-full px-2 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
+                  />
+                </label>
+              ))}
+            </div>
+            <label className="block text-xs font-bold text-zinc-200">
+              Observaciones
+              <textarea
+                rows={2}
+                maxLength={500}
+                value={execForm.observaciones}
+                onChange={(e) => setExecForm((p) => ({ ...p, observaciones: e.target.value }))}
+                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
+              />
+            </label>
+            <label className="block text-xs font-bold text-zinc-200">
+              Justificación si estás fuera de la geocerca (opcional)
+              <input
+                value={execForm.motivoFuera}
+                maxLength={200}
+                onChange={(e) => setExecForm((p) => ({ ...p, motivoFuera: e.target.value }))}
+                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
+              />
+            </label>
+
+            {execError && (
+              <div role="alert" className="rounded-xl bg-red-950/60 border border-red-500/45 px-3 py-2 text-xs text-red-100">
+                {execError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setExecutionTarget(null)}
+                className="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs font-bold text-zinc-200 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={processingRutaId === executionTarget.id}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold cursor-pointer"
+              >
+                {processingRutaId === executionTarget.id ? 'Enviando...' : 'Finalizar y enviar'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

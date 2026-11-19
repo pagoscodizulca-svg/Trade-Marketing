@@ -204,7 +204,9 @@ function createSupabaseIncidenciasGateway(
   actor: AuthenticatedServerUser
 ): IncidenciasEvidencesGateway | null {
   const adminClient = getAdminSupabaseClient();
-  const userClient = createUserScopedSupabaseClient(actor.accessToken);
+  const userClient = actor.accessToken
+    ? createUserScopedSupabaseClient(actor.accessToken)
+    : null;
   if (!adminClient || !userClient) return null;
 
   return {

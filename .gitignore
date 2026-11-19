@@ -16,3 +16,5 @@ ruta-degustacion/.env.*
 !ruta-degustacion/.env.example
 supabase/.temp/
 supabase/.temp/*
+
+dist-server/

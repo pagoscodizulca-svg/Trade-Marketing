@@ -546,38 +546,101 @@ function normalizeStaffLoginEmail(rawEmail: string, staffName: string, staffId: 
   return `${safeLocal}@promotoras.codizulca.local`;
 }
 
-/**
- * Limitador de tasa en memoria por ventana deslizante para proteger endpoints sensibles.
- */
-export function createRateLimiter(options: { windowMs: number; maxRequests: number }) {
+export interface RateLimitStore {
+  /** Registra un intento y devuelve si sigue dentro del límite. Puede lanzar si el almacén falla. */
+  hit(key: string, windowMs: number, maxRequests: number): Promise<{ allowed: boolean }>;
+}
+
+/** Almacén en memoria (respaldo local / pruebas). No es compartido entre instancias. */
+export function createMemoryRateLimitStore(): RateLimitStore {
   const hits = new Map<string, number[]>();
+  return {
+    async hit(key, windowMs, maxRequests) {
+      const now = Date.now();
+      const windowStart = now - windowMs;
+      const recent = (hits.get(key) || []).filter((ts) => ts > windowStart);
+      if (recent.length >= maxRequests) {
+        hits.set(key, recent);
+        return { allowed: false };
+      }
+      recent.push(now);
+      hits.set(key, recent);
+
+      if (hits.size > 500) {
+        for (const [entryKey, timestamps] of hits.entries()) {
+          const filtered = timestamps.filter((ts) => ts > windowStart);
+          if (filtered.length === 0) hits.delete(entryKey);
+          else hits.set(entryKey, filtered);
+        }
+      }
+      return { allowed: true };
+    },
+  };
+}
+
+/**
+ * Almacén distribuido: contadores de ventana fija en PostgreSQL vía `public.rpc_rate_limit_hit`
+ * (solo `service_role`). Compartido por todas las instancias del servidor.
+ */
+export function createPostgresRateLimitStore(): RateLimitStore | null {
+  const admin = getAdminSupabaseClient();
+  if (!admin) return null;
+  return {
+    async hit(key, windowMs, maxRequests) {
+      const windowSeconds = Math.max(1, Math.min(3600, Math.ceil(windowMs / 1000)));
+      const { data, error } = await admin.rpc('rpc_rate_limit_hit', {
+        p_key: key.slice(0, 300),
+        p_window_seconds: windowSeconds,
+        p_max_requests: Math.max(1, Math.min(100000, maxRequests)),
+      });
+      if (error || !data) {
+        throw new Error(error?.message || 'rate limit store unavailable');
+      }
+      return { allowed: (data as { allowed?: boolean }).allowed !== false };
+    },
+  };
+}
+
+/**
+ * Limitador de tasa para endpoints sensibles. Usa PostgreSQL cuando el servidor tiene credenciales
+ * de servicio (varias instancias comparten contadores) y degrada a memoria si el almacén falla.
+ */
+export function createRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  /** Prefijo de espacio de nombres del bucket (evita colisiones entre limitadores). */
+  name?: string;
+  /** Almacén inyectable (pruebas). Por defecto: PostgreSQL con respaldo en memoria. */
+  store?: RateLimitStore;
+}) {
+  const fallback = createMemoryRateLimitStore();
+  let primary: RateLimitStore | null | undefined = options.store;
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    const now = Date.now();
-    const key = `${req.authUser?.id || req.ip || 'anon'}:${req.path}`;
-    const windowStart = now - options.windowMs;
-    const recent = (hits.get(key) || []).filter((ts) => ts > windowStart);
+    const key = `${options.name || 'rl'}:${req.authUser?.id || req.ip || 'anon'}:${req.path}`;
 
-    if (recent.length >= options.maxRequests) {
-      res.status(429).json({
-        error: 'Demasiadas solicitudes en poco tiempo. Espere unos segundos e intente de nuevo.',
-        code: 'RATE_LIMIT_EXCEEDED',
-      });
-      return;
-    }
-
-    recent.push(now);
-    hits.set(key, recent);
-
-    if (hits.size > 500) {
-      for (const [entryKey, timestamps] of hits.entries()) {
-        const filtered = timestamps.filter((ts) => ts > windowStart);
-        if (filtered.length === 0) hits.delete(entryKey);
-        else hits.set(entryKey, filtered);
+    void (async () => {
+      if (primary === undefined) primary = createPostgresRateLimitStore();
+      let allowed = true;
+      try {
+        const result = primary
+          ? await primary.hit(key, options.windowMs, options.maxRequests)
+          : await fallback.hit(key, options.windowMs, options.maxRequests);
+        allowed = result.allowed;
+      } catch {
+        const result = await fallback.hit(key, options.windowMs, options.maxRequests);
+        allowed = result.allowed;
       }
-    }
 
-    next();
+      if (!allowed) {
+        res.status(429).json({
+          error: 'Demasiadas solicitudes en poco tiempo. Espere unos segundos e intente de nuevo.',
+          code: 'RATE_LIMIT_EXCEEDED',
+        });
+        return;
+      }
+      next();
+    })().catch(next);
   };
 }
 

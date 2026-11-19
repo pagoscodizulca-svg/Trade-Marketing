@@ -43,6 +43,16 @@ function isLocalLoopbackHost(): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
 }
 
+function isClienteProfile(p: VerifiedAuthProfile | null | undefined): boolean {
+  return Boolean(p && (p.iamRole === 'cliente' || p.appRole === 'cliente'));
+}
+
+function isOnClienteRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+  return path === '/cliente' || path.startsWith('/cliente/');
+}
+
 /**
  * Guardia de Acceso Zero Trust para la Torre de Control de Trade Marketing (`/`):
  * - En producción (`import.meta.env.PROD` / Render): exige obligatoriamente sesión Supabase Auth
@@ -94,6 +104,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(data.session);
       if (!active) return;
+      if (isClienteProfile(resolved) && !isOnClienteRoute()) {
+        window.location.replace('/cliente');
+        return;
+      }
       if (
         resolved?.appRole === 'promotora' ||
         Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
@@ -116,6 +130,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(session);
       if (!active) return;
+      if (isClienteProfile(resolved) && !isOnClienteRoute()) {
+        window.location.replace('/cliente');
+        return;
+      }
       if (
         resolved?.appRole === 'promotora' ||
         Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
@@ -149,6 +167,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
         password
       );
       setPassword('');
+      if (isClienteProfile(authenticated) && !isOnClienteRoute()) {
+        window.location.replace('/cliente');
+        return;
+      }
       if (authenticated.appRole === 'promotora') {
         window.location.replace('/portal');
         return;
@@ -380,7 +402,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     );
   }
 
-  if (!profile.canAccessTorreControl) {
+  if (!profile.canAccessTorreControl && !(isClienteProfile(profile) && isOnClienteRoute())) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/30 p-6 space-y-4 text-center">

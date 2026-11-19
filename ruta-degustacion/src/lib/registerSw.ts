@@ -16,7 +16,7 @@ export function registerServiceWorker(): void {
 
   const registrar = () => {
     navigator.serviceWorker
-      .register('/sw.js', { scope: '/' })
+      .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
       .then((reg) => {
         const avisar = () => window.dispatchEvent(new CustomEvent(EVENTO_ACTUALIZACION_SW, { detail: reg }));
         if (reg.waiting && navigator.serviceWorker.controller) avisar();

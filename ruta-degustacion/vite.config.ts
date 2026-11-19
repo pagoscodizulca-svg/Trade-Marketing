@@ -3,7 +3,9 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig({
+// B-09: en producción la PWA se publica bajo `/logistica/` desde el mismo Express que la Torre de Control.
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? '/logistica/' : '/',
   plugins: [
     react(),
     tailwindcss(),
@@ -25,4 +27,4 @@ export default defineConfig({
   ],
   server: { host: true, port: 5174, strictPort: true },
   preview: { host: true, port: 4174, strictPort: true },
-});
+}));

@@ -37,7 +37,9 @@ cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
 
 // App de una sola página: cualquier navegación sin red se resuelve con el index.html precacheado.
-registerRoute(new NavigationRoute(createHandlerBoundToURL('/index.html')));
+// El alcance del SW (`/` en desarrollo, `/logistica/` en producción) define la ruta del App Shell.
+const SW_SCOPE_URL = (self as unknown as { registration: { scope: string } }).registration.scope;
+registerRoute(new NavigationRoute(createHandlerBoundToURL(new URL('index.html', SW_SCOPE_URL).pathname)));
 
 // Fuentes de Google (hoja CSS y archivos): se guardan al verlas por primera vez y se sirven offline.
 registerRoute(

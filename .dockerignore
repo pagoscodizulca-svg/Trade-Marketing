@@ -1,0 +1,23 @@
+.git
+.github
+node_modules
+ruta-degustacion/node_modules
+dist
+dist-server
+ruta-degustacion/dist
+coverage
+*.log
+.DS_Store
+
+# Secretos: jamás entran al contexto de build
+.env
+.env.*
+!.env.example
+src/config/env.js
+ruta-degustacion/.env
+ruta-degustacion/.env.*
+!ruta-degustacion/.env.example
+qa-sync-suite/.env.test
+
+tests
+supabase/.temp

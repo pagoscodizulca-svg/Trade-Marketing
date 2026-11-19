@@ -301,7 +301,7 @@ test('HITO 2 — RutaDegustación Zero-Trust (S-06), Ingesta FDV Idempotente (N-
       sucursal: 'ZULIA',
       is_active: true,
     });
-    const okRes = await verifyRutaProfileAccess(okMock.client, choferSession);
+    const okRes = await verifyRutaProfileAccess(okMock.client as never, choferSession);
     assert.equal(okRes.ok, true);
     if (okRes.ok) {
       assert.equal(okRes.user.role, 'chofer');
@@ -318,7 +318,7 @@ test('HITO 2 — RutaDegustación Zero-Trust (S-06), Ingesta FDV Idempotente (N-
       sucursal: 'ZULIA',
       is_active: true,
     });
-    const deniedRes = await verifyRutaProfileAccess(deniedRoleMock.client, choferSession);
+    const deniedRes = await verifyRutaProfileAccess(deniedRoleMock.client as never, choferSession);
     assert.equal(deniedRes.ok, false);
     if (!deniedRes.ok) assert.equal(deniedRes.code, 'FORBIDDEN_ROLE');
     assert.equal(deniedRoleMock.wasSignedOut(), true, 'Rol no autorizado debe ejecutar signOut inmediato');
@@ -331,7 +331,7 @@ test('HITO 2 — RutaDegustación Zero-Trust (S-06), Ingesta FDV Idempotente (N-
       sucursal: 'ZULIA',
       is_active: false,
     });
-    const suspRes = await verifyRutaProfileAccess(suspendedMock.client, choferSession);
+    const suspRes = await verifyRutaProfileAccess(suspendedMock.client as never, choferSession);
     assert.equal(suspRes.ok, false);
     if (!suspRes.ok) assert.equal(suspRes.code, 'ACCOUNT_SUSPENDED');
     assert.equal(suspendedMock.wasSignedOut(), true, 'Cuenta suspendida debe ejecutar signOut inmediato');

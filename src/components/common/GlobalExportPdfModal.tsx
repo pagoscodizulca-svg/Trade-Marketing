@@ -137,6 +137,69 @@ export const GlobalExportPdfModal: React.FC<GlobalExportPdfModalProps> = ({
     setTimeout(() => setDownloadedModule(null), 3000);
   };
 
+  const buildContraloriaSheets = () => [
+    {
+      name: 'Solicitudes',
+      headers: ['ID', 'Tope aprobado (USD)', 'Costo estimado (USD)'],
+      rows: requests.map((r) => [r.id, r.approvedBudgetCapUsd, r.estimatedCostUsd]),
+      currencyColumns: [1, 2],
+    },
+    {
+      name: 'Conciliación',
+      headers: ['Entregadas', 'Degustadas', 'Devueltas', 'Diferencia'],
+      rows: [
+        [
+          reconciliation.deliveredUnits,
+          reconciliation.degustatedUnitsReported,
+          reconciliation.returnedRemanentUnits,
+          reconciliation.deliveredUnits -
+            (reconciliation.degustatedUnitsReported + reconciliation.returnedRemanentUnits),
+        ],
+      ],
+    },
+  ];
+
+  const handleXlsxModule3 = async () => {
+    const { downloadExecutiveWorkbookXlsx } = await import('../../utils/excelWordExport');
+    await downloadExecutiveWorkbookXlsx(
+      {
+        title: 'Contraloría Interna · Conciliación',
+        generatedBy: 'Torre de Control',
+        sheets: buildContraloriaSheets(),
+      },
+      `contraloria-${new Date().toISOString().slice(0, 10)}`
+    );
+  };
+
+  const handleDocxModule3 = async () => {
+    const { downloadDocxReport } = await import('../../utils/excelWordExport');
+    await downloadDocxReport(
+      {
+        title: 'Acta de Conciliación · Contraloría Interna',
+        metadata: [
+          ['Fecha de emisión', new Date().toLocaleDateString('es-VE')],
+          ['Unidades entregadas', String(reconciliation.deliveredUnits)],
+          ['Unidades degustadas', String(reconciliation.degustatedUnitsReported)],
+          ['Unidades devueltas', String(reconciliation.returnedRemanentUnits)],
+        ],
+        sections: [
+          {
+            heading: 'Solicitudes',
+            table: {
+              headers: ['ID', 'Tope aprobado (USD)', 'Costo estimado (USD)'],
+              rows: requests.map((r) => [
+                String(r.id),
+                r.approvedBudgetCapUsd.toFixed(2),
+                r.estimatedCostUsd.toFixed(2),
+              ]),
+            },
+          },
+        ],
+      },
+      `acta-contraloria-${new Date().toISOString().slice(0, 10)}`
+    );
+  };
+
   const handlePrintModule3 = () => {
     onClose();
     triggerBrowserPrint('CODIZULCA - Módulo 3: Contraloría y Conciliación');
@@ -225,6 +288,8 @@ export const GlobalExportPdfModal: React.FC<GlobalExportPdfModalProps> = ({
       icon: Scale,
       onDownload: handleDownloadModule3,
       onPrint: handlePrintModule3,
+      onXlsx: handleXlsxModule3,
+      onDocx: handleDocxModule3,
       isDownloaded: downloadedModule === 'contraloria',
     },
     {
@@ -311,6 +376,24 @@ export const GlobalExportPdfModal: React.FC<GlobalExportPdfModalProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
+                  {'onXlsx' in m && m.onXlsx && (
+                    <button
+                      type="button"
+                      onClick={() => void m.onXlsx()}
+                      className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold cursor-pointer"
+                    >
+                      Excel
+                    </button>
+                  )}
+                  {'onDocx' in m && m.onDocx && (
+                    <button
+                      type="button"
+                      onClick={() => void m.onDocx()}
+                      className="px-3 py-2 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold cursor-pointer"
+                    >
+                      Word
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={m.onPrint}

@@ -401,6 +401,8 @@ export const ExecutiveDashboard: React.FC = () => {
     requests,
     reconciliation,
     tarifarioCostos,
+    presupuestosTrade,
+    campanasTrade,
     module1Bundle,
     isLoadingSupabase,
     createRequisition,
@@ -1361,8 +1363,18 @@ export const ExecutiveDashboard: React.FC = () => {
   const avgCpc =
     totalContacts > 0 ? (weeklyCostSummary.totalEvalMonthCost / totalContacts).toFixed(3) : '0.000';
 
-  const totalApprovedBudget = requests.reduce((acc, r) => acc + r.approvedBudgetCapUsd, 0);
-  const totalExecutedBudget = requests.reduce((acc, r) => acc + r.estimatedCostUsd, 0);
+  // M-02: KPIs financieros conectados a `presupuestos_trade` (Contraloría); respaldo en `requests`
+  const activePresupuestos = presupuestosTrade.filter((p) => p.activo);
+  const hasRealBudgets = activePresupuestos.length > 0;
+  const totalApprovedBudget = hasRealBudgets
+    ? activePresupuestos.reduce((acc, p) => acc + (p.monto_asignado_usd || 0), 0)
+    : requests.reduce((acc, r) => acc + r.approvedBudgetCapUsd, 0);
+  const totalExecutedBudget = hasRealBudgets
+    ? activePresupuestos.reduce(
+        (acc, p) => acc + (p.monto_ejecutado_usd || 0) + (p.monto_comprometido_usd || 0),
+        0
+      )
+    : requests.reduce((acc, r) => acc + r.estimatedCostUsd, 0);
   const budgetExecutionPct =
     totalApprovedBudget > 0 ? Math.round((totalExecutedBudget / totalApprovedBudget) * 100) : 0;
 
@@ -1454,6 +1466,82 @@ export const ExecutiveDashboard: React.FC = () => {
   };
 
   // Preparar filas para exportación PDF Ejecutiva del Módulo 4
+  const buildFinancialExportSheets = () => [
+    {
+      name: 'Resumen KPIs',
+      headers: ['Indicador', 'Valor'],
+      rows: [
+        ['Presupuesto aprobado (USD)', totalApprovedBudget],
+        ['Presupuesto ejecutado + comprometido (USD)', totalExecutedBudget],
+        ['Ejecución presupuestaria (%)', budgetExecutionPct],
+        ['Contactos directos', totalContacts],
+        ['Ventas asistidas (unid.)', totalAssistedSales],
+        ['Fuente presupuesto', hasRealBudgets ? 'presupuestos_trade (Contraloría)' : 'Solicitudes (estimado)'],
+      ] as Array<Array<string | number>>,
+    },
+    {
+      name: 'Presupuestos',
+      headers: ['Período', 'Categoría', 'Asignado', 'Comprometido', 'Ejecutado', 'Sede'],
+      rows: activePresupuestos.map((p) => [
+        p.periodo_ym,
+        p.categoria,
+        p.monto_asignado_usd,
+        p.monto_comprometido_usd,
+        p.monto_ejecutado_usd,
+        p.sucursal ?? 'GLOBAL',
+      ]),
+      currencyColumns: [2, 3, 4],
+    },
+    {
+      name: 'Campañas',
+      headers: ['Código', 'Nombre', 'Marca', 'Inicio', 'Fin', 'Estado'],
+      rows: campanasTrade.map((c) => [c.codigo, c.nombre, c.marca, c.fecha_inicio, c.fecha_fin, c.estado]),
+    },
+  ];
+
+  const handleExportExecutiveXlsx = async () => {
+    const { downloadExecutiveWorkbookXlsx } = await import('../../utils/excelWordExport');
+    await downloadExecutiveWorkbookXlsx(
+      {
+        title: 'Informe Ejecutivo KPIs y Trazabilidad · CODIZULCA',
+        generatedBy: 'Torre de Control',
+        sheets: buildFinancialExportSheets(),
+      },
+      `kpis-ejecutivo-${new Date().toISOString().slice(0, 10)}`
+    );
+  };
+
+  const handleExportExecutiveDocx = async () => {
+    const { downloadDocxReport } = await import('../../utils/excelWordExport');
+    await downloadDocxReport(
+      {
+        title: 'Informe Ejecutivo de KPIs y Trazabilidad',
+        subtitle: 'Torre de Control · Trade Marketing',
+        metadata: [
+          ['Fecha de emisión', new Date().toLocaleDateString('es-VE')],
+          ['Presupuesto aprobado (USD)', totalApprovedBudget.toFixed(2)],
+          ['Ejecutado + comprometido (USD)', totalExecutedBudget.toFixed(2)],
+          ['Ejecución presupuestaria', `${budgetExecutionPct}%`],
+        ],
+        sections: [
+          {
+            heading: 'Presupuestos activos',
+            table: {
+              headers: ['Período', 'Categoría', 'Asignado', 'Ejecutado'],
+              rows: activePresupuestos.map((p) => [
+                p.periodo_ym,
+                p.categoria,
+                p.monto_asignado_usd.toFixed(2),
+                p.monto_ejecutado_usd.toFixed(2),
+              ]),
+            },
+          },
+        ],
+      },
+      `informe-ejecutivo-${new Date().toISOString().slice(0, 10)}`
+    );
+  };
+
   const handleExportModule4Pdf = async () => {
     const productPdfRows: ExecutiveProductMoMPdfRow[] = filteredProductRows.map((r) => ({
       productLine: r.productLine,
@@ -1586,6 +1674,23 @@ export const ExecutiveDashboard: React.FC = () => {
               documentTitle="Informe Ejecutivo de Comparativa Mensual y Costos Semanales"
               onExportPdf={handleExportModule4Pdf}
             />
+
+            <button
+              type="button"
+              onClick={() => void handleExportExecutiveXlsx()}
+              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Excel (.xlsx)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExportExecutiveDocx()}
+              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Informe Word (.docx)</span>
+            </button>
           </div>
         </div>
 

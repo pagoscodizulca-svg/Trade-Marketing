@@ -898,13 +898,11 @@ export async function extractTabularDegustacionFile(
     return mapNumberedRowsToDegustacionRows(csvRows, options);
   }
 
-  const XLSX = await import('xlsx');
-  // Leemos números seriales puros (`cellDates: false`) para que `excelDateParser` resuelva
-  // en UTC puro sin crear instancias Date desplazadas por la zona horaria local.
-  const workbook = XLSX.read(fileBuffer, {
-    type: 'array',
-    cellDates: false,
-  });
+  const { loadXlsxAsSheetShim, shimXlsxApi } = await import('./excelSheetShim');
+  // `exceljs` normaliza fechas a números seriales (sistema 1900) para que `excelDateParser`
+  // resuelva en UTC puro sin instancias Date desplazadas por la zona horaria local.
+  const workbook = await loadXlsxAsSheetShim(fileBuffer);
+  const XLSX = shimXlsxApi;
 
   if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
     return {

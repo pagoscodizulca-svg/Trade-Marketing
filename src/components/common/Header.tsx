@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ShieldCheck,
   Database,
+  PackageSearch,
 } from 'lucide-react';
 import { GlobalExportPdfModal } from './GlobalExportPdfModal';
 import { RoleGuard } from '../auth/RoleGuard';
@@ -19,6 +20,7 @@ export type MainNavTab =
   | 'promotoras'
   | 'llenado_cronograma'
   | 'maestros'
+  | 'pop_incidencias'
   | 'contraloria'
   | 'kpis_trazabilidad'
   | 'gestion_usuarios';
@@ -27,6 +29,7 @@ export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]
   promotoras: ['super_admin', 'coordinacion'],
   llenado_cronograma: ['super_admin', 'coordinacion'],
   maestros: ['super_admin', 'coordinacion'],
+  pop_incidencias: ['super_admin', 'coordinacion', 'contraloria'],
   contraloria: ['super_admin', 'contraloria', 'coordinacion'],
   kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion'],
   gestion_usuarios: ['super_admin'],
@@ -64,6 +67,12 @@ export const Header: React.FC<HeaderProps> = ({
       label: 'Maestros (PDVs y Zonas)',
       subtitle: 'Clientes, Cadenas & FDV',
       icon: <Database className="w-4 h-4" />,
+    },
+    {
+      id: 'pop_incidencias',
+      label: 'POP e Incidencias',
+      subtitle: 'Material POP, SLA & Fotos',
+      icon: <PackageSearch className="w-4 h-4" />,
     },
     {
       id: 'contraloria',

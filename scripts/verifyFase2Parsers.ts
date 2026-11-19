@@ -161,15 +161,18 @@ async function main() {
   const xlsUint8 = XLSX.write(wb, { type: 'buffer', bookType: 'biff8' }) as Buffer;
 
   const xlsxParsed = await extractTabularDegustacionFile(toArrayBuffer(xlsxUint8), 'xlsx');
-  const xlsParsed = await extractTabularDegustacionFile(toArrayBuffer(xlsUint8), 'xls');
+  // S-01/P-03: el binario legado .xls (BIFF8) se rechaza por seguridad al retirar SheetJS del runtime
+  await assert.rejects(
+    extractTabularDegustacionFile(toArrayBuffer(xlsUint8), 'xls'),
+    /\.xls\) ya no es compatible/
+  );
 
   assert.equal(xlsxParsed.rows.length, 1);
-  assert.equal(xlsParsed.rows.length, 1);
   assert.equal(xlsxParsed.rows[0]?.fecha, '2026-11-16');
   assert.equal(xlsxParsed.rows[0]?.turno, 'TARDE');
   assert.equal(xlsxParsed.rows[0]?.cantidadKilos, 3.5);
   assert.deepEqual(xlsxParsed.rows[0]?.productos, ['MORTADELA', 'ESPALDA']);
-  console.log('✅ [4/5] Motor Tabular Excel (.xlsx y .xls BIFF8 con autodetección de encabezados) verificado.');
+  console.log('✅ [4/5] Motor Tabular Excel (.xlsx con autodetección de encabezados; .xls legado rechazado) verificado.');
 
   // 5. Prueba de Bandeja de Validación Pre-Volcado (Semáforo Verde / Amarillo / Rojo + Idempotencia + Promotora UUID)
   const pdvCatalog = buildKnownPdvCatalog({

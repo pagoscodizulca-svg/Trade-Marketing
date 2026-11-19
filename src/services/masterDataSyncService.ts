@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as XLSX from 'xlsx';
 import { z } from 'zod';
 import type { Store } from '../types';
 import type {
@@ -375,20 +374,11 @@ export function convertirTextoCsvAMatriz(contenidoCsv: string): string[][] {
   return lineas.map((linea) => dividirLineaCsvRespetandoComillas(linea, delimitador));
 }
 
-export function convertirWorkbookBufferAMatriz(buffer: ArrayBuffer | Uint8Array): string[][] {
-  const wb = XLSX.read(buffer, { type: 'array', raw: false });
-  const nombreHoja = wb.SheetNames[0];
-  if (!nombreHoja || !wb.Sheets[nombreHoja]) {
-    return [];
-  }
-  const matrizCruda = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[nombreHoja]!, {
-    header: 1,
-    defval: '',
-    blankrows: true,
-  });
-  return matrizCruda.map((fila) =>
-    Array.isArray(fila) ? fila.map((celda) => String(celda ?? '')) : []
-  );
+export async function convertirWorkbookBufferAMatriz(
+  buffer: ArrayBuffer | Uint8Array
+): Promise<string[][]> {
+  const { readFirstSheetAsStringMatrix } = await import('../utils/excelSheetShim');
+  return readFirstSheetAsStringMatrix(buffer);
 }
 
 function resolverMapaIndicesColumnas(encabezados: string[]): Partial<Record<CampoCanonico, number>> {
@@ -1119,7 +1109,7 @@ export async function sincronizarArchivoMaestroTrade(
   const matriz =
     typeof contenidoArchivo === 'string'
       ? convertirTextoCsvAMatriz(contenidoArchivo)
-      : convertirWorkbookBufferAMatriz(contenidoArchivo);
+      : await convertirWorkbookBufferAMatriz(contenidoArchivo);
 
   const preparado = prepararMatrizMaestraParaSincronizacion(matriz);
   return ejecutarSincronizacionMaestraPreparada(preparado, opciones);

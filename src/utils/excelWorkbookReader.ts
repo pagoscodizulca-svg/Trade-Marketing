@@ -1,4 +1,8 @@
-import type * as XLSXTypes from 'xlsx';
+import type {
+  ShimWorkBook,
+  ShimWorkSheet,
+  ShimXlsxApi,
+} from './excelSheetShim';
 import {
   MAX_IMPORT_ROWS,
   createSafeNullMap,
@@ -458,8 +462,8 @@ export function parseSheetNameChronology(
 }
 
 function readWorksheetCell(
-  XLSX: typeof XLSXTypes,
-  sheet: XLSXTypes.WorkSheet,
+  XLSX: ShimXlsxApi,
+  sheet: ShimWorkSheet,
   r: number,
   c: number
 ): { value: WorkbookCellValue; hasContent: boolean } {
@@ -511,8 +515,8 @@ interface ProbedSheetSummary {
  * detecta si tiene estructura válida de degustaciones sin convertir la hoja entera a JSON.
  */
 function probeWorksheetStructure(
-  XLSX: typeof XLSXTypes,
-  sheet: XLSXTypes.WorkSheet | undefined,
+  XLSX: ShimXlsxApi,
+  sheet: ShimWorkSheet | undefined,
   name: string,
   index: number,
   referenceYear: number
@@ -616,8 +620,8 @@ function probeWorksheetStructure(
  * para hallar la fecha válida de degustación más reciente sin parsear el resto de las columnas.
  */
 function scanMaxContentDateUtcInSheet(
-  XLSX: typeof XLSXTypes,
-  sheet: XLSXTypes.WorkSheet | undefined,
+  XLSX: ShimXlsxApi,
+  sheet: ShimWorkSheet | undefined,
   summary: ProbedSheetSummary,
   options: { isDate1904: boolean; fallbackYear: number; fallbackMonth: number }
 ): number | null {
@@ -679,8 +683,8 @@ function scanMaxContentDateUtcInSheet(
  * omitiendo filas completamente vacías e imponiendo el límite anti-DoS de `MAX_IMPORT_ROWS`.
  */
 function deepParseSingleWorksheet(
-  XLSX: typeof XLSXTypes,
-  sheet: XLSXTypes.WorkSheet | undefined
+  XLSX: ShimXlsxApi,
+  sheet: ShimWorkSheet | undefined
 ): { numberedRows: NumberedSheetRow[]; merges: SheetMergeRange[] } {
   if (!sheet || !sheet['!ref']) {
     return { numberedRows: [], merges: [] };
@@ -754,8 +758,8 @@ function inferReferenceYearFromWorkbook(
  * **Lectura Selectiva (Lazy Parsing)** convirtiendo en profundidad únicamente la hoja seleccionada.
  */
 export function readMostRecentWorkbookSheet(
-  XLSX: typeof XLSXTypes,
-  workbook: XLSXTypes.WorkBook,
+  XLSX: ShimXlsxApi,
+  workbook: ShimWorkBook,
   options?: {
     fileName?: string;
     baseYear?: number;

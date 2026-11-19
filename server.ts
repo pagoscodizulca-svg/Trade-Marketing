@@ -7,6 +7,14 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
+  buildApiOriginGuard,
+  buildCorsMiddleware,
+  buildRequestLogger,
+  buildSecurityHeaders,
+  parseAllowedOrigins,
+} from './src/server/securityMiddleware';
+import { serverLogger, usageMetrics } from './src/server/logger';
+import {
   extractDegustacionesFromPdfBuffer,
   PdfExtractionError,
 } from './src/server/pdfDegustacionesExtractor';
@@ -42,8 +50,16 @@ import {
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Si el servidor corre compilado (`dist-server/server.js`), la raíz del proyecto es el directorio padre
+const PROJECT_ROOT =
+  path.basename(__dirname) === 'dist-server' ? path.resolve(__dirname, '..') : __dirname;
 const app = express();
 app.disable('x-powered-by');
+// Detrás de un proxy (Render, nginx, Docker) `req.ip` debe reflejar al cliente real para el limitador
+const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '', 10);
+if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
+  app.set('trust proxy', trustProxyHops);
+}
 
 const parsedPort = parseInt(process.env.PORT ?? '', 10);
 const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
@@ -52,10 +68,10 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // Resiliencia ante errores transitorios de sockets/promesas para evitar caída del servidor
 process.on('uncaughtException', (err) => {
-  console.error('⚠️ [Resiliencia] Excepción no controlada capturada:', err?.message || err);
+  serverLogger.error('uncaught_exception', { err });
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ [Resiliencia] Promesa rechazada no manejada:', reason);
+  serverLogger.error('unhandled_rejection', { reason });
 });
 
 function getLanIpv4(): string | null {
@@ -148,21 +164,43 @@ process.on('SIGTERM', () => {
 });
 process.on('exit', cleanupChildren);
 
+// Cabeceras de seguridad (helmet + CSP en producción), CORS por origen y trazas JSON (P-04 / M-05)
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
+const SUPABASE_PUBLIC_ORIGIN = (() => {
+  try {
+    const raw = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+    return raw ? new URL(raw).origin : '';
+  } catch {
+    return '';
+  }
+})();
+
+for (const mw of buildSecurityHeaders({
+  isProduction: IS_PRODUCTION,
+  extraConnectSrc: SUPABASE_PUBLIC_ORIGIN ? [SUPABASE_PUBLIC_ORIGIN] : [],
+})) {
+  app.use(mw);
+}
+app.use(buildRequestLogger(serverLogger));
+app.use('/api', buildCorsMiddleware({ allowedOrigins: ALLOWED_ORIGINS, isProduction: IS_PRODUCTION }));
+app.use('/api', buildApiOriginGuard({ allowedOrigins: ALLOWED_ORIGINS, isProduction: IS_PRODUCTION }));
+
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================================
-// 1. HEALTH CHECK
+// 1. HEALTH CHECK MÍNIMO (sin puertos, entorno ni versiones) + MÉTRICAS PROTEGIDAS
 // ============================================================================
-app.get('/api/health', async (_req: Request, res: Response) => {
-  const choferOnline = await isPortListening(CHOFER_PORT);
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: 'ok' });
+});
+
+app.get('/api/admin/metrics', requireSuperAdminAuth, (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
-    status: 'ok',
-    env: IS_PRODUCTION ? 'production' : 'development',
-    ports: {
-      tradetrack: PORT,
-      rutaDegustacion: CHOFER_PORT,
-      rutaDegustacionActive: choferOnline,
-    },
+    ...usageMetrics,
+    uptimeSeconds: Math.round(process.uptime()),
+    rssMb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
   });
 });
 
@@ -364,28 +402,58 @@ app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
 
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = err?.status || err?.statusCode || 500;
-  if (status >= 500) console.error('Error no controlado:', err);
+  if (status >= 500) {
+    serverLogger.error('unhandled_error', { path: req.path, method: req.method, err });
+  }
   res.status(status).json({
     error: status === 413 ? 'El cuerpo de la solicitud es demasiado grande.' : status < 500 ? 'Solicitud inválida.' : 'Error interno del servidor.',
   });
 });
 
 // ============================================================================
-// 3. VITE MIDDLEWARE & STATIC SERVING (DUAL-STACK IPv4 + IPv6)
+// 3. VITE MIDDLEWARE & STATIC SERVING (UN SOLO EXPRESS: `/`, `/portal`, `/logistica`)
 // ============================================================================
+function serveSpa(mountPath: string, distPath: string, label: string): void {
+  const indexFile = path.join(distPath, 'index.html');
+  if (!fs.existsSync(indexFile)) {
+    serverLogger.warn('spa_dist_missing', { label, distPath });
+    return;
+  }
+
+  const staticMw = express.static(distPath, {
+    index: false,
+    setHeaders(res, filePath) {
+      const base = path.basename(filePath);
+      if (/^(sw\.js|index\.html|manifest\.json|registerSW\.js)$/i.test(base)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  });
+
+  app.use(mountPath, staticMw);
+  const fallbackPattern = mountPath === '/' ? /^\/(?!api(\/|$)).*/ : new RegExp(`^${mountPath}(/.*)?$`);
+  app.get(fallbackPattern, (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(indexFile);
+  });
+}
+
 async function startServer() {
   if (IS_PRODUCTION) {
-    const distPath = path.join(__dirname, 'dist');
+    const distPath = path.join(PROJECT_ROOT, 'dist');
     if (!fs.existsSync(path.join(distPath, 'index.html'))) {
-      console.error('❌ No se encontró "dist/index.html". Ejecuta "npm run build" antes de iniciar en producción.');
+      serverLogger.error('dist_missing', {
+        hint: 'Ejecuta "npm run build" antes de iniciar en producción.',
+      });
       process.exit(1);
     }
-    app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    // La PWA de logística se publica bajo `/logistica` (build con base `/logistica/`)
+    serveSpa('/logistica', path.join(PROJECT_ROOT, 'ruta-degustacion', 'dist'), 'logistica');
+    serveSpa('/', distPath, 'torre');
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -398,25 +466,26 @@ async function startServer() {
   // Escucha Dual-Stack (IPv6 :: + IPv4 0.0.0.0) para que tanto localhost (::1 / 127.0.0.1) como LAN Wi-Fi respondan siempre
   const server = app.listen(PORT, () => {
     const lanIp = getLanIpv4();
-    console.log(`🚀 Codizulca TradeTrack activo en:`);
-    console.log(`   ➜ Local:   http://localhost:${PORT}/`);
-    if (lanIp) {
-      console.log(`   ➜ Red LAN: http://${lanIp}:${PORT}/`);
-    }
+    serverLogger.info('server_started', {
+      port: PORT,
+      env: IS_PRODUCTION ? 'production' : 'development',
+      local: `http://localhost:${PORT}/`,
+      ...(lanIp && !IS_PRODUCTION ? { lan: `http://${lanIp}:${PORT}/` } : {}),
+    });
     void ensureChoferPwaServer();
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(`❌ El puerto ${PORT} ya está en uso. Define otro con la variable PORT.`);
+      serverLogger.error('port_in_use', { port: PORT });
     } else {
-      console.error('❌ Error del servidor:', err);
+      serverLogger.error('server_error', { err });
     }
     process.exit(1);
   });
 }
 
 startServer().catch((err) => {
-  console.error('❌ No se pudo iniciar el servidor:', err);
+  serverLogger.error('server_start_failed', { err });
   process.exit(1);
 });
