@@ -14,6 +14,7 @@ import type {
   PazYSalvoVerificationResult,
   PresupuestoTrade,
   PresupuestoTradeInput,
+  SucursalFinanciera,
   TarifarioCostoTrade,
   TarifarioCostoTradeInput,
 } from '../types/contraloriaFinancial';
@@ -22,6 +23,7 @@ import {
   getSupabaseCoordinatorClient,
   isSupabaseConfigured,
 } from './supabaseClient';
+import { OPERATIVE_SUCURSALES } from './userManagementService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const YMD_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -41,7 +43,7 @@ export const CampanaTradeSchema = z.object({
   fecha_fin: z.string().regex(YMD_REGEX, 'fecha_fin debe tener formato YYYY-MM-DD.'),
   estado: z.enum(['PLANIFICADA', 'ACTIVA', 'CERRADA', 'CANCELADA']).optional().default('ACTIVA'),
   observaciones: z.string().trim().max(500).optional().default(''),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: z.enum(OPERATIVE_SUCURSALES).nullable().optional(),
 });
 
 export const PresupuestoTradeSchema = z.object({
@@ -54,7 +56,7 @@ export const PresupuestoTradeSchema = z.object({
   monto_ejecutado_usd: z.coerce.number().finite().min(0).optional().default(0),
   observaciones: z.string().trim().max(500).optional().default(''),
   activo: z.boolean().optional().default(true),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: z.enum(OPERATIVE_SUCURSALES).nullable().optional(),
 });
 
 export const TarifarioCostoTradeSchema = z.object({
@@ -73,7 +75,7 @@ export const TarifarioCostoTradeSchema = z.object({
   vigente_desde: z.string().regex(YMD_REGEX).optional(),
   vigente_hasta: z.string().regex(YMD_REGEX).nullable().optional(),
   activo: z.boolean().optional().default(true),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: z.enum(OPERATIVE_SUCURSALES).nullable().optional(),
 });
 
 export function isRealUuid(val: unknown): val is string {
@@ -174,7 +176,7 @@ export function mapDbRequisicionToControllerRequest(row: Record<string, unknown>
     campanaId: row.campana_id ? String(row.campana_id) : null,
     presupuestoId: row.presupuesto_id ? String(row.presupuesto_id) : null,
     solicitudOrigenId: row.solicitud_origen_id ? String(row.solicitud_origen_id) : null,
-    sucursal: (row.sucursal as 'ZULIA' | 'VALENCIA' | null) ?? null,
+    sucursal: (row.sucursal as SucursalFinanciera | null) ?? null,
   };
 }
 
@@ -613,6 +615,7 @@ export async function uploadFiscalReceiptWithBinary(params: {
   requisicionId: string;
   receipt: Omit<FiscalReceipt, 'id' | 'isValidatedByContraloria'>;
   file: File | Blob;
+  sucursal?: SucursalFinanciera;
   apiBaseUrl?: string;
 }): Promise<{ receipt: FiscalReceipt; signedUrl: string | null }> {
   const token = getCachedAccessToken();
@@ -631,6 +634,7 @@ export async function uploadFiscalReceiptWithBinary(params: {
       subtotalUsd: params.receipt.subtotalUsd,
       taxAmountUsd: params.receipt.taxAmountUsd,
       totalUsd: params.receipt.totalUsd,
+      ...(params.sucursal ? { sucursal: params.sucursal } : {}),
     })
   );
 
@@ -642,6 +646,7 @@ export async function uploadFiscalReceiptWithBinary(params: {
       Authorization: `Bearer ${token}`,
       'Content-Type': params.file.type || 'application/octet-stream',
       'x-factura-meta': metaHeader,
+      ...(params.sucursal ? { 'x-sucursal-activa': params.sucursal } : {}),
     },
     body: arrayBuf,
   });

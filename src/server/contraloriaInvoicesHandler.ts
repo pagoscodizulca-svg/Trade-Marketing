@@ -11,7 +11,12 @@ import {
 import {
   type AuthenticatedServerUser,
   createUserScopedSupabaseClient,
+  extractRawActiveSucursalHeader,
   getAdminSupabaseClient,
+  isOperativeServerSucursal,
+  normalizeOperativeServerSucursal,
+  normalizeServerSucursal,
+  type OperativeSucursal,
 } from './supabaseAdminAuth';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,6 +37,7 @@ export const UploadFiscalReceiptMetaSchema = z.object({
   subtotalUsd: z.coerce.number().finite().min(0),
   taxAmountUsd: z.coerce.number().finite().min(0),
   totalUsd: z.coerce.number().finite().positive('El monto total debe ser mayor a 0.'),
+  sucursal: z.string().trim().max(80).optional(),
 });
 
 export const BatchInvoiceSignedUrlsSchema = z.object({
@@ -59,7 +65,7 @@ export interface ContraloriaInvoiceDbRow {
   archivo_sha256_hex: string | null;
   validada_contraloria: boolean;
   notas_validacion: string | null;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   created_at: string;
 }
 
@@ -67,7 +73,7 @@ export interface ConciliacionLookupRow {
   id: string;
   requisicion_id: string;
   cerrada: boolean;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
 }
 
 export interface ContraloriaInvoicesGateway {
@@ -95,7 +101,7 @@ export interface ContraloriaInvoicesGateway {
     tamanoBytes: number;
     archivoSha256Hex: string;
     cargadoPorUid: string;
-    sucursal: 'ZULIA' | 'VALENCIA';
+    sucursal: OperativeSucursal;
   }): Promise<ContraloriaInvoiceDbRow>;
   findInvoicesByIds(facturaIds: string[]): Promise<ContraloriaInvoiceDbRow[]>;
   createSignedUrls(
@@ -105,19 +111,20 @@ export interface ContraloriaInvoicesGateway {
   ): Promise<Record<string, string>>;
 }
 
-function normalizeRegionalBranch(raw: unknown): 'ZULIA' | 'VALENCIA' | null {
-  const clean = String(raw ?? '').trim().toUpperCase();
-  if (clean === 'ZULIA') return 'ZULIA';
-  if (clean === 'VALENCIA') return 'VALENCIA';
-  return null;
+function normalizeRegionalBranch(raw: unknown): OperativeSucursal | null {
+  return normalizeOperativeServerSucursal(raw);
 }
 
 function canActorAccessBranch(
   actor: AuthenticatedServerUser,
-  targetBranch: 'ZULIA' | 'VALENCIA' | null
+  targetBranch: OperativeSucursal | null,
+  activeHeaderHub?: OperativeSucursal | null
 ): boolean {
-  if (actor.sucursal === 'GLOBAL') return true;
-  if (!actor.sucursal || !targetBranch) return false;
+  if (!targetBranch) return false;
+  if (actor.sucursal === 'GLOBAL') {
+    return activeHeaderHub ? activeHeaderHub === targetBranch : true;
+  }
+  if (!actor.sucursal) return false;
   return actor.sucursal === targetBranch;
 }
 
@@ -142,10 +149,12 @@ function decodeFacturaMetaHeader(req: Request): unknown {
 }
 
 function createSupabaseContraloriaInvoicesGateway(
-  accessToken?: string
+  accessToken?: string,
+  activeSucursalHeader?: OperativeSucursal | null
 ): ContraloriaInvoicesGateway | null {
   const client =
-    getAdminSupabaseClient() || (accessToken ? createUserScopedSupabaseClient(accessToken) : null);
+    getAdminSupabaseClient() ||
+    (accessToken ? createUserScopedSupabaseClient(accessToken, activeSucursalHeader) : null);
   if (!client) return null;
 
   return {
@@ -237,7 +246,8 @@ export function createContraloriaInvoicesHandlers(options?: {
 }) {
   const resolveGateway =
     options?.resolveGateway ??
-    ((user: AuthenticatedServerUser) => createSupabaseContraloriaInvoicesGateway(user.accessToken));
+    ((user: AuthenticatedServerUser) =>
+      createSupabaseContraloriaInvoicesGateway(user.accessToken, user.activeSucursalHeader));
   const bucketId = options?.bucketId || CONTRALORIA_FACTURAS_BUCKET_ID;
   const ttlSeconds = options?.signedUrlTtlSeconds || DEFAULT_INVOICE_SIGNED_URL_TTL_SECONDS;
 
@@ -268,6 +278,68 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
+    const meta = parsedMeta.data;
+    const rawMetaBranch = meta.sucursal ? meta.sucursal.trim() : '';
+    const metaBranch = rawMetaBranch ? normalizeServerSucursal(rawMetaBranch) : null;
+    if (rawMetaBranch && !metaBranch) {
+      res.status(400).json({
+        error:
+          'Sucursal inválida en x-factura-meta. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    if (isOperativeServerSucursal(authUser.sucursal)) {
+      if (metaBranch && metaBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: `Cruce de sede bloqueado: tu perfil pertenece a ${authUser.sucursal} y no puede cargar facturas en ${metaBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      if (headerBranch && headerBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: `Cruce de sede bloqueado: tu perfil pertenece a ${authUser.sucursal} y no puede operar bajo ${headerBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+    } else if (authUser.sucursal === 'GLOBAL') {
+      if (metaBranch === 'GLOBAL' || headerBranch === 'GLOBAL') {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe indicar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) y no GLOBAL.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      if (metaBranch && headerBranch && metaBranch !== headerBranch) {
+        res.status(400).json({
+          error: `Conflicto entre meta.sucursal (${metaBranch}) y x-sucursal-activa (${headerBranch}).`,
+          code: 'INVALID_BRANCH',
+        });
+        return;
+      }
+    } else {
+      res.status(403).json({
+        error: 'Acceso denegado: su cuenta no posee una sucursal operativa asignada.',
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
     const rawBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     let verifiedBinary;
     try {
@@ -284,7 +356,18 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
-    const gateway = resolveGateway(authUser);
+    const explicitHub: OperativeSucursal | null =
+      (metaBranch && isOperativeServerSucursal(metaBranch) ? metaBranch : null) ??
+      (headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null);
+
+    const scopedUser: AuthenticatedServerUser = {
+      ...authUser,
+      activeSucursalHeader: isOperativeServerSucursal(authUser.sucursal)
+        ? authUser.sucursal
+        : explicitHub,
+    };
+
+    const gateway = resolveGateway(scopedUser);
     if (!gateway) {
       res.status(503).json({
         error: 'Servicio de almacenamiento fiscal no configurado.',
@@ -293,9 +376,16 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
-    const meta = parsedMeta.data;
     const conc = await gateway.lookupConciliacion(meta.conciliacionId);
     if (!conc || conc.requisicion_id !== meta.requisicionId) {
+      if (authUser.sucursal === 'GLOBAL' && !explicitHub) {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe seleccionar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) en x-sucursal-activa, meta.sucursal o mediante una conciliación regional válida.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
       res.status(404).json({
         error: 'La conciliación asociada a la requisición no existe.',
         code: 'RECONCILIATION_NOT_FOUND',
@@ -303,12 +393,36 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
-    if (!canActorAccessBranch(authUser, conc.sucursal)) {
-      res.status(403).json({
-        error: 'Acceso denegado: la conciliación pertenece a otra sucursal.',
-        code: 'FORBIDDEN_BRANCH',
-      });
-      return;
+    const concBranch = normalizeRegionalBranch(conc.sucursal);
+
+    let targetBranch: OperativeSucursal;
+    if (isOperativeServerSucursal(authUser.sucursal)) {
+      if (!concBranch || concBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: 'Acceso denegado: la conciliación pertenece a otra sucursal.',
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      targetBranch = authUser.sucursal;
+    } else {
+      if (explicitHub && concBranch && explicitHub !== concBranch) {
+        res.status(403).json({
+          error: `Acceso denegado: el hub activo (${explicitHub}) no coincide con la sucursal de la conciliación (${concBranch}).`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      const resolvedGlobalBranch = explicitHub ?? concBranch;
+      if (!resolvedGlobalBranch) {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe especificar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) para registrar comprobantes fiscales.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      targetBranch = resolvedGlobalBranch;
     }
 
     if (conc.cerrada) {
@@ -319,8 +433,6 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
-    const targetBranch: 'ZULIA' | 'VALENCIA' =
-      conc.sucursal ?? (authUser.sucursal === 'VALENCIA' ? 'VALENCIA' : 'ZULIA');
     const storagePath = buildDeterministicInvoiceStoragePath({
       sucursal: targetBranch,
       requisicionId: meta.requisicionId,
@@ -388,6 +500,36 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    if (
+      isOperativeServerSucursal(authUser.sucursal) &&
+      headerBranch &&
+      headerBranch !== authUser.sucursal
+    ) {
+      res.status(403).json({
+        error: `Cruce de sede bloqueado: tu perfil pertenece a ${authUser.sucursal} y no puede consultar comprobantes bajo ${headerBranch}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
+    const activeHeaderHub =
+      headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null;
+    const scopedUser: AuthenticatedServerUser = {
+      ...authUser,
+      activeSucursalHeader: activeHeaderHub,
+    };
+
     const parsed = BatchInvoiceSignedUrlsSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -397,7 +539,7 @@ export function createContraloriaInvoicesHandlers(options?: {
       return;
     }
 
-    const gateway = resolveGateway(authUser);
+    const gateway = resolveGateway(scopedUser);
     if (!gateway) {
       res.status(503).json({
         error: 'Servicio de almacenamiento fiscal no configurado.',
@@ -408,7 +550,9 @@ export function createContraloriaInvoicesHandlers(options?: {
 
     const rows = await gateway.findInvoicesByIds(parsed.data.facturaIds);
     const authorizedRows = rows.filter(
-      (r) => r.storage_path && canActorAccessBranch(authUser, normalizeRegionalBranch(r.sucursal))
+      (r) =>
+        r.storage_path &&
+        canActorAccessBranch(authUser, normalizeRegionalBranch(r.sucursal), activeHeaderHub)
     );
     const paths = authorizedRows
       .map((r) => r.storage_path!)

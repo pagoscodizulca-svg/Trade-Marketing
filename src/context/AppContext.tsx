@@ -1037,7 +1037,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
-          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+          (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
       });
@@ -1062,7 +1062,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
-          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+          (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
       });
@@ -1087,7 +1087,7 @@ export const AppProvider: React.FC<{
         ...input,
         sucursal:
           input.sucursal ??
-          (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+          (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
             ? verifiedSucursal
             : 'ZULIA'),
       });
@@ -1169,7 +1169,7 @@ export const AppProvider: React.FC<{
     try {
       const targetSucursal =
         req.sucursal ??
-        (verifiedSucursal === 'ZULIA' || verifiedSucursal === 'VALENCIA'
+        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
           ? verifiedSucursal
           : 'ZULIA');
       const { requisicion, conciliacion } = await createRequisitionInSupabase({

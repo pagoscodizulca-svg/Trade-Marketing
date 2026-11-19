@@ -1,4 +1,4 @@
-export type SucursalFinanciera = 'ZULIA' | 'VALENCIA';
+export type SucursalFinanciera = 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL';
 
 export interface CampanaTrade {
   id: string;

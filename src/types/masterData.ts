@@ -26,7 +26,7 @@ export type EstadoLoteSincronizacion =
   | 'con_observaciones'
   | 'fallido';
 
-export type SucursalMaestro = 'ZULIA' | 'VALENCIA';
+export type SucursalMaestro = 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL';
 
 export interface CadenaComercial {
   id: string;

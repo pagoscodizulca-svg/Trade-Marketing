@@ -10,8 +10,14 @@ import {
 import {
   type AuthenticatedServerUser,
   createUserScopedSupabaseClient,
+  extractRawActiveSucursalHeader,
   getAdminSupabaseClient,
+  isOperativeServerSucursal,
   isTorreViewerRole,
+  normalizeOperativeServerSucursal,
+  normalizeServerSucursal,
+  OPERATIVE_SUCURSALES,
+  type OperativeSucursal,
 } from './supabaseAdminAuth';
 
 export const INCIDENCIAS_PRIVATE_BUCKET_ID = 'incidencias-evidencias';
@@ -82,7 +88,7 @@ export const UploadIncidenciaEvidenceMetaSchema = z.object({
     .optional()
     .default('Coordinación Trade'),
   reportadoPorNombre: z.string().trim().min(2).max(140).optional(),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).optional(),
+  sucursal: z.string().trim().max(80).optional(),
 });
 
 export const BatchIncidenciaSignedUrlsSchema = z.object({
@@ -114,7 +120,7 @@ export interface IncidenciaPdvDbRow {
   foto_storage_path: string | null;
   foto_mime_type: string | null;
   foto_sha256_hex: string | null;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   created_at: string;
   updated_at: string;
 }
@@ -143,7 +149,7 @@ export interface IncidenciasEvidencesGateway {
     storagePath: string;
     mimeType: AllowedAttendanceImageMime;
     sha256Hex: string;
-    sucursal: 'ZULIA' | 'VALENCIA';
+    sucursal: OperativeSucursal;
   }): Promise<IncidenciaPdvDbRow>;
   findIncidenciasByIds(ids: string[]): Promise<IncidenciaPdvDbRow[]>;
   createSignedUrls(
@@ -154,12 +160,15 @@ export interface IncidenciasEvidencesGateway {
 }
 
 export function buildDeterministicIncidenciaStoragePath(params: {
-  sucursal: 'ZULIA' | 'VALENCIA';
+  sucursal: OperativeSucursal;
   fechaYmd?: string;
   extension: 'jpg' | 'png' | 'webp';
   fileUuid?: string;
 }): string {
-  const branch = params.sucursal === 'VALENCIA' ? 'VALENCIA' : 'ZULIA';
+  const cleanBranch = String(params.sucursal || '').trim().toUpperCase();
+  if (!(OPERATIVE_SUCURSALES as readonly string[]).includes(cleanBranch)) {
+    throw new Error('Sucursal operativa inválida para ruta de incidencia.');
+  }
   const ymd =
     params.fechaYmd && /^\d{4}-\d{2}-\d{2}$/.test(params.fechaYmd)
       ? params.fechaYmd
@@ -168,7 +177,7 @@ export function buildDeterministicIncidenciaStoragePath(params: {
     params.fileUuid && UUID_REGEX.test(params.fileUuid)
       ? params.fileUuid.toLowerCase()
       : crypto.randomUUID();
-  return `incidencias/${branch}/${ymd}/${uuid}.${params.extension}`;
+  return `incidencias/${cleanBranch}/${ymd}/${uuid}.${params.extension}`;
 }
 
 function decodeIncidenciaMetaHeader(req: Request): unknown {
@@ -193,10 +202,14 @@ function decodeIncidenciaMetaHeader(req: Request): unknown {
 
 function canActorAccessBranch(
   actor: AuthenticatedServerUser,
-  target: 'ZULIA' | 'VALENCIA' | null
+  target: OperativeSucursal | null,
+  activeHeaderHub?: OperativeSucursal | null
 ): boolean {
-  if (actor.sucursal === 'GLOBAL') return true;
-  if (!actor.sucursal || !target) return false;
+  if (!target) return false;
+  if (actor.sucursal === 'GLOBAL') {
+    return activeHeaderHub ? activeHeaderHub === target : true;
+  }
+  if (!actor.sucursal) return false;
   return actor.sucursal === target;
 }
 
@@ -205,7 +218,7 @@ function createSupabaseIncidenciasGateway(
 ): IncidenciasEvidencesGateway | null {
   const adminClient = getAdminSupabaseClient();
   const userClient = actor.accessToken
-    ? createUserScopedSupabaseClient(actor.accessToken)
+    ? createUserScopedSupabaseClient(actor.accessToken, actor.activeSucursalHeader)
     : null;
   if (!adminClient || !userClient) return null;
 
@@ -291,7 +304,12 @@ export function createUploadIncidenciaEvidenceHandler(
       return;
     }
 
-    if (actor.appRole === 'contraloria') {
+    if (
+      actor.appRole === 'contraloria' ||
+      actor.appRole === 'analista_contraloria' ||
+      actor.appRole === 'contralor' ||
+      actor.isReadOnlyViewer
+    ) {
       res.status(403).json({
         error: 'Segregación de Funciones: Contraloría Interna opera en modo solo lectura.',
         code: 'FORBIDDEN_READ_ONLY_ROLE',
@@ -320,18 +338,85 @@ export function createUploadIncidenciaEvidenceHandler(
     }
 
     const meta = parsedMeta.data;
-    const effectiveBranch: 'ZULIA' | 'VALENCIA' | null =
-      actor.sucursal === 'ZULIA' || actor.sucursal === 'VALENCIA'
-        ? actor.sucursal
-        : meta.sucursal ?? 'ZULIA';
+    const rawMetaBranch = meta.sucursal ? meta.sucursal.trim() : '';
+    const metaBranch = rawMetaBranch ? normalizeServerSucursal(rawMetaBranch) : null;
+    if (rawMetaBranch && !metaBranch) {
+      res.status(400).json({
+        error:
+          'Sucursal inválida en x-incidencia-meta. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
 
-    if (!canActorAccessBranch(actor, effectiveBranch)) {
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    let effectiveBranch: OperativeSucursal;
+    if (isOperativeServerSucursal(actor.sucursal)) {
+      if (metaBranch && metaBranch !== actor.sucursal) {
+        res.status(403).json({
+          error: `Acceso denegado: tu perfil pertenece a ${actor.sucursal} y no puede reportar incidencias en ${metaBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      if (headerBranch && headerBranch !== actor.sucursal) {
+        res.status(403).json({
+          error: `Acceso denegado: tu perfil pertenece a ${actor.sucursal} y no puede operar bajo ${headerBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      effectiveBranch = actor.sucursal;
+    } else if (actor.sucursal === 'GLOBAL') {
+      if (metaBranch === 'GLOBAL' || headerBranch === 'GLOBAL') {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe indicar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) y no GLOBAL.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      if (metaBranch && headerBranch && metaBranch !== headerBranch) {
+        res.status(400).json({
+          error: `Conflicto entre meta.sucursal (${metaBranch}) y x-sucursal-activa (${headerBranch}).`,
+          code: 'INVALID_BRANCH',
+        });
+        return;
+      }
+      const resolved =
+        (metaBranch && isOperativeServerSucursal(metaBranch) ? metaBranch : null) ??
+        (headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null);
+      if (!resolved) {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe seleccionar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) para reportar incidencias.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      effectiveBranch = resolved;
+    } else {
       res.status(403).json({
-        error: 'Acceso denegado: no puede reportar incidencias en otra sucursal.',
+        error: 'Acceso denegado: su cuenta no posee una sucursal operativa asignada.',
         code: 'FORBIDDEN_BRANCH',
       });
       return;
     }
+
+    const scopedActor: AuthenticatedServerUser = {
+      ...actor,
+      activeSucursalHeader: effectiveBranch,
+    };
 
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     let verifiedImage;
@@ -350,8 +435,8 @@ export function createUploadIncidenciaEvidenceHandler(
     }
 
     const gateway = customGatewayFactory
-      ? customGatewayFactory(actor)
-      : createSupabaseIncidenciasGateway(actor);
+      ? customGatewayFactory(scopedActor)
+      : createSupabaseIncidenciasGateway(scopedActor);
     if (!gateway) {
       res.status(503).json({
         error: 'Almacenamiento privado de incidencias no configurado en el servidor.',
@@ -425,6 +510,36 @@ export function createBatchIncidenciaSignedUrlsHandler(
       return;
     }
 
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    if (
+      isOperativeServerSucursal(actor.sucursal) &&
+      headerBranch &&
+      headerBranch !== actor.sucursal
+    ) {
+      res.status(403).json({
+        error: `Cruce de sede bloqueado: tu perfil pertenece a ${actor.sucursal} y no puede consultar evidencias bajo ${headerBranch}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
+    const activeHeaderHub =
+      headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null;
+    const scopedActor: AuthenticatedServerUser = {
+      ...actor,
+      activeSucursalHeader: activeHeaderHub,
+    };
+
     const parsed = BatchIncidenciaSignedUrlsSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -435,8 +550,8 @@ export function createBatchIncidenciaSignedUrlsHandler(
     }
 
     const gateway = customGatewayFactory
-      ? customGatewayFactory(actor)
-      : createSupabaseIncidenciasGateway(actor);
+      ? customGatewayFactory(scopedActor)
+      : createSupabaseIncidenciasGateway(scopedActor);
     if (!gateway) {
       res.status(503).json({
         error: 'Servicio de almacenamiento privado no disponible.',
@@ -450,7 +565,8 @@ export function createBatchIncidenciaSignedUrlsHandler(
       const isTorre = isTorreViewerRole(actor.appRole);
       const authorizedRows = rows.filter((r) => {
         if (!r.foto_storage_path) return false;
-        if (!canActorAccessBranch(actor, r.sucursal)) return false;
+        const rowBranch = normalizeOperativeServerSucursal(r.sucursal);
+        if (!canActorAccessBranch(actor, rowBranch, activeHeaderHub)) return false;
         return isTorre || r.reportado_por_uid === actor.id;
       });
 

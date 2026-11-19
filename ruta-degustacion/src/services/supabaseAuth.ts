@@ -157,18 +157,93 @@ export function normalizeRutaRole(raw: unknown): RutaAppRole | null {
   return null;
 }
 
-export function normalizeRutaSucursal(raw: unknown, role: RutaAppRole): SucursalCodigo | null {
-  const clean = String(raw || '').trim().toUpperCase();
-  if (role === 'super_admin') {
-    if (!clean || clean === 'GLOBAL' || clean === 'NACIONAL' || clean === 'ADMIN_GENERAL') {
-      return 'GLOBAL';
-    }
-    if (clean === 'ZULIA' || clean === 'VALENCIA') return clean;
+function normalizeRutaTerritory(raw: unknown): SucursalCodigo | null {
+  const nfdLower = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!nfdLower) return null;
+
+  const tokensText = nfdLower.replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!tokensText) return null;
+
+  if (
+    tokensText === 'global' ||
+    tokensText === 'nacional' ||
+    tokensText === 'admin general' ||
+    tokensText === 'global nacional'
+  ) {
     return 'GLOBAL';
   }
-  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') return 'ZULIA';
-  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') return 'VALENCIA';
+
+  const strippedPrefix = tokensText.replace(
+    /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
+    ''
+  );
+  if (strippedPrefix === 'zulia') return 'ZULIA';
+  if (strippedPrefix === 'valencia') return 'VALENCIA';
+  if (strippedPrefix === 'centro') return 'CENTRO';
+  if (strippedPrefix === 'oriente') return 'ORIENTE';
+  if (strippedPrefix === 'capital') return 'CAPITAL';
+
+  if (
+    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'col'
+  ) {
+    return 'ZULIA';
+  }
+
+  if (
+    /\b(valencia|carabobo|naguanagua|san diego|guacara|tocuyito|puerto cabello|los guayos|mariara|bejuma)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'VALENCIA';
+  }
+
+  if (
+    /\b(centro|aragua|maracay|turmero|cagua|la victoria|villa de cura|lara|barquisimeto|cabudare|carora|quibor|yaracuy|san felipe|yaritagua|cojedes|san carlos|tinaquillo)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CENTRO';
+  }
+
+  if (
+    /\b(oriente|anzoategui|barcelona|puerto la cruz|lecheria|el tigre|anaco|cantaura|monagas|maturin|punta de mata|nueva esparta|margarita|porlamar|pampatar|juan griego|sucre|cumana|carupano|puerto ordaz|ciudad guayana|ciudad bolivar|san felix|upata|estado bolivar|delta amacuro|tucupita)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'bolivar'
+  ) {
+    return 'ORIENTE';
+  }
+
+  if (
+    /\b(capital|caracas|distrito capital|dtto capital|gran caracas|miranda|chacao|baruta|el hatillo|petare|los teques|guarenas|guatire|charallave|cua|ocumare del tuy|valles del tuy|higuerote|la guaira|vargas|maiquetia|catia la mar|caraballeda)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CAPITAL';
+  }
+
   return null;
+}
+
+export function normalizeRutaSucursal(raw: unknown, role: RutaAppRole): SucursalCodigo | null {
+  const rawStr = String(raw ?? '').trim();
+  const normalized = normalizeRutaTerritory(rawStr);
+  if (role === 'super_admin') {
+    if (!rawStr || normalized === 'GLOBAL') {
+      return 'GLOBAL';
+    }
+    if (normalized) return normalized;
+    return 'GLOBAL';
+  }
+  if (!normalized || normalized === 'GLOBAL') return null;
+  return normalized;
 }
 
 export function canAccessOficinaMode(role: RutaAppRole): boolean {
@@ -199,6 +274,9 @@ export function formatRutaRoleLabel(role: RutaAppRole): string {
 export function formatSucursalLabel(sucursal: SucursalCodigo): string {
   if (sucursal === 'GLOBAL') return 'Nacional (Global)';
   if (sucursal === 'VALENCIA') return 'Sede Valencia';
+  if (sucursal === 'CENTRO') return 'Sede Centro';
+  if (sucursal === 'ORIENTE') return 'Sede Oriente';
+  if (sucursal === 'CAPITAL') return 'Sede Capital';
   return 'Sede Zulia';
 }
 
@@ -300,12 +378,36 @@ export async function verifyRutaProfileAccess(
   }
 
   const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const canonicalSessionEmail = String(session.user.email || '')
+    .trim()
+    .toLowerCase();
 
-  const { data: profile, error } = await client
+  let { data: profile, error } = await client
     .from('profiles')
     .select('id, email, full_name, role, sucursal, is_active')
     .eq('id', session.user.id)
     .maybeSingle();
+
+  if (!error && !profile && canonicalSessionEmail) {
+    try {
+      const baseSelect = client
+        .from('profiles')
+        .select('id, email, full_name, role, sucursal, is_active');
+      if (typeof (baseSelect as { ilike?: unknown }).ilike === 'function') {
+        const { data: emailRows, error: emailErr } = await baseSelect
+          .ilike('email', `%${canonicalSessionEmail}%`)
+          .limit(10);
+        if (!emailErr && Array.isArray(emailRows)) {
+          const matched = emailRows.find(
+            (r) => String(r.email || '').trim().toLowerCase() === canonicalSessionEmail
+          );
+          if (matched) profile = matched;
+        }
+      }
+    } catch {
+      /* Fallback opcional cuando el cliente soporta ilike */
+    }
+  }
 
   if (error) {
     // Modo offline real para choferes en ruta con sesión válida ya verificada previamente
@@ -366,7 +468,8 @@ export async function verifyRutaProfileAccess(
     return {
       ok: false,
       code: 'INVALID_BRANCH',
-      error: 'Su perfil no posee una sucursal operativa válida (ZULIA o VALENCIA). Contacte a Super Admin.',
+      error:
+        'Su perfil no posee una sucursal operativa válida (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL). Contacte a Super Admin.',
     };
   }
 

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { OPERATIVE_SUCURSALES, type OperativeSucursal } from './supabaseAdminAuth';
 
 export type AllowedFiscalDocumentMime =
   | 'application/pdf'
@@ -178,10 +179,10 @@ export function verifyFiscalDocumentMagicBytes(
 /**
  * Construye una ruta determinística en servidor ignorando el nombre original del cliente
  * (inmunidad ante Path Traversal):
- * `facturas/{ZULIA|VALENCIA}/{requisicion_uuid}/{uuid}.{pdf|jpg|png|webp}`
+ * `facturas/{ZULIA|VALENCIA|CENTRO|ORIENTE|CAPITAL}/{requisicion_uuid}/{uuid}.{pdf|jpg|png|webp}`
  */
 export function buildDeterministicInvoiceStoragePath(params: {
-  sucursal: 'ZULIA' | 'VALENCIA';
+  sucursal: OperativeSucursal;
   requisicionId: string;
   extension: AllowedFiscalDocumentExtension;
   fileUuid?: string;
@@ -190,7 +191,7 @@ export function buildDeterministicInvoiceStoragePath(params: {
   const cleanReqId = String(params.requisicionId || '').trim().toLowerCase();
   const cleanUuid = String(params.fileUuid || crypto.randomUUID()).trim().toLowerCase();
 
-  if (cleanBranch !== 'ZULIA' && cleanBranch !== 'VALENCIA') {
+  if (!(OPERATIVE_SUCURSALES as readonly string[]).includes(cleanBranch)) {
     throw new FiscalDocumentSecurityError(
       400,
       'INVALID_PATH_COMPONENTS',

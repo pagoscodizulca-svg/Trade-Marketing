@@ -10,6 +10,7 @@ import {
   normalizeManagedUserRole,
   normalizeSucursalCodigo,
   type ManagedUserRole,
+  type OperativeSucursal,
   type SucursalCodigo,
 } from './userManagementService';
 
@@ -98,6 +99,15 @@ export function obtenerEtiquetaSede(
   }
   if (cleanSucursal === 'VALENCIA') {
     return 'Sucursal Valencia';
+  }
+  if (cleanSucursal === 'CENTRO') {
+    return 'Sucursal Centro';
+  }
+  if (cleanSucursal === 'ORIENTE') {
+    return 'Sucursal Oriente';
+  }
+  if (cleanSucursal === 'CAPITAL') {
+    return 'Sucursal Capital';
   }
   throw new Error(MENSAJE_PERFIL_NO_ACTIVO);
 }
@@ -705,7 +715,7 @@ export async function provisionStaffAuthAccountViaBackend(params: {
   email?: string;
   password?: string;
   appRole?: 'promotora' | 'coordinadora' | 'admin';
-  sucursal?: 'ZULIA' | 'VALENCIA';
+  sucursal?: OperativeSucursal;
   active?: boolean;
 }): Promise<{ authUserId: string; loginEmail: string }> {
   const token = await getActiveAccessToken();
