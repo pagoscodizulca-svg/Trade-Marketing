@@ -86,12 +86,12 @@ async function main(): Promise<void> {
   );
 
   // 2. Verificación de Migración SQL Consolidada Zero Trust
-  console.log('\n[2/4] Auditando migración SQL 20261112_zero_trust_fdv_promotoras_portal_ruta.sql...');
+  console.log('\n[2/4] Auditando migración SQL 20261112000400_zero_trust_fdv_promotoras_portal_ruta.sql...');
   const sqlMigrationPath = path.join(
     ROOT_DIR,
     'supabase',
     'migrations',
-    '20261112_zero_trust_fdv_promotoras_portal_ruta.sql'
+    '20261112000400_zero_trust_fdv_promotoras_portal_ruta.sql'
   );
   const sql = fs.readFileSync(sqlMigrationPath, 'utf8');
 
@@ -264,7 +264,7 @@ async function main(): Promise<void> {
 
     if (spoofRes.status === 404) {
       console.log(
-        '  [PENDIENTE EN BD REMOTA] Ejecuta `supabase/migrations/20261112_zero_trust_fdv_promotoras_portal_ruta.sql` en el SQL Editor de Supabase y luego `npm run auth:provision`.'
+        '  [PENDIENTE EN BD REMOTA] Ejecuta `supabase/migrations/20261112000400_zero_trust_fdv_promotoras_portal_ruta.sql` en el SQL Editor de Supabase y luego `npm run auth:provision`.'
       );
     } else if (spoofRes.status === 401 || spoofRes.status === 403) {
       console.log(

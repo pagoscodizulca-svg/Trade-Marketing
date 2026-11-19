@@ -673,8 +673,12 @@ test('HITO 2 — RutaDegustación Zero-Trust (S-06), Ingesta FDV Idempotente (N-
     );
     assert.equal(
       staticReport.duplicateVersionWarnings.length,
-      3,
-      'Debe reportar las 3 advertencias conocidas de versiones duplicadas (20261029, 20261112, 20261116)'
+      0,
+      'Cero advertencias de versiones duplicadas tras reconciliación G1 a marcas únicas de 14 dígitos'
+    );
+    assert.ok(
+      staticReport.checks.some((c) => c.id === 'static.unique_migration_versions' && c.passed),
+      'El certificador estático debe verificar unicidad estricta de versiones de migración'
     );
 
     // 4.b Guardia de seguridad: se niega a correr si VITE_* contiene sb_secret_ o JWT service_role

@@ -150,7 +150,7 @@ function runFase1Verification(): void {
   // 4. Auditoría estática de seguridad (cero DELETE/TRUNCATE/DROP y cero XSS)
   const rootDir = process.cwd();
   const sqlFase1 = fs.readFileSync(
-    path.join(rootDir, 'supabase', 'migrations', '20261112_fase1_historial_degustaciones.sql'),
+    path.join(rootDir, 'supabase', 'migrations', '20261112000200_fase1_historial_degustaciones.sql'),
     'utf8'
   );
   assert.equal(

@@ -75,15 +75,15 @@ test('HITO 0 — Orden e integridad de migraciones desde cero (analizador estát
     assert.match(maestros, /idx_clientes_codigo_vendedor/);
   });
 
-  await t.test('Versiones duplicadas conocidas (deuda documentada para el Hito 2) no aumentan', () => {
+  await t.test('Cero versiones duplicadas en supabase/migrations (reconciliadas a 14 dígitos en Compuerta G1)', () => {
     const duplicates = checkMigrationNaming(names).filter((i) => i.code === 'DUPLICATE_VERSION');
     const found = duplicates
       .map((d) => d.message.match(/Versión (\d+)/)![1]!)
       .sort();
     assert.deepEqual(
       found,
-      ['20261029', '20261112', '20261116'],
-      'Solo se toleran las 3 versiones duplicadas ya existentes; cualquier otra rompe la CLI de Supabase'
+      [],
+      'No deben existir versiones de migración duplicadas; cualquier colisión rompe la CLI de Supabase'
     );
   });
 

@@ -55,14 +55,10 @@ jobs:
           VITE_SUPABASE_URL: https://placeholder.supabase.co
           VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
 
-  # Reconstrucción limpia de las migraciones en un Postgres/Supabase local real (P-06).
-  # Informativo: las migraciones históricas 20261029/20261112/20261116 repiten versión y
-  # `supabase db reset` las rechaza hasta que se renombren (requiere confirmar que no se
-  # aplicaron en remoto). Se vuelve bloqueante al resolver ese punto.
+  # Compuerta bloqueante: reconstrucción limpia de las migraciones en Postgres/Supabase local real (P-06 / G1).
   db-migrations:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1

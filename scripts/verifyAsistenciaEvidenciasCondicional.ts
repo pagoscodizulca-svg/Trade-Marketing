@@ -218,7 +218,7 @@ async function runVerification(): Promise<void> {
     PROJECT_ROOT,
     'supabase',
     'migrations',
-    '20261112_asistencia_evidencias_perfil_condicional.sql'
+    '20261112000100_asistencia_evidencias_perfil_condicional.sql'
   );
   assert.ok(fs.existsSync(sqlPath), 'Existe la migración SQL de evidencias condicionales');
   const sqlContent = fs.readFileSync(sqlPath, 'utf8');

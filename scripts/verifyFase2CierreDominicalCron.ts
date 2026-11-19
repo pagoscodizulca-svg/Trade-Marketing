@@ -300,7 +300,7 @@ async function runFase2Verification(): Promise<void> {
   // =========================================================================
   const rootDir = process.cwd();
   const sqlFase2 = fs.readFileSync(
-    path.join(rootDir, 'supabase', 'migrations', '20261112_fase2_cierre_dominical_cron.sql'),
+    path.join(rootDir, 'supabase', 'migrations', '20261112000300_fase2_cierre_dominical_cron.sql'),
     'utf8'
   );
   assert.ok(sqlFase2.includes('SET search_path = public'), 'Función SQL debe fijar search_path');

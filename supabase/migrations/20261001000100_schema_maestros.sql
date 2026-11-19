@@ -169,3 +169,171 @@ BEGIN
       EXECUTE FUNCTION public.tg_maestros_set_updated_at();
   END IF;
 END $$;
+
+-- -----------------------------------------------------------------------------
+-- 6. Catálogos Preexistentes Reconciliados (Compuerta G1 — No-op seguro en Prod)
+--    Garantiza reconstrucción limpia desde cero (`supabase db reset --local`)
+--    reutilizando sin duplicación las tablas ya existentes en producción:
+--      * public.regiones (5 hubs oficiales: Zulia, Valencia, Centro, Oriente, Capital)
+--      * public.supervisores
+--      * public.productos
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.regiones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  codigo TEXT UNIQUE,
+  nombre TEXT NOT NULL UNIQUE,
+  activo BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE public.regiones IS
+  'Catálogo oficial de los 5 hubs regionales corporativos (Zulia, Valencia, Centro, Oriente, Capital).';
+
+CREATE TABLE IF NOT EXISTS public.supervisores (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  codigo TEXT UNIQUE,
+  nombre TEXT NOT NULL,
+  email TEXT,
+  telefono TEXT,
+  zona TEXT,
+  activo BOOLEAN NOT NULL DEFAULT true,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE public.supervisores IS
+  'Catálogo maestro de supervisores comerciales (reutiliza tabla existente en producción si ya fue creada).';
+
+CREATE TABLE IF NOT EXISTS public.productos (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  codigo TEXT UNIQUE,
+  nombre TEXT NOT NULL,
+  categoria TEXT,
+  marca TEXT,
+  unidad_medida TEXT DEFAULT 'KG',
+  activo BOOLEAN NOT NULL DEFAULT true,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE public.productos IS
+  'Catálogo maestro de productos de Trade Marketing (reutiliza tabla existente en producción si ya fue creada).';
+
+ALTER TABLE public.regiones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.supervisores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.productos ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.regiones FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.supervisores FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.productos FROM PUBLIC, anon;
+
+GRANT SELECT ON TABLE public.regiones TO authenticated;
+GRANT SELECT ON TABLE public.supervisores TO authenticated;
+GRANT SELECT ON TABLE public.productos TO authenticated;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'regiones'
+      AND policyname = 'regiones_select_authenticated'
+  ) THEN
+    CREATE POLICY regiones_select_authenticated
+      ON public.regiones
+      FOR SELECT
+      TO authenticated
+      USING (true);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'supervisores'
+      AND policyname = 'supervisores_select_authenticated'
+  ) THEN
+    CREATE POLICY supervisores_select_authenticated
+      ON public.supervisores
+      FOR SELECT
+      TO authenticated
+      USING (true);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'productos'
+      AND policyname = 'productos_select_authenticated'
+  ) THEN
+    CREATE POLICY productos_select_authenticated
+      ON public.productos
+      FOR SELECT
+      TO authenticated
+      USING (true);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'codigo'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'nombre'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'activo'
+  ) THEN
+    INSERT INTO public.regiones (codigo, nombre, activo) VALUES
+      ('ZULIA', 'Zulia', true),
+      ('VALENCIA', 'Valencia', true),
+      ('CENTRO', 'Centro', true),
+      ('ORIENTE', 'Oriente', true),
+      ('CAPITAL', 'Capital', true)
+    ON CONFLICT DO NOTHING;
+  ELSIF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'codigo'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'nombre'
+  ) THEN
+    INSERT INTO public.regiones (codigo, nombre) VALUES
+      ('ZULIA', 'Zulia'),
+      ('VALENCIA', 'Valencia'),
+      ('CENTRO', 'Centro'),
+      ('ORIENTE', 'Oriente'),
+      ('CAPITAL', 'Capital')
+    ON CONFLICT DO NOTHING;
+  ELSIF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'regiones'
+      AND column_name = 'nombre'
+  ) THEN
+    INSERT INTO public.regiones (nombre) VALUES
+      ('Zulia'),
+      ('Valencia'),
+      ('Centro'),
+      ('Oriente'),
+      ('Capital')
+    ON CONFLICT DO NOTHING;
+  END IF;
+END $$;

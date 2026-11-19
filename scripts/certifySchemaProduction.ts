@@ -321,18 +321,23 @@ export function runStaticCertification(
         : `Políticas legacy activas detectadas: ${leakedLegacyPolicies.join(', ')}`,
   });
 
+  const duplicateVersionIssues = analysis.issues
+    .filter((i) => i.code === 'DUPLICATE_VERSION')
+    .map((i) => `${i.file}: ${i.message}`);
+
+  checks.push({
+    id: 'static.unique_migration_versions',
+    passed: duplicateVersionIssues.length === 0,
+    severity: 'error',
+    detail:
+      duplicateVersionIssues.length === 0
+        ? '0 versiones de migración duplicadas; todas las marcas son únicas para Supabase CLI.'
+        : `Versiones de migración duplicadas detectadas (${duplicateVersionIssues.length}): ${duplicateVersionIssues.join(' | ')}`,
+  });
+
   const duplicateVersionWarnings = analysis.warnings
     .filter((w) => w.code === 'DUPLICATE_VERSION')
     .map((w) => `${w.file}: ${w.message}`);
-
-  if (duplicateVersionWarnings.length > 0) {
-    checks.push({
-      id: 'static.duplicate_migration_versions_advisory',
-      passed: true,
-      severity: 'warning',
-      detail: `Advertencia conocida para supabase db push (${duplicateVersionWarnings.length} versiones de 8 dígitos repetidas previas al Hito 0): ${duplicateVersionWarnings.join(' | ')}`,
-    });
-  }
 
   const passed = checks.every((c) => c.severity === 'warning' || c.passed);
 

@@ -376,7 +376,7 @@ export function checkMigrationNaming(fileNames: string[]): MigrationIssue[] {
   for (const [version, names] of byVersion) {
     if (names.length > 1) {
       issues.push({
-        severity: 'warning',
+        severity: 'error',
         code: 'DUPLICATE_VERSION',
         file: names.join(', '),
         line: 1,
