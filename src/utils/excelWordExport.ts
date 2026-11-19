@@ -1,5 +1,5 @@
 /**
- * Exportadores ejecutivos nativos (`M-02`): Excel `.xlsx` (exceljs) y Word `.docx` (docx).
+ * Exportadores ejecutivos nativos (`M-02` + Compuerta G3): Excel `.xlsx` (exceljs) y Word `.docx` (docx).
  * Los módulos pesados se importan de forma diferida para no inflar el bundle inicial.
  * Seguridad: toda celda de texto pasa por `neutralizeFormulaInjection` (CSV/Excel injection).
  */
@@ -18,6 +18,8 @@ export interface ExecutiveWorkbookInput {
   title: string;
   generatedBy: string;
   generatedAtIso?: string;
+  /** Etiqueta de región / sucursal activa estampada en cabecera de cada hoja */
+  regionLabel?: string;
   sheets: ExportTableSheet[];
 }
 
@@ -30,6 +32,8 @@ export interface DocxReportSection {
 export interface DocxReportInput {
   title: string;
   subtitle?: string;
+  /** Etiqueta de región / sucursal activa estampada en portada y tabla de metadatos */
+  regionLabel?: string;
   metadata: Array<[string, string]>;
   sections: DocxReportSection[];
   pazYSalvo?: { codigo: string; sha256: string } | null;
@@ -56,15 +60,28 @@ export async function buildExecutiveWorkbookBuffer(
   wb.created = input.generatedAtIso ? new Date(input.generatedAtIso) : new Date();
   wb.title = neutralizeFormulaInjection(input.title);
 
+  const cleanRegionLabel = String(input.regionLabel ?? '').trim();
+
   input.sheets.forEach((sheet, idx) => {
     const ws = wb.addWorksheet(sanitizeSheetName(sheet.name, idx));
     ws.addRow([neutralizeFormulaInjection(input.title)]).font = { bold: true, size: 14 };
     ws.addRow([
       neutralizeFormulaInjection(
-        `Generado por ${input.generatedBy} · ${input.generatedAtIso || new Date().toISOString()}`
+        `Generado por ${neutralizeFormulaInjection(input.generatedBy)} · ${
+          input.generatedAtIso || new Date().toISOString()
+        }`
       ),
     ]).font = { italic: true, size: 9 };
-    ws.addRow([]);
+
+    if (cleanRegionLabel) {
+      const safeRegion = neutralizeFormulaInjection(cleanRegionLabel);
+      const regionRow = ws.addRow([
+        neutralizeFormulaInjection(`Región / Sucursal Activa: ${safeRegion}`),
+      ]);
+      regionRow.font = { bold: true, size: 10, color: { argb: 'FFB91C1C' } };
+    } else {
+      ws.addRow([]);
+    }
 
     const headerRow = ws.addRow(sheet.headers.map(neutralizeFormulaInjection));
     headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -123,6 +140,8 @@ export async function buildDocxReportBuffer(input: DocxReportInput): Promise<Uin
       ],
     });
 
+  const cleanRegionLabel = String(input.regionLabel ?? '').trim();
+
   const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [
     new Paragraph({
       heading: HeadingLevel.TITLE,
@@ -130,9 +149,40 @@ export async function buildDocxReportBuffer(input: DocxReportInput): Promise<Uin
     }),
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun(input.title)] }),
   ];
-  if (input.subtitle) children.push(new Paragraph({ children: [new TextRun({ text: input.subtitle, italics: true })] }));
 
-  children.push(makeTable(['Campo', 'Valor'], input.metadata.map(([k, v]) => [k, v])));
+  if (input.subtitle) {
+    children.push(
+      new Paragraph({ children: [new TextRun({ text: input.subtitle, italics: true })] })
+    );
+  }
+
+  if (cleanRegionLabel) {
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: `Región / Sucursal Activa: ${cleanRegionLabel}`,
+            bold: true,
+          }),
+        ],
+      })
+    );
+  }
+
+  const hasRegionInMetadata = input.metadata.some(([k]) =>
+    /regi[oó]n\s*\/\s*sucursal|sucursal\s+activa/i.test(String(k ?? ''))
+  );
+  const effectiveMetadata: Array<[string, string]> =
+    cleanRegionLabel && !hasRegionInMetadata
+      ? [['Región / Sucursal Activa', cleanRegionLabel], ...input.metadata]
+      : input.metadata;
+
+  children.push(
+    makeTable(
+      ['Campo', 'Valor'],
+      effectiveMetadata.map(([k, v]) => [String(k ?? ''), String(v ?? '')])
+    )
+  );
 
   for (const section of input.sections) {
     children.push(
@@ -146,9 +196,14 @@ export async function buildDocxReportBuffer(input: DocxReportInput): Promise<Uin
 
   if (input.pazYSalvo) {
     children.push(
-      new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun('Certificado Paz y Salvo')] }),
+      new Paragraph({
+        heading: HeadingLevel.HEADING_2,
+        children: [new TextRun('Certificado Paz y Salvo')],
+      }),
       new Paragraph({ children: [new TextRun(`Código: ${input.pazYSalvo.codigo}`)] }),
-      new Paragraph({ children: [new TextRun({ text: `SHA-256: ${input.pazYSalvo.sha256}`, font: 'Consolas' })] })
+      new Paragraph({
+        children: [new TextRun({ text: `SHA-256: ${input.pazYSalvo.sha256}`, font: 'Consolas' })],
+      })
     );
   }
 
