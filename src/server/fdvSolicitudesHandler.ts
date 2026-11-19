@@ -3,12 +3,17 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import {
   createUserScopedSupabaseClient,
+  extractRawActiveSucursalHeader,
   getAdminSupabaseClient,
+  isOperativeServerSucursal,
+  normalizeServerSucursal,
+  OPERATIVE_SUCURSALES,
   type AuthenticatedServerUser,
+  type OperativeSucursal,
   type ServerSucursalCodigo,
 } from './supabaseAdminAuth';
 
-export type OperativeSucursal = 'ZULIA' | 'VALENCIA';
+export { OPERATIVE_SUCURSALES, type OperativeSucursal };
 export type FdvTurno = 'MAÑANA' | 'TARDE' | 'COMPLETO';
 
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -63,15 +68,8 @@ export function normalizeDegustacionKey(rawId: string): string {
     .slice(0, 128);
 }
 
-function normalizeRequestedBranch(raw: unknown): OperativeSucursal | 'GLOBAL' | null {
-  const clean = String(raw ?? '').trim().toUpperCase();
-  if (!clean) return null;
-  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') return 'ZULIA';
-  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') {
-    return 'VALENCIA';
-  }
-  if (clean === 'GLOBAL' || clean === 'NACIONAL') return 'GLOBAL';
-  return null;
+export function normalizeRequestedBranch(raw: unknown): OperativeSucursal | 'GLOBAL' | null {
+  return normalizeServerSucursal(raw);
 }
 
 export const FdvSolicitudDegustacionSchema = z
@@ -123,7 +121,7 @@ export const FdvSolicitudDegustacionSchema = z
     materialPop: z.enum(['SI', 'NO']).optional().default('SI'),
     requierePromotora: z.boolean().optional().default(true),
     promoterType: z.enum(['Fija', 'Rotativa']).optional().default('Fija'),
-    sucursal: z.string().trim().max(40).optional(),
+    sucursal: z.string().trim().max(80).optional(),
   })
   .superRefine((val, ctx) => {
     const storeName = (val.clienteNombre || val.store || '').trim();
@@ -238,7 +236,7 @@ function isEditableSolicitudEstado(estado: string): boolean {
 function createSupabaseFdvSolicitudesGateway(): FdvSolicitudesGateway {
   const getClientForActor = (authUser: AuthenticatedServerUser) => {
     const userScoped = authUser.accessToken
-      ? createUserScopedSupabaseClient(authUser.accessToken)
+      ? createUserScopedSupabaseClient(authUser.accessToken, authUser.activeSucursalHeader)
       : null;
     const client = userScoped || getAdminSupabaseClient();
     if (!client) {
@@ -396,18 +394,30 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
 
     const input = parsed.data;
 
-    // Resolver sucursal autoritativa desde la identidad del servidor
-    const requestedBranch = normalizeRequestedBranch(input.sucursal);
+    // Resolver sucursal autoritativa desde la identidad del servidor + x-sucursal-activa
+    const requestedBranch = input.sucursal ? normalizeRequestedBranch(input.sucursal) : null;
     if (input.sucursal && !requestedBranch) {
       res.status(400).json({
-        error: 'Sucursal inválida. Valores operativos permitidos: ZULIA o VALENCIA.',
+        error:
+          'Sucursal inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeRequestedBranch(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
         code: 'INVALID_BRANCH',
       });
       return;
     }
 
     let effectiveSucursal: OperativeSucursal;
-    if (authUser.sucursal === 'ZULIA' || authUser.sucursal === 'VALENCIA') {
+    if (isOperativeServerSucursal(authUser.sucursal)) {
       if (requestedBranch && requestedBranch !== authUser.sucursal) {
         res.status(403).json({
           error: `Cruce de sede bloqueado: tu perfil pertenece a ${authUser.sucursal} y no puede registrar solicitudes para ${requestedBranch}.`,
@@ -415,17 +425,42 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
         });
         return;
       }
+      if (headerBranch && headerBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: `Cruce de sede bloqueado: tu perfil pertenece a ${authUser.sucursal} y no puede operar bajo ${headerBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
       effectiveSucursal = authUser.sucursal;
     } else if (authUser.sucursal === 'GLOBAL') {
-      if (requestedBranch !== 'ZULIA' && requestedBranch !== 'VALENCIA') {
+      if (requestedBranch === 'GLOBAL' || headerBranch === 'GLOBAL') {
         res.status(400).json({
           error:
-            'Un perfil GLOBAL debe especificar explícitamente la sucursal operativa (ZULIA o VALENCIA) de la degustación.',
+            'Un perfil GLOBAL debe especificar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) y no GLOBAL.',
           code: 'BRANCH_REQUIRED',
         });
         return;
       }
-      effectiveSucursal = requestedBranch;
+      if (requestedBranch && headerBranch && requestedBranch !== headerBranch) {
+        res.status(400).json({
+          error: `Conflicto entre body.sucursal (${requestedBranch}) y x-sucursal-activa (${headerBranch}).`,
+          code: 'INVALID_BRANCH',
+        });
+        return;
+      }
+      const candidate =
+        (requestedBranch && isOperativeServerSucursal(requestedBranch) ? requestedBranch : null) ??
+        (headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null);
+      if (!candidate) {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe especificar explícitamente el hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) de la degustación.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      effectiveSucursal = candidate;
     } else {
       res.status(403).json({
         error: 'Su cuenta no tiene una sucursal operativa asignada en public.profiles.',
@@ -433,6 +468,11 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
       });
       return;
     }
+
+    const scopedAuthUser: AuthenticatedServerUser = {
+      ...authUser,
+      activeSucursalHeader: effectiveSucursal,
+    };
 
     const storeName = (input.clienteNombre || input.store || '').trim();
     const vendedorNombre = (input.vendedorNombre || authUser.email || 'Vendedor FDV').trim();
@@ -509,7 +549,7 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
 
     try {
       // 1. Verificar si ya existe una solicitud activa con esta clave canónica
-      const existing = await gateway.findActiveByKey(authUser, degustacionKey);
+      const existing = await gateway.findActiveByKey(scopedAuthUser, degustacionKey);
       if (existing) {
         if (
           existing.autor_user_id &&
@@ -534,7 +574,7 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
         const { created_at: _c, autor_user_id: _a, ...updatable } = record;
         void _c;
         void _a;
-        const updated = await gateway.updateSolicitud(authUser, existing.id, updatable);
+        const updated = await gateway.updateSolicitud(scopedAuthUser, existing.id, updatable);
         res.status(200).json({
           ok: true,
           idempotentHit: true,
@@ -545,7 +585,7 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
       }
 
       // 2. Inserción atómica protegida por `uq_surveys_degustacion_key_active` (PG 23505)
-      const insertResult = await gateway.insertSolicitud(authUser, record);
+      const insertResult = await gateway.insertSolicitud(scopedAuthUser, record);
       if (insertResult.status === 'inserted') {
         res.status(201).json({
           ok: true,
@@ -557,7 +597,7 @@ export function createFdvSolicitudesHandler(gatewayOverride?: FdvSolicitudesGate
       }
 
       // 3. Resolución atómica de carrera concurrente (`Promise.all` / doble clic simultáneo)
-      const winner = await gateway.findActiveByKey(authUser, degustacionKey);
+      const winner = await gateway.findActiveByKey(scopedAuthUser, degustacionKey);
       if (
         winner &&
         (!winner.autor_user_id ||

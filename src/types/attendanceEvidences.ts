@@ -134,7 +134,7 @@ export interface AsistenciaJornadaDbRow {
   perfil_aplicado: PerfilAsistencia;
   pdv_nombre: string;
   zona: string;
-  sucursal?: 'ZULIA' | 'VALENCIA' | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
   opened_at_server: string;
   updated_at_server: string;
   opened_by_uid: string | null;
@@ -155,7 +155,7 @@ export interface AsistenciaEvidenciaDbRow {
   lat: number | null;
   lng: number | null;
   gps_accuracy: number | null;
-  sucursal?: 'ZULIA' | 'VALENCIA' | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
   capturado_en_servidor: string;
   cargado_por_uid: string | null;
   cargado_por_rol: 'promotora' | 'coordinadora' | 'admin';
@@ -307,6 +307,7 @@ export const UploadAttendanceEvidenceMetadataSchema = z.object({
   lat: z.coerce.number().min(-90).max(90).optional().nullable(),
   lng: z.coerce.number().min(-180).max(180).optional().nullable(),
   gpsAccuracy: z.coerce.number().min(0).max(100000).optional().nullable(),
+  sucursal: z.string().trim().max(64).optional(),
 });
 
 export type UploadAttendanceEvidenceMetadata = z.infer<

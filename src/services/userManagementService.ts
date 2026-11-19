@@ -44,21 +44,34 @@ export const MANAGED_USER_ROLE_LABELS: Record<ManagedUserRole, string> = {
 };
 
 /**
- * Código oficial de sede (Hito 1 · D7):
+ * Código oficial de sede / región operativa (Compuerta G2 · 5 Hubs Nacionales + Global):
  *  - `GLOBAL` solo permitido para roles nacionales autorizados (`super_admin`, `contraloria`).
- *  - Los roles regionales exigen obligatoriamente `ZULIA` o `VALENCIA`.
+ *  - Los roles regionales exigen obligatoriamente uno de los 5 hubs operativos:
+ *    `ZULIA`, `VALENCIA`, `CENTRO`, `ORIENTE` o `CAPITAL`.
  */
-export type SucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
-
-export const SUCURSAL_CODIGOS: readonly SucursalCodigo[] = [
+export const OPERATIVE_SUCURSALES = [
   'ZULIA',
   'VALENCIA',
+  'CENTRO',
+  'ORIENTE',
+  'CAPITAL',
+] as const;
+
+export type OperativeSucursal = (typeof OPERATIVE_SUCURSALES)[number];
+
+export type SucursalCodigo = OperativeSucursal | 'GLOBAL';
+
+export const SUCURSAL_CODIGOS: readonly SucursalCodigo[] = [
+  ...OPERATIVE_SUCURSALES,
   'GLOBAL',
 ] as const;
 
 export const SUCURSAL_LABELS: Record<SucursalCodigo, string> = {
   ZULIA: 'Sucursal Zulia',
   VALENCIA: 'Sucursal Valencia',
+  CENTRO: 'Sucursal Centro',
+  ORIENTE: 'Sucursal Oriente',
+  CAPITAL: 'Sucursal Capital',
   GLOBAL: 'Global · Nacional',
 };
 
@@ -167,18 +180,90 @@ export function normalizeManagedUserRole(rawRole: unknown): ManagedUserRole | nu
   return null;
 }
 
+export function isOperativeSucursal(value: unknown): value is OperativeSucursal {
+  return (
+    value === 'ZULIA' ||
+    value === 'VALENCIA' ||
+    value === 'CENTRO' ||
+    value === 'ORIENTE' ||
+    value === 'CAPITAL'
+  );
+}
+
 export function normalizeSucursalCodigo(raw: unknown): SucursalCodigo | null {
-  const clean = String(raw ?? '').trim().toUpperCase();
-  if (!clean) return null;
-  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') {
-    return 'ZULIA';
-  }
-  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') {
-    return 'VALENCIA';
-  }
-  if (clean === 'GLOBAL' || clean === 'NACIONAL' || clean === 'ADMIN_GENERAL') {
+  const nfdLower = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!nfdLower) return null;
+
+  const tokensText = nfdLower.replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!tokensText) return null;
+
+  if (
+    tokensText === 'global' ||
+    tokensText === 'nacional' ||
+    tokensText === 'admin general' ||
+    tokensText === 'global nacional' ||
+    tokensText === 'administracion general nacional' ||
+    tokensText === 'contraloria nacional global'
+  ) {
     return 'GLOBAL';
   }
+
+  const strippedPrefix = tokensText.replace(
+    /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
+    ''
+  );
+  if (strippedPrefix === 'zulia') return 'ZULIA';
+  if (strippedPrefix === 'valencia') return 'VALENCIA';
+  if (strippedPrefix === 'centro') return 'CENTRO';
+  if (strippedPrefix === 'oriente') return 'ORIENTE';
+  if (strippedPrefix === 'capital') return 'CAPITAL';
+
+  if (
+    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'col'
+  ) {
+    return 'ZULIA';
+  }
+
+  if (
+    /\b(valencia|carabobo|naguanagua|san diego|guacara|tocuyito|puerto cabello|los guayos|mariara|bejuma)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'VALENCIA';
+  }
+
+  if (
+    /\b(centro|aragua|maracay|turmero|cagua|la victoria|villa de cura|lara|barquisimeto|cabudare|carora|quibor|yaracuy|san felipe|yaritagua|cojedes|san carlos|tinaquillo)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CENTRO';
+  }
+
+  if (
+    /\b(oriente|anzoategui|barcelona|puerto la cruz|lecheria|el tigre|anaco|cantaura|monagas|maturin|punta de mata|nueva esparta|margarita|porlamar|pampatar|juan griego|sucre|cumana|carupano|puerto ordaz|ciudad guayana|ciudad bolivar|san felix|upata|estado bolivar|delta amacuro|tucupita)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'bolivar'
+  ) {
+    return 'ORIENTE';
+  }
+
+  if (
+    /\b(capital|caracas|distrito capital|dtto capital|gran caracas|miranda|chacao|baruta|el hatillo|petare|los teques|guarenas|guatire|charallave|cua|ocumare del tuy|valles del tuy|higuerote|la guaira|vargas|maiquetia|catia la mar|caraballeda)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CAPITAL';
+  }
+
   return null;
 }
 
@@ -187,9 +272,9 @@ export function getAllowedSucursalesForRole(role: ManagedUserRole): readonly Suc
     return ['GLOBAL'];
   }
   if (role === 'contraloria') {
-    return ['GLOBAL', 'ZULIA', 'VALENCIA'];
+    return ['GLOBAL', ...OPERATIVE_SUCURSALES];
   }
-  return ['ZULIA', 'VALENCIA'];
+  return OPERATIVE_SUCURSALES;
 }
 
 export function isSucursalValidForRole(
@@ -295,7 +380,9 @@ function validateSucursalForRole(
     if (role === 'contraloria' || options?.allowImplicitDefault) {
       return resolveDefaultSucursalForRole(role);
     }
-    throw new Error(`Debes seleccionar una sucursal (ZULIA o VALENCIA) para el rol ${role}.`);
+    throw new Error(
+      `Debes seleccionar una sucursal operativa (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) para el rol ${role}.`
+    );
   }
 
   const normalized = normalizeSucursalCodigo(rawSucursal);
@@ -303,7 +390,7 @@ function validateSucursalForRole(
     throw new Error(
       normalized === 'GLOBAL'
         ? `La sucursal GLOBAL está reservada únicamente para super_admin y contraloria.`
-        : 'Sucursal inválida. Selecciona ZULIA, VALENCIA o GLOBAL.'
+        : 'Sucursal inválida. Selecciona ZULIA, VALENCIA, CENTRO, ORIENTE, CAPITAL o GLOBAL.'
     );
   }
   return normalized;

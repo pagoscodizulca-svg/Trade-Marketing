@@ -26,8 +26,13 @@ import {
 import {
   type AuthenticatedServerUser,
   createUserScopedSupabaseClient,
+  extractRawActiveSucursalHeader,
   getAdminSupabaseClient,
   isCoordinatorOrAdminRole,
+  isOperativeServerSucursal,
+  normalizeOperativeServerSucursal,
+  normalizeServerSucursal,
+  type OperativeSucursal,
 } from './supabaseAdminAuth';
 
 export interface StaffProfileLookupResult {
@@ -36,7 +41,7 @@ export interface StaffProfileLookupResult {
   email: string;
   assignedStore: string;
   address: string;
-  sucursal?: 'ZULIA' | 'VALENCIA' | null;
+  sucursal?: OperativeSucursal | null;
   active: boolean;
   isMerchandising: boolean;
   masterProfile: PerfilAsistencia;
@@ -59,7 +64,7 @@ export interface AttendancePersistenceGateway {
     perfilAplicado: PerfilAsistencia;
     pdvNombre: string;
     zona: string;
-    sucursal?: 'ZULIA' | 'VALENCIA' | null;
+    sucursal?: OperativeSucursal | null;
     openedAtServerIso: string;
     openedByUid: string;
   }): Promise<AsistenciaJornadaDbRow>;
@@ -78,7 +83,7 @@ export interface AttendancePersistenceGateway {
     lat: number | null;
     lng: number | null;
     gpsAccuracy: number | null;
-    sucursal?: 'ZULIA' | 'VALENCIA' | null;
+    sucursal?: OperativeSucursal | null;
     capturadoEnServidorIso: string;
     cargadoPorUid: string;
     cargadoPorRol: 'promotora' | 'coordinadora' | 'admin';
@@ -99,7 +104,7 @@ export interface AttendancePersistenceGateway {
     Array<{
       evidencia: AsistenciaEvidenciaDbRow;
       promotoraId: string;
-      sucursal?: 'ZULIA' | 'VALENCIA' | null;
+      sucursal?: OperativeSucursal | null;
     }>
   >;
 }
@@ -156,11 +161,8 @@ function decodeMetadataHeader(req: Request): unknown {
   return safeCopy;
 }
 
-function normalizeRegionalSucursal(raw: unknown): 'ZULIA' | 'VALENCIA' | null {
-  const clean = String(raw ?? '').trim().toUpperCase();
-  if (clean === 'ZULIA') return 'ZULIA';
-  if (clean === 'VALENCIA') return 'VALENCIA';
-  return null;
+function normalizeRegionalSucursal(raw: unknown): OperativeSucursal | null {
+  return normalizeOperativeServerSucursal(raw);
 }
 
 function isCrossBranchViolation(
@@ -168,7 +170,7 @@ function isCrossBranchViolation(
   recordSucursal: string | null | undefined
 ): boolean {
   const actorRegional = normalizeRegionalSucursal(actorSucursal);
-  if (!actorRegional) return false; // GLOBAL o entorno previo sin sede explícita
+  if (!actorRegional) return false; // GLOBAL sin hub explícito o entorno legado sin sede explícita
   const targetRegional = normalizeRegionalSucursal(recordSucursal);
   if (!targetRegional) return false;
   return actorRegional !== targetRegional;
@@ -179,7 +181,9 @@ function createSupabaseAttendanceGateway(
 ): AttendancePersistenceGateway | null {
   const client =
     getAdminSupabaseClient() ||
-    (authUser.accessToken ? createUserScopedSupabaseClient(authUser.accessToken) : null);
+    (authUser.accessToken
+      ? createUserScopedSupabaseClient(authUser.accessToken, authUser.activeSucursalHeader)
+      : null);
 
   if (!client) return null;
 
@@ -396,7 +400,7 @@ function createSupabaseAttendanceGateway(
 
       const ownerByJornadaId = new Map<
         string,
-        { promotoraId: string; sucursal: 'ZULIA' | 'VALENCIA' | null }
+        { promotoraId: string; sucursal: OperativeSucursal | null }
       >();
       for (const j of jornadas) {
         ownerByJornadaId.set(String(j.id), {
@@ -408,7 +412,7 @@ function createSupabaseAttendanceGateway(
       const joined: Array<{
         evidencia: AsistenciaEvidenciaDbRow;
         promotoraId: string;
-        sucursal?: 'ZULIA' | 'VALENCIA' | null;
+        sucursal?: OperativeSucursal | null;
       }> = [];
       for (const rawEv of evidences) {
         const ev = rawEv as AsistenciaEvidenciaDbRow;
@@ -501,6 +505,74 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
 
     const meta = parsedMeta.data;
 
+    const rawMetaBranch = meta.sucursal ? meta.sucursal.trim() : '';
+    const metaBranch = rawMetaBranch ? normalizeServerSucursal(rawMetaBranch) : null;
+    if (rawMetaBranch && !metaBranch) {
+      res.status(400).json({
+        error:
+          'Sucursal inválida en x-asistencia-meta. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    if (isOperativeServerSucursal(authUser.sucursal)) {
+      if (metaBranch && metaBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede registrar asistencia en ${metaBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      if (headerBranch && headerBranch !== authUser.sucursal) {
+        res.status(403).json({
+          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede operar bajo ${headerBranch}.`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+    } else if (authUser.sucursal === 'GLOBAL') {
+      if (metaBranch === 'GLOBAL' || headerBranch === 'GLOBAL') {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe seleccionar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) y no GLOBAL.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      if (metaBranch && headerBranch && metaBranch !== headerBranch) {
+        res.status(400).json({
+          error: `Conflicto entre meta.sucursal (${metaBranch}) y x-sucursal-activa (${headerBranch}).`,
+          code: 'INVALID_BRANCH',
+        });
+        return;
+      }
+    }
+
+    const explicitHub: OperativeSucursal | null =
+      (metaBranch && isOperativeServerSucursal(metaBranch) ? metaBranch : null) ??
+      (headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null);
+
+    const effectiveActorScope: OperativeSucursal | null = isOperativeServerSucursal(authUser.sucursal)
+      ? authUser.sucursal
+      : explicitHub;
+
+    const scopedUser: AuthenticatedServerUser = {
+      ...authUser,
+      activeSucursalHeader: effectiveActorScope,
+    };
+
     // 3. Control de Acceso RBAC y Propiedad (Anti-IDOR)
     if (!authUser.isCoordinatorOrAdmin) {
       if (authUser.appRole !== 'promotora' || authUser.staffId !== meta.promotoraId) {
@@ -525,7 +597,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       return;
     }
 
-    const gateway = resolveGateway(authUser);
+    const gateway = resolveGateway(scopedUser);
     if (!gateway) {
       res.status(503).json({
         error: 'Servicio de almacenamiento seguro no configurado en el servidor.',
@@ -544,9 +616,9 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
         meta.promotoraId
       );
 
-      if (jornada && isCrossBranchViolation(authUser.sucursal, jornada.sucursal)) {
+      if (jornada && isCrossBranchViolation(effectiveActorScope ?? authUser.sucursal, jornada.sucursal)) {
         res.status(403).json({
-          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede operar jornadas de ${jornada.sucursal}.`,
+          error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${effectiveActorScope ?? authUser.sucursal} y no puede operar jornadas de ${jornada.sucursal}.`,
           code: 'FORBIDDEN_BRANCH',
         });
         return;
@@ -562,10 +634,19 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           return;
         }
 
-        if (isCrossBranchViolation(authUser.sucursal, staffProfile.sucursal)) {
+        if (isCrossBranchViolation(effectiveActorScope ?? authUser.sucursal, staffProfile.sucursal)) {
           res.status(403).json({
-            error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede cargar evidencias para personal de ${staffProfile.sucursal}.`,
+            error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${effectiveActorScope ?? authUser.sucursal} y no puede cargar evidencias para personal de ${staffProfile.sucursal}.`,
             code: 'FORBIDDEN_BRANCH',
+          });
+          return;
+        }
+
+        if (authUser.sucursal === 'GLOBAL' && !staffProfile.sucursal && !explicitHub) {
+          res.status(400).json({
+            error:
+              'Un perfil GLOBAL debe indicar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL).',
+            code: 'BRANCH_REQUIRED',
           });
           return;
         }
@@ -600,7 +681,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           pdvNombre: meta.pdvNombre || staffProfile.assignedStore || 'PDV',
           zona: meta.zona || staffProfile.address || '',
           sucursal:
-            staffProfile.sucursal ?? normalizeRegionalSucursal(authUser.sucursal),
+            staffProfile.sucursal ?? effectiveActorScope ?? normalizeRegionalSucursal(authUser.sucursal),
           openedAtServerIso: serverNowIso,
           openedByUid: authUser.id,
         });
@@ -660,6 +741,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           gpsAccuracy: meta.gpsAccuracy ?? null,
           sucursal:
             normalizeRegionalSucursal(jornada.sucursal) ??
+            effectiveActorScope ??
             normalizeRegionalSucursal(authUser.sucursal),
           capturadoEnServidorIso: serverNowIso,
           cargadoPorUid: authUser.id,
@@ -773,6 +855,40 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       return;
     }
 
+    const rawHeaderBranch = extractRawActiveSucursalHeader(req);
+    const headerBranch = rawHeaderBranch ? normalizeServerSucursal(rawHeaderBranch) : null;
+    if (rawHeaderBranch && !headerBranch) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    if (
+      isOperativeServerSucursal(authUser.sucursal) &&
+      headerBranch &&
+      headerBranch !== authUser.sucursal
+    ) {
+      res.status(403).json({
+        error: `Acceso denegado por aislamiento multi-sede: tu perfil pertenece a ${authUser.sucursal} y no puede consultar evidencias bajo ${headerBranch}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
+
+    const activeHeaderHub =
+      headerBranch && isOperativeServerSucursal(headerBranch) ? headerBranch : null;
+    const effectiveActorScope = isOperativeServerSucursal(authUser.sucursal)
+      ? authUser.sucursal
+      : activeHeaderHub;
+
+    const scopedUser: AuthenticatedServerUser = {
+      ...authUser,
+      activeSucursalHeader: effectiveActorScope,
+    };
+
     const parsed = BatchSignedUrlsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
@@ -783,7 +899,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       return;
     }
 
-    const gateway = resolveGateway(authUser);
+    const gateway = resolveGateway(scopedUser);
     if (!gateway) {
       res.status(503).json({
         error: 'Servicio de almacenamiento seguro no disponible.',
@@ -799,9 +915,12 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       const uniqueIds = Array.from(new Set(parsed.data.evidenciaIds));
       const records = await gateway.findEvidencesWithOwnerByIds(uniqueIds);
 
-      // Verificación estricta de aislamiento multi-sede (ZULIA / VALENCIA; GLOBAL ve ambas)
+      // Verificación estricta de aislamiento multi-sede (5 hubs; GLOBAL ve todas salvo x-sucursal-activa explícita)
       const crossBranch = records.some((r) =>
-        isCrossBranchViolation(authUser.sucursal, r.sucursal ?? r.evidencia.sucursal)
+        isCrossBranchViolation(
+          effectiveActorScope ?? authUser.sucursal,
+          r.sucursal ?? r.evidencia.sucursal
+        )
       );
       if (crossBranch) {
         res.status(403).json({

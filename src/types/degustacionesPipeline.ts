@@ -141,6 +141,7 @@ export interface CronogramaDegustacionRecord {
   en_historial?: boolean;
   archivado_en?: string | null;
   motivo_archivo?: string | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null;
   created_at: string;
   updated_at: string;
 }
@@ -183,7 +184,7 @@ export interface RutaPromotoraRecord {
   pdv_lat_referencia?: number | null;
   pdv_lng_referencia?: number | null;
   pdv_radio_geocerca_m?: number | null;
-  sucursal?: 'ZULIA' | 'VALENCIA' | 'GLOBAL' | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null;
   aprobado_por: string | null;
   asignado_at: string;
   updated_at: string;

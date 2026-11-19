@@ -6,8 +6,17 @@ export type Turno = (typeof TURNOS)[number];
 
 export type AppMode = 'chofer' | 'oficina';
 
+export const OPERATIVE_SUCURSALES = [
+  'ZULIA',
+  'VALENCIA',
+  'CENTRO',
+  'ORIENTE',
+  'CAPITAL',
+] as const;
+export type OperativeSucursal = (typeof OPERATIVE_SUCURSALES)[number];
+
 export type RutaAppRole = 'super_admin' | 'coordinacion' | 'chofer';
-export type SucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
+export type SucursalCodigo = OperativeSucursal | 'GLOBAL';
 
 export interface RutaAuthUser {
   id: string;

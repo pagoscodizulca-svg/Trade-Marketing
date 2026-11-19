@@ -31,7 +31,7 @@ export interface Store {
   cadenaId?: string | null;
   cadenaName?: string;
   zonaId?: string | null;
-  sucursal?: 'ZULIA' | 'VALENCIA' | 'GLOBAL' | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null;
 }
 
 export type ShiftType = 'MAÑANA' | 'TARDE' | 'COMPLETO';
@@ -182,7 +182,7 @@ export interface ControllerRequest {
   campanaId?: string | null;
   presupuestoId?: string | null;
   solicitudOrigenId?: string | null;
-  sucursal?: 'ZULIA' | 'VALENCIA' | null;
+  sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
 }
 
 export interface FiscalReceipt {

@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { getActiveAccessToken } from './authService';
 import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+import { OPERATIVE_SUCURSALES, type OperativeSucursal } from './userManagementService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -46,7 +47,7 @@ export interface MaterialPopItem {
   stockDisponible: number;
   stockMinimo: number;
   activo: boolean;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   updatedAt: string;
 }
 
@@ -61,7 +62,7 @@ export interface MaterialPopMovimiento {
   cantidad: number;
   fechaMovimiento: string;
   observaciones: string;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   createdAt: string;
 }
 
@@ -86,7 +87,7 @@ export interface IncidenciaPdv {
   fotoStoragePath: string | null;
   fotoMimeType: string | null;
   fotoSha256Hex: string | null;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   createdAt: string;
 }
 
@@ -100,7 +101,7 @@ export interface AlertaGeocercaAuditoria {
   distanciaM: number;
   radioPermitidoM: number;
   motivo: string;
-  sucursal: 'ZULIA' | 'VALENCIA' | null;
+  sucursal: OperativeSucursal | null;
   createdAt: string;
 }
 
@@ -193,7 +194,7 @@ export const UpsertMaterialPopSchema = z.object({
   stockDisponible: z.coerce.number().finite().min(0),
   stockMinimo: z.coerce.number().finite().min(0).default(0),
   activo: z.boolean().default(true),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).optional(),
+  sucursal: z.enum(OPERATIVE_SUCURSALES).optional(),
 });
 
 export const MovimientoPopSchema = z.object({
@@ -232,7 +233,7 @@ export const CreateIncidenciaSchema = z.object({
     .max(1000),
   responsableNombre: z.string().trim().min(2).max(140).optional().default('Coordinación Trade'),
   reportadoPorNombre: z.string().trim().min(2).max(140).optional(),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).optional(),
+  sucursal: z.enum(OPERATIVE_SUCURSALES).optional(),
 });
 
 function isTableMissing(err: { code?: string; message?: string } | null): boolean {
@@ -258,7 +259,7 @@ function mapMaterialPopRow(r: Record<string, unknown>): MaterialPopItem {
     stockDisponible: Number(r.stock_disponible ?? 0),
     stockMinimo: Number(r.stock_minimo ?? 0),
     activo: r.activo !== false,
-    sucursal: (r.sucursal as 'ZULIA' | 'VALENCIA' | null) ?? null,
+    sucursal: (r.sucursal as OperativeSucursal | null) ?? null,
     updatedAt: String(r.updated_at || r.created_at || ''),
   };
 }
@@ -275,7 +276,7 @@ function mapMovimientoPopRow(r: Record<string, unknown>): MaterialPopMovimiento 
     cantidad: Number(r.cantidad ?? 0),
     fechaMovimiento: String(r.fecha_movimiento || ''),
     observaciones: String(r.observaciones || ''),
-    sucursal: (r.sucursal as 'ZULIA' | 'VALENCIA' | null) ?? null,
+    sucursal: (r.sucursal as OperativeSucursal | null) ?? null,
     createdAt: String(r.created_at || ''),
   };
 }
@@ -302,7 +303,7 @@ export function mapIncidenciaPdvRow(r: Record<string, unknown>): IncidenciaPdv {
     fotoStoragePath: r.foto_storage_path ? String(r.foto_storage_path) : null,
     fotoMimeType: r.foto_mime_type ? String(r.foto_mime_type) : null,
     fotoSha256Hex: r.foto_sha256_hex ? String(r.foto_sha256_hex) : null,
-    sucursal: (r.sucursal as 'ZULIA' | 'VALENCIA' | null) ?? null,
+    sucursal: (r.sucursal as OperativeSucursal | null) ?? null,
     createdAt: String(r.created_at || ''),
   };
 }
@@ -318,7 +319,7 @@ function mapAlertaGeocercaRow(r: Record<string, unknown>): AlertaGeocercaAuditor
     distanciaM: Number(r.distancia_m ?? 0),
     radioPermitidoM: Number(r.radio_permitido_m ?? 150),
     motivo: String(r.motivo || ''),
-    sucursal: (r.sucursal as 'ZULIA' | 'VALENCIA' | null) ?? null,
+    sucursal: (r.sucursal as OperativeSucursal | null) ?? null,
     createdAt: String(r.created_at || ''),
   };
 }

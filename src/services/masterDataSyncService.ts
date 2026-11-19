@@ -18,6 +18,7 @@ import type {
   MasterDataDatabase,
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
+  SucursalMaestro,
   Vendedor,
   VendedorCrudInput,
   VendedorSincronizacionInput,
@@ -25,6 +26,7 @@ import type {
   ZonaComercialInput,
 } from '../types/masterData';
 import { getMasterDataSupabaseClient } from './supabaseClient';
+import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
 
 export type {
   CadenaComercial,
@@ -42,6 +44,7 @@ export type {
   MasterDataDatabase,
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
+  SucursalMaestro,
   Vendedor,
   VendedorCrudInput,
   VendedorSincronizacionInput,
@@ -99,6 +102,28 @@ export function limpiarCeldaTexto(valor: unknown): string {
 
 export function normalizarCodigoMaestro(valor: unknown): string {
   return limpiarCeldaTexto(valor).toUpperCase().trim();
+}
+
+export function normalizarSucursalMaestro(valor: unknown): SucursalMaestro | null {
+  const limpio = limpiarCeldaTexto(valor);
+  if (!limpio) return null;
+  const norm = normalizeSucursalCodigo(limpio);
+  return norm && isOperativeSucursal(norm) ? norm : null;
+}
+
+export function inferirSucursalDesdeTerritorio(campos: {
+  sucursal?: unknown;
+  zona?: unknown;
+  ciudad?: unknown;
+  estado?: unknown;
+}): SucursalMaestro | null {
+  return (
+    normalizarSucursalMaestro(campos.sucursal) ??
+    normalizarSucursalMaestro(campos.zona) ??
+    normalizarSucursalMaestro(campos.ciudad) ??
+    normalizarSucursalMaestro(campos.estado) ??
+    null
+  );
 }
 
 export function normalizarRifFiscal(valor: unknown): string | null {
@@ -1351,6 +1376,26 @@ export async function obtenerHistorialLotesSincronizacion(
 
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const SucursalMaestroCrudSchema = z
+  .string()
+  .nullable()
+  .optional()
+  .transform((val, ctx) => {
+    if (val === null || val === undefined) return val;
+    const limpio = limpiarCeldaTexto(val);
+    if (!limpio) return null;
+    const norm = normalizarSucursalMaestro(limpio);
+    if (!norm) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'Sucursal inválida. Valores permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+      });
+      return z.NEVER;
+    }
+    return norm;
+  });
+
 export const CadenaComercialCrudSchema = z.object({
   id: z.string().regex(UUID_V4_REGEX).optional(),
   codigo: z
@@ -1370,7 +1415,7 @@ export const CadenaComercialCrudSchema = z.object({
     .optional()
     .default('Supermercado')
     .transform((v) => limpiarCeldaTexto(v) || 'Supermercado'),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: SucursalMaestroCrudSchema,
   activo: z.boolean().optional().default(true),
 });
 
@@ -1398,7 +1443,7 @@ export const ZonaComercialCrudSchema = z.object({
     .nullable()
     .optional()
     .transform((v) => limpiarCeldaTexto(v) || null),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: SucursalMaestroCrudSchema,
   activo: z.boolean().optional().default(true),
 });
 
@@ -1414,13 +1459,13 @@ export const ClienteCrudSchema = ClienteSincronizacionSchema.extend({
     .max(5000, 'El radio de geocerca máximo es 5000 m.')
     .optional()
     .default(150),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: SucursalMaestroCrudSchema,
   activo: z.boolean().optional().default(true),
 });
 
 export const VendedorCrudSchema = VendedorSincronizacionSchema.extend({
   id: z.string().regex(UUID_V4_REGEX).optional(),
-  sucursal: z.enum(['ZULIA', 'VALENCIA']).nullable().optional(),
+  sucursal: SucursalMaestroCrudSchema,
   activo: z.boolean().optional().default(true),
 });
 
@@ -1748,6 +1793,9 @@ export function mapearClienteMaestroAStore(
     cadenaId: cliente.cadena_id ?? null,
     cadenaName: extras?.cadenaNombre || conVend.cadena?.nombre,
     zonaId: cliente.zona_id ?? null,
-    sucursal: cliente.sucursal ?? null,
+    sucursal:
+      normalizarSucursalMaestro(cliente.sucursal) ??
+      inferirSucursalDesdeTerritorio(cliente) ??
+      null,
   };
 }

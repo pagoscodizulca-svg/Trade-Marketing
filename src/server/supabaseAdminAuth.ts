@@ -25,7 +25,17 @@ const ALLOWED_TORRE_VIEWER_ROLES = new Set([
   'contralor',
 ]);
 
-export type ServerSucursalCodigo = 'ZULIA' | 'VALENCIA' | 'GLOBAL';
+export const OPERATIVE_SUCURSALES = [
+  'ZULIA',
+  'VALENCIA',
+  'CENTRO',
+  'ORIENTE',
+  'CAPITAL',
+] as const;
+
+export type OperativeSucursal = (typeof OPERATIVE_SUCURSALES)[number];
+
+export type ServerSucursalCodigo = OperativeSucursal | 'GLOBAL';
 
 export const CORPORATE_MANAGED_ROLES = new Set([
   'super_admin',
@@ -37,14 +47,131 @@ export const CORPORATE_MANAGED_ROLES = new Set([
   'chofer',
 ]);
 
-function normalizeServerSucursal(raw: unknown): ServerSucursalCodigo | null {
-  const clean = String(raw ?? '').trim().toUpperCase();
-  if (clean === 'ZULIA' || clean === 'SUCURSAL ZULIA' || clean === 'MARACAIBO') return 'ZULIA';
-  if (clean === 'VALENCIA' || clean === 'SUCURSAL VALENCIA' || clean === 'CARABOBO') {
+export function normalizeCanonicalEmail(raw: unknown): string {
+  return String(raw ?? '').trim().toLowerCase();
+}
+
+export function isOperativeServerSucursal(value: unknown): value is OperativeSucursal {
+  return (
+    value === 'ZULIA' ||
+    value === 'VALENCIA' ||
+    value === 'CENTRO' ||
+    value === 'ORIENTE' ||
+    value === 'CAPITAL'
+  );
+}
+
+export function normalizeServerSucursal(raw: unknown): ServerSucursalCodigo | null {
+  const nfdLower = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!nfdLower) return null;
+
+  const tokensText = nfdLower.replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!tokensText) return null;
+
+  if (
+    tokensText === 'global' ||
+    tokensText === 'nacional' ||
+    tokensText === 'admin general' ||
+    tokensText === 'global nacional' ||
+    tokensText === 'administracion general nacional' ||
+    tokensText === 'contraloria nacional global'
+  ) {
+    return 'GLOBAL';
+  }
+
+  const strippedPrefix = tokensText.replace(
+    /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
+    ''
+  );
+  if (strippedPrefix === 'zulia') return 'ZULIA';
+  if (strippedPrefix === 'valencia') return 'VALENCIA';
+  if (strippedPrefix === 'centro') return 'CENTRO';
+  if (strippedPrefix === 'oriente') return 'ORIENTE';
+  if (strippedPrefix === 'capital') return 'CAPITAL';
+
+  if (
+    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'col'
+  ) {
+    return 'ZULIA';
+  }
+
+  if (
+    /\b(valencia|carabobo|naguanagua|san diego|guacara|tocuyito|puerto cabello|los guayos|mariara|bejuma)\b/.test(
+      tokensText
+    )
+  ) {
     return 'VALENCIA';
   }
-  if (clean === 'GLOBAL' || clean === 'NACIONAL' || clean === 'ADMIN_GENERAL') return 'GLOBAL';
+
+  if (
+    /\b(centro|aragua|maracay|turmero|cagua|la victoria|villa de cura|lara|barquisimeto|cabudare|carora|quibor|yaracuy|san felipe|yaritagua|cojedes|san carlos|tinaquillo)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CENTRO';
+  }
+
+  if (
+    /\b(oriente|anzoategui|barcelona|puerto la cruz|lecheria|el tigre|anaco|cantaura|monagas|maturin|punta de mata|nueva esparta|margarita|porlamar|pampatar|juan griego|sucre|cumana|carupano|puerto ordaz|ciudad guayana|ciudad bolivar|san felix|upata|estado bolivar|delta amacuro|tucupita)\b/.test(
+      tokensText
+    ) ||
+    tokensText === 'bolivar'
+  ) {
+    return 'ORIENTE';
+  }
+
+  if (
+    /\b(capital|caracas|distrito capital|dtto capital|gran caracas|miranda|chacao|baruta|el hatillo|petare|los teques|guarenas|guatire|charallave|cua|ocumare del tuy|valles del tuy|higuerote|la guaira|vargas|maiquetia|catia la mar|caraballeda)\b/.test(
+      tokensText
+    )
+  ) {
+    return 'CAPITAL';
+  }
+
   return null;
+}
+
+export function normalizeOperativeServerSucursal(raw: unknown): OperativeSucursal | null {
+  const norm = normalizeServerSucursal(raw);
+  return isOperativeServerSucursal(norm) ? norm : null;
+}
+
+export function extractRawActiveSucursalHeader(req: Request): string {
+  const raw = req?.headers?.['x-sucursal-activa'];
+  const val = Array.isArray(raw) ? raw[0] : raw;
+  return typeof val === 'string' ? val.trim() : '';
+}
+
+function normalizeServerRoleAlias(rawRole: unknown): string {
+  const clean = String(rawRole ?? '').trim().toLowerCase();
+  if (
+    clean === 'supervisor' ||
+    clean === 'supervisora' ||
+    clean === 'supervisor_trade'
+  ) {
+    return 'coordinacion';
+  }
+  if (clean === 'fdv' || clean === 'fuerza_ventas') {
+    return 'vendedor';
+  }
+  return clean;
+}
+
+function extractSucursalCandidateFromRecord(row: Record<string, unknown>): ServerSucursalCodigo | null {
+  return (
+    normalizeServerSucursal(row.sucursal) ??
+    normalizeServerSucursal(row.zona) ??
+    normalizeServerSucursal(row.ciudad) ??
+    normalizeServerSucursal(row.estado) ??
+    null
+  );
 }
 
 function sanitizeSucursalForServerRole(
@@ -73,51 +200,217 @@ function sanitizeSucursalForServerRole(
   return normalized;
 }
 
-async function resolveEffectiveServerAppRole(
+async function resolvePromotoraByCanonicalEmail(
+  lookup: SupabaseClient,
+  canonicalEmail: string
+): Promise<{
+  matched: boolean;
+  explicitlyInactive: boolean;
+  sucursal: OperativeSucursal | null;
+  staffId: string | null;
+}> {
+  let matched = false;
+  let explicitlyInactive = false;
+  let sucursal: OperativeSucursal | null = null;
+  let staffId: string | null = null;
+
+  try {
+    const { data: staffRows, error: staffErr } = await lookup
+      .from('staff')
+      .select('*')
+      .ilike('email', `%${canonicalEmail}%`)
+      .limit(10);
+
+    if (!staffErr) {
+      const list = Array.isArray(staffRows)
+        ? (staffRows as Record<string, unknown>[])
+        : staffRows && typeof staffRows === 'object'
+          ? [staffRows as Record<string, unknown>]
+          : [];
+      const staffMatch = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+      if (staffMatch) {
+        let memberStatus = String(staffMatch.status ?? 'Activo').trim();
+        let category = '';
+        let statusAddress = '';
+        let statusAssigned = '';
+        if (memberStatus.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(memberStatus) as Record<string, unknown>;
+            memberStatus = String(parsed.status ?? 'Activo').trim();
+            category = String(parsed.category ?? '').trim().toLowerCase();
+            statusAddress = String(parsed.address ?? '');
+            statusAssigned = String(parsed.assignedLocation ?? '');
+          } catch {
+            memberStatus = 'Activo';
+          }
+        }
+        const roleLower = String(staffMatch.role ?? '').toLowerCase();
+        if (memberStatus.toLowerCase() === 'inactivo') {
+          explicitlyInactive = true;
+        } else if (category !== 'merchandising' && !roleLower.includes('merchandising')) {
+          matched = true;
+          if (UUID_REGEX.test(String(staffMatch.id ?? ''))) {
+            staffId = String(staffMatch.id);
+          }
+          sucursal =
+            normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(staffMatch)) ??
+            normalizeOperativeServerSucursal(statusAddress) ??
+            normalizeOperativeServerSucursal(statusAssigned);
+        }
+      }
+    }
+  } catch {
+    // Continúa a tabla promotoras si staff no está disponible
+  }
+
+  if (!sucursal && !explicitlyInactive) {
+    try {
+      const { data: promRows, error: promErr } = await lookup
+        .from('promotoras')
+        .select('*')
+        .ilike('email', `%${canonicalEmail}%`)
+        .limit(10);
+
+      if (!promErr) {
+        const list = Array.isArray(promRows)
+          ? (promRows as Record<string, unknown>[])
+          : promRows && typeof promRows === 'object'
+            ? [promRows as Record<string, unknown>]
+            : [];
+        const promMatch = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+        if (promMatch) {
+          const isInactive =
+            promMatch.activo === false ||
+            String(promMatch.estado_laboral ?? promMatch.estatus ?? 'Activo')
+              .trim()
+              .toLowerCase() === 'inactivo';
+          if (isInactive) {
+            if (!matched) explicitlyInactive = true;
+          } else {
+            matched = true;
+            if (!staffId && UUID_REGEX.test(String(promMatch.id ?? ''))) {
+              staffId = String(promMatch.id);
+            }
+            sucursal =
+              sucursal ??
+              normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(promMatch));
+          }
+        }
+      }
+    } catch {
+      // Tabla promotoras opcional en mocks mínimos
+    }
+  }
+
+  return { matched, explicitlyInactive, sucursal, staffId };
+}
+
+export async function resolveEffectiveServerAppRole(
   userId: string,
   accessToken: string,
   jwtAppRole: string,
-  jwtSucursal?: unknown
-): Promise<{ role: string; isActive: boolean; sucursal: ServerSucursalCodigo | null }> {
+  jwtSucursal?: unknown,
+  userEmail?: unknown
+): Promise<{
+  role: string;
+  isActive: boolean;
+  sucursal: ServerSucursalCodigo | null;
+  staffId?: string | null;
+}> {
+  const canonicalEmail = normalizeCanonicalEmail(userEmail);
   const lookup = getAdminSupabaseClient() || createUserScopedSupabaseClient(accessToken);
+
+  let profileData: Record<string, unknown> | null = null;
+
   if (lookup && UUID_REGEX.test(userId)) {
     try {
       const { data, error } = await lookup
         .from('profiles')
-        .select('role, is_active, sucursal')
+        .select('*')
         .eq('id', userId)
         .maybeSingle();
 
-      if (!error && data) {
-        if (data.is_active === false) {
-          return { role: '', isActive: false, sucursal: null };
-        }
-        const rawProfileRole = String(data.role ?? '').trim().toLowerCase();
-        const profileRole =
-          rawProfileRole === 'supervisor' ||
-          rawProfileRole === 'supervisora' ||
-          rawProfileRole === 'supervisor_trade'
-            ? 'coordinacion'
-            : rawProfileRole;
-        if (profileRole) {
-          const sucursal =
-            sanitizeSucursalForServerRole(
-              profileRole,
-              (data as { sucursal?: unknown }).sucursal
-            ) ?? sanitizeSucursalForServerRole(profileRole, jwtSucursal);
-          return { role: profileRole, isActive: true, sucursal };
+      if (!error && data && typeof data === 'object') {
+        profileData = data as Record<string, unknown>;
+      }
+    } catch {
+      // Fallback por correo canónico LOWER(TRIM(email)) o app_metadata
+    }
+  }
+
+  if (!profileData && lookup && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+    try {
+      const { data: rows, error } = await lookup
+        .from('profiles')
+        .select('*')
+        .ilike('email', `%${canonicalEmail}%`)
+        .limit(10);
+
+      if (!error) {
+        const list = Array.isArray(rows)
+          ? (rows as Record<string, unknown>[])
+          : rows && typeof rows === 'object'
+            ? [rows as Record<string, unknown>]
+            : [];
+        const matched = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+        if (matched) {
+          profileData = matched;
         }
       }
     } catch {
-      // Fallback al rol firmado en app_metadata cuando public.profiles aún no existe
+      // Continúa a respaldo en staff / promotoras o JWT
     }
   }
-  const normalizedJwtRole =
-    jwtAppRole === 'supervisor' ||
-    jwtAppRole === 'supervisora' ||
-    jwtAppRole === 'supervisor_trade'
-      ? 'coordinacion'
-      : jwtAppRole;
+
+  if (profileData) {
+    if (profileData.is_active === false) {
+      return { role: '', isActive: false, sucursal: null };
+    }
+    const profileRole = normalizeServerRoleAlias(profileData.role);
+    if (profileRole) {
+      let sucursal =
+        sanitizeSucursalForServerRole(
+          profileRole,
+          extractSucursalCandidateFromRecord(profileData)
+        ) ?? sanitizeSucursalForServerRole(profileRole, jwtSucursal);
+      let staffId: string | null = null;
+
+      if (profileRole === 'promotora' && lookup && canonicalEmail && !sucursal) {
+        const promFallback = await resolvePromotoraByCanonicalEmail(lookup, canonicalEmail);
+        if (promFallback.explicitlyInactive) {
+          return { role: '', isActive: false, sucursal: null };
+        }
+        sucursal = sucursal ?? promFallback.sucursal;
+        staffId = promFallback.staffId;
+      }
+
+      return { role: profileRole, isActive: true, sucursal, staffId };
+    }
+  }
+
+  const normalizedJwtRole = normalizeServerRoleAlias(jwtAppRole);
+
+  if (
+    (normalizedJwtRole === 'promotora' || !normalizedJwtRole) &&
+    lookup &&
+    canonicalEmail &&
+    STRICT_EMAIL_REGEX.test(canonicalEmail)
+  ) {
+    const promFallback = await resolvePromotoraByCanonicalEmail(lookup, canonicalEmail);
+    if (promFallback.explicitlyInactive) {
+      return { role: '', isActive: false, sucursal: null };
+    }
+    if (promFallback.matched) {
+      return {
+        role: 'promotora',
+        isActive: true,
+        sucursal:
+          promFallback.sucursal ?? sanitizeSucursalForServerRole('promotora', jwtSucursal),
+        staffId: promFallback.staffId,
+      };
+    }
+  }
+
   return {
     role: normalizedJwtRole,
     isActive: true,
@@ -130,6 +423,7 @@ export interface AuthenticatedServerUser {
   email: string;
   appRole: string;
   sucursal?: ServerSucursalCodigo | null;
+  activeSucursalHeader?: OperativeSucursal | null;
   staffId?: string | null;
   isCoordinatorOrAdmin?: boolean;
   /**
@@ -211,19 +505,28 @@ export function getAdminSupabaseClient(): SupabaseClient | null {
 /**
  * Construye un cliente Supabase acotado al JWT verificado del usuario autenticado
  * para que PostgreSQL RLS y Storage RLS apliquen todas las políticas por fila.
+ * Cuando se indica `activeSucursalHeader` válido entre los 5 hubs operativos, propaga
+ * `x-sucursal-activa` para acotar lecturas/escrituras de actores nacionales (`GLOBAL`).
  */
-export function createUserScopedSupabaseClient(accessToken: string): SupabaseClient | null {
+export function createUserScopedSupabaseClient(
+  accessToken: string,
+  activeSucursalHeader?: unknown
+): SupabaseClient | null {
   const url = getSupabaseProjectUrl();
   const anonKey = getSupabaseAnonKey();
   const cleanToken = String(accessToken || '').trim();
   if (!url || !anonKey || !cleanToken) return null;
 
+  const normalizedActiveHub = normalizeOperativeServerSucursal(activeSucursalHeader);
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${cleanToken}`,
+    ...(normalizedActiveHub ? { 'x-sucursal-activa': normalizedActiveHub } : {}),
+  };
+
   return createClient(url, anonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: {
-      headers: {
-        Authorization: `Bearer ${cleanToken}`,
-      },
+      headers,
     },
   });
 }
@@ -297,7 +600,8 @@ export async function requireFdvOrTradeAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal
+      appMeta.sucursal,
+      data.user.email
     );
     const appRole = effective.role;
 
@@ -320,9 +624,10 @@ export async function requireFdvOrTradeAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || '').trim().toLowerCase(),
+      email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -399,7 +704,8 @@ export async function requireIncidenciaActorAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal
+      appMeta.sucursal,
+      data.user.email
     );
     const appRole = effective.role;
 
@@ -422,10 +728,15 @@ export async function requireIncidenciaActorAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || '').trim().toLowerCase(),
+      email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      isReadOnlyViewer:
+        appRole === 'contraloria' ||
+        appRole === 'analista_contraloria' ||
+        appRole === 'contralor',
       accessToken: token,
     };
     next();
@@ -492,7 +803,8 @@ export async function requireTorreControlAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal
+      appMeta.sucursal,
+      data.user.email
     );
     const appRole = effective.role;
 
@@ -515,9 +827,10 @@ export async function requireTorreControlAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || '').trim().toLowerCase(),
+      email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -698,7 +1011,8 @@ export async function requireCoordinatorOrAdminAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal
+      appMeta.sucursal,
+      data.user.email
     );
     const appRole = effective.role;
 
@@ -712,9 +1026,10 @@ export async function requireCoordinatorOrAdminAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || ''),
+      email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       isCoordinatorOrAdmin: true,
       accessToken: token,
     };
@@ -779,11 +1094,13 @@ export async function requireAttendanceActorAuth(
     const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
       .trim()
       .toLowerCase();
+    const canonicalEmail = normalizeCanonicalEmail(data.user.email);
     const effective = await resolveEffectiveServerAppRole(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal
+      appMeta.sucursal,
+      data.user.email
     );
     const appRole = effective.role;
 
@@ -798,9 +1115,10 @@ export async function requireAttendanceActorAuth(
     if (isCoordinatorOrAdminRole(appRole)) {
       req.authUser = {
         id: data.user.id,
-        email: String(data.user.email || ''),
+        email: canonicalEmail,
         appRole,
         sucursal: effective.sucursal,
+        activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
         staffId:
           typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id)
             ? appMeta.staff_id
@@ -817,9 +1135,10 @@ export async function requireAttendanceActorAuth(
     if (isTorreViewerRole(appRole)) {
       req.authUser = {
         id: data.user.id,
-        email: String(data.user.email || ''),
+        email: canonicalEmail,
         appRole,
         sucursal: effective.sucursal,
+        activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
         staffId: null,
         isCoordinatorOrAdmin: false,
         isReadOnlyViewer: true,
@@ -858,9 +1177,14 @@ export async function requireAttendanceActorAuth(
     const candidateClaimId =
       typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id.trim())
         ? appMeta.staff_id.trim()
-        : null;
+        : effective.staffId && UUID_REGEX.test(effective.staffId)
+          ? effective.staffId
+          : null;
 
-    let staffRecord = linkedStaff;
+    let staffRecord: Record<string, unknown> | null =
+      linkedStaff && typeof linkedStaff === 'object'
+        ? (linkedStaff as Record<string, unknown>)
+        : null;
     if (!staffRecord && candidateClaimId) {
       const { data: claimStaff } = await lookupClient
         .from('staff')
@@ -868,13 +1192,34 @@ export async function requireAttendanceActorAuth(
         .eq('id', candidateClaimId)
         .maybeSingle();
       if (claimStaff && (!claimStaff.auth_user_id || claimStaff.auth_user_id === data.user.id)) {
-        staffRecord = claimStaff;
+        staffRecord = claimStaff as Record<string, unknown>;
+      }
+    }
+
+    if (!staffRecord && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+      try {
+        const { data: emailRows } = await lookupClient
+          .from('staff')
+          .select('*')
+          .ilike('email', `%${canonicalEmail}%`)
+          .limit(10);
+        const list = Array.isArray(emailRows)
+          ? (emailRows as Record<string, unknown>[])
+          : emailRows && typeof emailRows === 'object'
+            ? [emailRows as Record<string, unknown>]
+            : [];
+        const matched = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+        if (matched && (!matched.auth_user_id || matched.auth_user_id === data.user.id)) {
+          staffRecord = matched;
+        }
+      } catch {
+        // Respaldo opcional por correo canónico
       }
     }
 
     if (staffRecord && UUID_REGEX.test(String(staffRecord.id || ''))) {
-      const rowSuc = normalizeServerSucursal((staffRecord as { sucursal?: unknown }).sucursal);
-      if (rowSuc === 'ZULIA' || rowSuc === 'VALENCIA') {
+      const rowSuc = normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(staffRecord));
+      if (rowSuc) {
         resolvedStaffSucursal = resolvedStaffSucursal ?? rowSuc;
       }
       let memberStatus = 'Activo';
@@ -884,9 +1229,16 @@ export async function requireAttendanceActorAuth(
           const parsed = JSON.parse(staffRecord.status) as Record<string, unknown>;
           memberStatus = String(parsed.status || 'Activo').trim();
           category = String(parsed.category || '').trim().toLowerCase();
+          if (!resolvedStaffSucursal) {
+            resolvedStaffSucursal =
+              normalizeOperativeServerSucursal(parsed.address) ??
+              normalizeOperativeServerSucursal(parsed.assignedLocation);
+          }
         } catch {
           // Conservar valores por defecto seguros
         }
+      } else if (typeof staffRecord.status === 'string') {
+        memberStatus = staffRecord.status.trim();
       }
       const roleLower = String(staffRecord.role || '').toLowerCase();
       if (
@@ -908,9 +1260,10 @@ export async function requireAttendanceActorAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || ''),
+      email: canonicalEmail,
       appRole: 'promotora',
       sucursal: resolvedStaffSucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       staffId: resolvedStaffId,
       isCoordinatorOrAdmin: false,
       accessToken: token,
@@ -1001,13 +1354,43 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       return;
     }
 
-    const callerRegionalSucursal =
-      req.authUser?.sucursal === 'ZULIA' || req.authUser?.sucursal === 'VALENCIA'
-        ? req.authUser.sucursal
-        : null;
+    const rawHeaderSucursal = extractRawActiveSucursalHeader(req);
+    const headerSucursal = rawHeaderSucursal ? normalizeServerSucursal(rawHeaderSucursal) : null;
+    if (rawHeaderSucursal && !headerSucursal) {
+      res.status(400).json({
+        error:
+          'Cabecera x-sucursal-activa inválida. Hubs permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    const rawBodySucursal =
+      body.sucursal !== undefined && body.sucursal !== null ? String(body.sucursal).trim() : '';
+    const requestedSucursal = rawBodySucursal ? normalizeServerSucursal(rawBodySucursal) : null;
+    if (rawBodySucursal && !requestedSucursal) {
+      res.status(400).json({
+        error:
+          'Sucursal inválida. Hubs operativos permitidos: ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
+        code: 'INVALID_BRANCH',
+      });
+      return;
+    }
+
+    const callerRegionalSucursal = isOperativeServerSucursal(req.authUser?.sucursal)
+      ? req.authUser.sucursal
+      : null;
     const existingStaffSucursal = normalizeServerSucursal(
       (staffRow as { sucursal?: unknown }).sucursal
     );
+
+    if (callerRegionalSucursal && headerSucursal && headerSucursal !== callerRegionalSucursal) {
+      res.status(403).json({
+        error: `Cruce de sede bloqueado: tu perfil pertenece a ${callerRegionalSucursal} y no puede operar bajo ${headerSucursal}.`,
+        code: 'FORBIDDEN_BRANCH',
+      });
+      return;
+    }
 
     if (
       callerRegionalSucursal &&
@@ -1022,7 +1405,6 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       return;
     }
 
-    const requestedSucursal = normalizeServerSucursal(body.sucursal);
     if (
       callerRegionalSucursal &&
       requestedSucursal &&
@@ -1041,15 +1423,52 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
         : requestedRole === 'coordinadora'
           ? 'coordinacion'
           : 'promotora';
-    const effectiveSucursal: ServerSucursalCodigo =
-      effectiveProfileRole === 'super_admin'
-        ? 'GLOBAL'
-        : callerRegionalSucursal ||
-          (existingStaffSucursal && existingStaffSucursal !== 'GLOBAL'
-            ? existingStaffSucursal
-            : null) ||
-          (requestedSucursal && requestedSucursal !== 'GLOBAL' ? requestedSucursal : null) ||
-          'ZULIA';
+
+    let effectiveSucursal: ServerSucursalCodigo;
+    if (effectiveProfileRole === 'super_admin') {
+      effectiveSucursal = 'GLOBAL';
+    } else if (callerRegionalSucursal) {
+      effectiveSucursal = callerRegionalSucursal;
+    } else {
+      if (requestedSucursal === 'GLOBAL' || headerSucursal === 'GLOBAL') {
+        res.status(400).json({
+          error:
+            'Un perfil GLOBAL debe seleccionar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) para aprovisionar personal regional.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      if (
+        headerSucursal &&
+        isOperativeServerSucursal(headerSucursal) &&
+        existingStaffSucursal &&
+        isOperativeServerSucursal(existingStaffSucursal) &&
+        headerSucursal !== existingStaffSucursal
+      ) {
+        res.status(403).json({
+          error: `Cruce de sede bloqueado: el contexto activo (${headerSucursal}) no coincide con la sucursal del personal (${existingStaffSucursal}).`,
+          code: 'FORBIDDEN_BRANCH',
+        });
+        return;
+      }
+      const resolvedRegional =
+        (requestedSucursal && isOperativeServerSucursal(requestedSucursal)
+          ? requestedSucursal
+          : null) ??
+        (headerSucursal && isOperativeServerSucursal(headerSucursal) ? headerSucursal : null) ??
+        (existingStaffSucursal && isOperativeServerSucursal(existingStaffSucursal)
+          ? existingStaffSucursal
+          : null);
+      if (!resolvedRegional) {
+        res.status(400).json({
+          error:
+            'Se requiere indicar el hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL) en sucursal o x-sucursal-activa.',
+          code: 'BRANCH_REQUIRED',
+        });
+        return;
+      }
+      effectiveSucursal = resolvedRegional;
+    }
 
     const loginEmail = normalizeStaffLoginEmail(
       rawEmail || String(staffRow.email || ''),
@@ -1214,11 +1633,38 @@ export async function requireSuperAdminAuth(
       return;
     }
 
-    const { data: profile, error: profileErr } = await lookup
+    const canonicalEmail = normalizeCanonicalEmail(data.user.email);
+    const { data: profileById, error: profileErr } = await lookup
       .from('profiles')
-      .select('role, is_active')
+      .select('role, is_active, email')
       .eq('id', data.user.id)
       .maybeSingle();
+
+    let profile: { role?: unknown; is_active?: unknown; email?: unknown } | null =
+      profileById ?? null;
+
+    if (!profileErr && !profile && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+      try {
+        const { data: emailRows, error: emailErr } = await lookup
+          .from('profiles')
+          .select('role, is_active, email')
+          .ilike('email', `%${canonicalEmail}%`)
+          .limit(10);
+        if (!emailErr) {
+          const list = Array.isArray(emailRows)
+            ? (emailRows as Record<string, unknown>[])
+            : emailRows && typeof emailRows === 'object'
+              ? [emailRows as Record<string, unknown>]
+              : [];
+          const matched = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+          if (matched) {
+            profile = matched;
+          }
+        }
+      } catch {
+        // Fallback opcional por correo canónico
+      }
+    }
 
     const activeRole = String(profile?.role ?? '').trim().toLowerCase();
     if (profileErr || !profile || profile.is_active !== true || activeRole !== 'super_admin') {
@@ -1231,9 +1677,10 @@ export async function requireSuperAdminAuth(
 
     req.authUser = {
       id: data.user.id,
-      email: String(data.user.email || '').trim().toLowerCase(),
+      email: canonicalEmail,
       appRole: 'super_admin',
       sucursal: 'GLOBAL',
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
       isCoordinatorOrAdmin: true,
       accessToken: token,
     };
@@ -1331,7 +1778,8 @@ export async function handleCreateCorporateUser(req: Request, res: Response): Pr
       resolvedSucursal = normalizeServerSucursal(rawSucursal);
       if (!resolvedSucursal) {
         res.status(400).json({
-          error: 'Sucursal inválida. Valores permitidos para contraloria: GLOBAL, ZULIA, VALENCIA.',
+          error:
+            'Sucursal inválida. Valores permitidos para contraloria: GLOBAL, ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL.',
           code: 'INVALID_SUCURSAL_FOR_ROLE',
         });
         return;
@@ -1339,9 +1787,9 @@ export async function handleCreateCorporateUser(req: Request, res: Response): Pr
     }
   } else {
     const candidate = normalizeServerSucursal(rawSucursal);
-    if (candidate !== 'ZULIA' && candidate !== 'VALENCIA') {
+    if (!isOperativeServerSucursal(candidate)) {
       res.status(400).json({
-        error: `El rol ${role} requiere asignar explícitamente sucursal ZULIA o VALENCIA (GLOBAL está reservado para roles nacionales).`,
+        error: `El rol ${role} requiere asignar explícitamente un hub operativo (ZULIA, VALENCIA, CENTRO, ORIENTE o CAPITAL; GLOBAL está reservado para roles nacionales).`,
         code: 'INVALID_SUCURSAL_FOR_ROLE',
       });
       return;

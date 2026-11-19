@@ -48,6 +48,8 @@ export function buildCorsMiddleware(options: {
       'Content-Type',
       'x-asistencia-meta',
       'x-incidencia-meta',
+      'x-factura-meta',
+      'x-sucursal-activa',
       'x-cron-secret',
     ],
     credentials: false,
