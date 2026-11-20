@@ -48,7 +48,7 @@ import {
   type PortalClientePdvOption,
   type PortalClienteUserOption,
 } from './ClientePortalAccesosManager';
-import { ShiftLinkManagerPanel } from './ShiftLinkManagerPanel';
+import { PortalQuickLinksBar } from './PortalQuickLinksBar';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 
 export interface RegionActivaItem {
@@ -884,29 +884,8 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
         </div>
       </div>
 
-      {/* 0. Generador y Control de Enlaces Dinámicos Firmados (Promotoras + Chofer · PWA Offline) */}
-      <ShiftLinkManagerPanel
-        sucursal={activeHub}
-        regionNombre={activeRegionMeta.nombre}
-        promotorasOptions={bundle.staff
-          .filter((s) => parseStaffStatus(s.status) === 'Activo')
-          .map((s) => ({ id: s.id, name: s.name, roleLabel: s.role || 'Promotora' }))}
-        choferesOptions={bundle.profiles
-          .filter((p) => normalizeManagedUserRole(p.role) === 'chofer' && p.is_active !== false)
-          .map((p) => ({
-            id: p.id,
-            name: String(p.full_name ?? p.fullName ?? '').trim() || p.email,
-            roleLabel: 'Chofer',
-          }))}
-        routeSuggestions={Array.from(
-          new Set(
-            bundle.clientes
-              .map((c) => String(c.ciudad ?? '').trim())
-              .filter(Boolean)
-          )
-        )}
-        disableAutoFetch={Boolean(scopedInitialBundle)}
-      />
+      {/* 0. Accesos rápidos de copiado de enlace para App Promotoras (/portal) y App Chofer (/logistica/) */}
+      <PortalQuickLinksBar />
 
       {/* 1. Padrón Regional de Promotoras (public.staff) + Aprovisionamiento /portal */}
       <section className="rounded-2xl bg-zinc-950/95 border border-white/10 p-4 sm:p-5 space-y-3.5">

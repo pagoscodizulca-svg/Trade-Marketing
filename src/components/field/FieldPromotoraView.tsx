@@ -9,8 +9,6 @@ import {
   Check,
   Store as StoreIcon,
   Sliders,
-  Send,
-  Smartphone,
   Trash2,
   Edit2,
   Play,
@@ -36,7 +34,6 @@ import {
   ChevronRight,
   ChevronDown,
   Download,
-  Upload,
   Lock,
   ShieldCheck,
   MessageCircle,
@@ -49,7 +46,6 @@ import {
 } from '../../utils/portalLinkSharing';
 import { ExportPdfButton } from '../common/ExportPdfButton';
 import {
-  exportTastingSchedulePdf,
   exportPromotoraReportsPdf,
   exportMonthlyTastingGeneralReportPdf,
   exportPendingTastingAuthorizationPdf,
@@ -83,7 +79,6 @@ import {
   fetchCheckinPhotosBatch,
   updateSupabaseDegustacionStatus,
   assignSupabaseDegustacionPromotora,
-  createSupabaseSellerDegustacionRequest,
   updateSupabaseInventoryObservation,
   createSupabaseInventoryRecord,
   deleteSupabaseInventoryRecord,
@@ -114,7 +109,6 @@ import {
 } from '../../services/degustacionesPipelineService';
 import { calculateProductionSupplies } from '../../utils/productionSuppliesCalculator';
 import {
-  getCaracasWeekCycleBounds,
   getPastCaracasWeeksRange,
   isTastingBeforeTodayCaracas,
   isTastingInPastCaracasWeek,
@@ -132,9 +126,7 @@ import {
   ServerPaginatedHistorialSurveyResult,
 } from '../../services/degustacionesWeeklyCycleService';
 import { TradeContraloriaSolicitudesTab } from './TradeContraloriaSolicitudesTab';
-import { MultiFormatTastingUploadModal } from './MultiFormatTastingUploadModal';
-import { ShiftLinkManagerPanel } from '../admin/ShiftLinkManagerPanel';
-import { isOperativeSucursal, type OperativeSucursal } from '../../services/userManagementService';
+import { PortalQuickLinksBar } from '../admin/PortalQuickLinksBar';
 
 export type FieldSubTab =
   | 'degustaciones'
@@ -296,7 +288,6 @@ export const FieldPromotoraView: React.FC = () => {
     currentRole,
     isStrictAdmin,
     caracasWeekStartYmd,
-    stores,
     visits,
     updateVisit,
     upsertVisitFromApprovedTasting,
@@ -311,47 +302,71 @@ export const FieldPromotoraView: React.FC = () => {
     focusedTastingSnapshot,
     setFocusedTastingSnapshot,
     solicitudesContraloria,
-    activeSucursal,
-    verifiedSucursal,
   } = useApp();
-
-  const resolvedFieldSucursal: OperativeSucursal = isOperativeSucursal(activeSucursal)
-    ? activeSucursal
-    : isOperativeSucursal(verifiedSucursal)
-      ? verifiedSucursal
-      : 'ZULIA';
 
   const liveClock = useLiveVenezuelaClock();
   const [selectedMetric360, setSelectedMetric360] = useState<Metric360Id | null>(null);
-  const [isMultiFormatUploadOpen, setIsMultiFormatUploadOpen] = useState(false);
-
-  const syncedStoreItemsForUpload = useMemo(() => {
-    const items: Array<{ name: string; clientCode?: string; zone?: string; address?: string }> = [];
-    for (const t of module1Bundle?.tastingItems || []) {
-      if (t.storeName) {
-        items.push({
-          name: t.storeName,
-          clientCode: t.clienteCodigo,
-          zone: t.zone,
-          address: t.address,
-        });
-      }
-    }
-    for (const vh of module1Bundle?.visitsHistory || []) {
-      if (vh.storeName) {
-        items.push({ name: vh.storeName, zone: vh.zone });
-      }
-    }
-    for (const sm of module1Bundle?.staffMembers || []) {
-      if (sm.assignedStore && sm.assignedStore !== 'Ruta Variable / Por Asignar') {
-        items.push({ name: sm.assignedStore });
-      }
-    }
-    return items;
-  }, [module1Bundle]);
 
   // Active sub-module tab (Degustaciones | Informes | Merchandising | Personal)
   const [activeSubTab, setActiveSubTab] = useState<FieldSubTab>('degustaciones');
+
+  // Referencia tipada y estado para desplazamiento suave accesible del botón "Enlaces"
+  const linksSectionRef = useRef<HTMLElement | null>(null);
+  const [scrollToLinksTrigger, setScrollToLinksTrigger] = useState<number>(0);
+  const [isLinksSectionHighlighted, setIsLinksSectionHighlighted] = useState<boolean>(false);
+  const linksHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleScrollToLinksSection = useCallback(() => {
+    setActiveSubTab('personal');
+    setScrollToLinksTrigger((prev) => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (linksHighlightTimerRef.current !== null) {
+        clearTimeout(linksHighlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (scrollToLinksTrigger === 0 || activeSubTab !== 'personal') return;
+
+    let innerFrameId: number | null = null;
+    const outerFrameId = window.requestAnimationFrame(() => {
+      innerFrameId = window.requestAnimationFrame(() => {
+        const target = linksSectionRef.current;
+        if (!target) return;
+
+        const prefersReducedMotion =
+          typeof window !== 'undefined' &&
+          typeof window.matchMedia === 'function' &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        target.scrollIntoView({
+          behavior: prefersReducedMotion ? 'auto' : 'smooth',
+          block: 'start',
+        });
+        target.focus({ preventScroll: true });
+
+        if (linksHighlightTimerRef.current !== null) {
+          clearTimeout(linksHighlightTimerRef.current);
+        }
+        setIsLinksSectionHighlighted(true);
+        linksHighlightTimerRef.current = setTimeout(() => {
+          setIsLinksSectionHighlighted(false);
+          linksHighlightTimerRef.current = null;
+        }, 1800);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(outerFrameId);
+      if (innerFrameId !== null) {
+        window.cancelAnimationFrame(innerFrameId);
+      }
+    };
+  }, [activeSubTab, scrollToLinksTrigger]);
 
   // Sub-tab inside Degustaciones: 'actual' | 'historial'
   const [tastingViewMode, setTastingViewMode] = useState<'actual' | 'historial'>('actual');
@@ -996,9 +1011,20 @@ export const FieldPromotoraView: React.FC = () => {
   // Estado para el Informe Global y Detallado de Degustaciones según Filtro Aplicado (PDF)
   const [isExportingMonthlyPdf, setIsExportingMonthlyPdf] = useState(false);
   const [monthlyPdfSuccess, setMonthlyPdfSuccess] = useState(false);
+  const isExportingMonthlyLockRef = useRef<boolean>(false);
+  const monthlyPdfSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (monthlyPdfSuccessTimerRef.current !== null) {
+        clearTimeout(monthlyPdfSuccessTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleExportMonthlyReportPdf = async () => {
-    if (isExportingMonthlyPdf) return;
+    if (isExportingMonthlyPdf || isExportingMonthlyLockRef.current) return;
+    isExportingMonthlyLockRef.current = true;
     try {
       setIsExportingMonthlyPdf(true);
       await exportMonthlyTastingGeneralReportPdf(globalFilteredReportItems, {
@@ -1008,10 +1034,17 @@ export const FieldPromotoraView: React.FC = () => {
         scope: 'all',
       });
       setMonthlyPdfSuccess(true);
-      setTimeout(() => setMonthlyPdfSuccess(false), 3200);
+      if (monthlyPdfSuccessTimerRef.current !== null) {
+        clearTimeout(monthlyPdfSuccessTimerRef.current);
+      }
+      monthlyPdfSuccessTimerRef.current = setTimeout(() => {
+        setMonthlyPdfSuccess(false);
+        monthlyPdfSuccessTimerRef.current = null;
+      }, 3200);
     } catch {
       showToast('No se pudo generar el Informe Global de Degustaciones PDF.');
     } finally {
+      isExportingMonthlyLockRef.current = false;
       setIsExportingMonthlyPdf(false);
     }
   };
@@ -1202,40 +1235,6 @@ export const FieldPromotoraView: React.FC = () => {
   const totalAzucarGrams = useMemo(() => visits.reduce((acc, v) => acc + (v.azucarGrams || 0), 0), [visits]);
   const totalLecheGrams = useMemo(() => visits.reduce((acc, v) => acc + (v.lecheGrams || 0), 0), [visits]);
   const totalPromotoras = useMemo(() => availablePromotoras.length, [availablePromotoras]);
-
-  // Modal para enviar solicitud FDV real a Supabase (sin valores ficticios prellenados)
-  const [isSimulateSellerAppOpen, setIsSimulateSellerAppOpen] = useState(false);
-  const [isSubmittingSellerReq, setIsSubmittingSellerReq] = useState(false);
-  const isSubmittingLockRef = useRef<boolean>(false);
-  const [newSellerDraftToken, setNewSellerDraftToken] = useState<string>(
-    () => `deg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-  );
-  const [sellerSubmitError, setSellerSubmitError] = useState<string | null>(null);
-  const [newSellerName, setNewSellerName] = useState('');
-  const [newSellerStore, setNewSellerStore] = useState('');
-  const [newSellerClientCode, setNewSellerClientCode] = useState('');
-  const [newSellerZone, setNewSellerZone] = useState('');
-  const [newSellerAddress, setNewSellerAddress] = useState('');
-  const [newSellerContacto, setNewSellerContacto] = useState('');
-  const [newSellerTelefono, setNewSellerTelefono] = useState('');
-  const [newSellerProduct, setNewSellerProduct] = useState('Mortadela Especial Asturias 0.900kg');
-  const [newSellerDate, setNewSellerDate] = useState(() => liveClock.todayYmd);
-  const [newSellerTime, setNewSellerTime] = useState('09:00 AM - 01:00 PM');
-  const [newSellerPromoterType, setNewSellerPromoterType] = useState<'Fija' | 'Eventual'>('Fija');
-  const [newSellerMaterialPop, setNewSellerMaterialPop] = useState<'SI' | 'NO'>('SI');
-
-  useEffect(() => {
-    if (!isSimulateSellerAppOpen) {
-      setNewSellerDate(liveClock.todayYmd);
-      setSellerSubmitError(null);
-      setNewSellerDraftToken(
-        `deg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-      );
-    }
-  }, [liveClock.todayYmd, isSimulateSellerAppOpen]);
-  const [newSellerQuantity, setNewSellerQuantity] = useState('5');
-  const [newSellerPersonas, setNewSellerPersonas] = useState('150');
-  const [newSellerReason, setNewSellerReason] = useState('');
 
   // Modal de Ficha Completa (35 campos íntegros enviados por el Vendedor) + navegación desde el Globito
   const [selectedTastingDetail, setSelectedTastingDetail] = useState<TastingScheduleItem | null>(null);
@@ -1899,108 +1898,6 @@ export const FieldPromotoraView: React.FC = () => {
     } finally {
       approvingIdsRef.current.delete(id);
       setProcessingTastingId((prev) => (prev === id ? null : prev));
-    }
-  };
-
-  // Enviar nueva solicitud FDV directo a Supabase con blindaje anti-duplicados y confirmación real de BD
-  const handleSendFromSellerApp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmittingSellerReq || isSubmittingLockRef.current) {
-      return;
-    }
-
-    setSellerSubmitError(null);
-
-    const cleanSeller = newSellerName.trim();
-    const cleanStore = newSellerStore.trim();
-    const cleanZone = newSellerZone.trim();
-    const cleanProduct = newSellerProduct.trim();
-    const cleanDate = newSellerDate.trim();
-    const cleanTime = newSellerTime.trim();
-    const qtyNum = Number(newSellerQuantity);
-    const personasNum = Number(newSellerPersonas);
-
-    if (!cleanSeller) {
-      setSellerSubmitError('Debe indicar el nombre del Vendedor Solicitante (FDV).');
-      return;
-    }
-    if (!cleanStore) {
-      setSellerSubmitError('Debe indicar el nombre del Cliente / PDV.');
-      return;
-    }
-    if (!cleanZone) {
-      setSellerSubmitError('Debe indicar la Ruta o Zona Comercial.');
-      return;
-    }
-    if (!cleanProduct) {
-      setSellerSubmitError('Debe indicar el Producto a degustar.');
-      return;
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
-      setSellerSubmitError('Debe seleccionar una Fecha Solicitada válida.');
-      return;
-    }
-    if (!cleanTime) {
-      setSellerSubmitError('Debe indicar el Horario / Turno propuesto.');
-      return;
-    }
-    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
-      setSellerSubmitError('Los Kilos / Unidades solicitados deben ser mayores a 0.');
-      return;
-    }
-    if (!Number.isFinite(personasNum) || personasNum <= 0) {
-      setSellerSubmitError('Las Personas Estimadas deben ser mayores a 0.');
-      return;
-    }
-
-    isSubmittingLockRef.current = true;
-    setIsSubmittingSellerReq(true);
-
-    try {
-      const persistedRow = await createSupabaseSellerDegustacionRequest({
-        degustacionId: newSellerDraftToken,
-        sellerName: cleanSeller,
-        storeName: cleanStore,
-        clienteCodigo: newSellerClientCode.trim(),
-        zone: cleanZone,
-        address: newSellerAddress.trim(),
-        contactoPunto: newSellerContacto.trim(),
-        telefonoContacto: newSellerTelefono.trim(),
-        productName: cleanProduct,
-        date: cleanDate,
-        timeRange: cleanTime,
-        kilos: qtyNum,
-        personas: personasNum,
-        requierePromotora: true,
-        promoterType: newSellerPromoterType,
-        materialPop: newSellerMaterialPop,
-        notes: newSellerReason.trim(),
-      });
-
-      await refreshSupabaseData();
-
-      // Solo tras confirmación real de escritura en Supabase limpiamos y confirmamos al vendedor
-      setNewSellerName('');
-      setNewSellerStore('');
-      setNewSellerClientCode('');
-      setNewSellerZone('');
-      setNewSellerAddress('');
-      setNewSellerContacto('');
-      setNewSellerTelefono('');
-      setNewSellerQuantity('5');
-      setNewSellerPersonas('150');
-      setNewSellerReason('');
-      setIsSimulateSellerAppOpen(false);
-      showToast(
-        `✓ Degustación confirmada en Supabase (#${persistedRow.id.slice(0, 8).toUpperCase()}) y notificada en tiempo real a Trade Marketing.`
-      );
-    } catch {
-      setSellerSubmitError(
-        'No se pudo confirmar la escritura en Supabase. Verifique su conexión e intente de nuevo.'
-      );
-    } finally {
-      isSubmittingLockRef.current = false;
-      setIsSubmittingSellerReq(false);
     }
   };
 
@@ -3248,7 +3145,7 @@ export const FieldPromotoraView: React.FC = () => {
         <div className="space-y-6">
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl shadow-xl backdrop-blur-md">
             {/* Cabecera de Píldoras y Acciones Estilizadas */}
-            <div className="p-4 bg-zinc-950/90 rounded-t-2xl border-b border-white/[0.07] flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="p-4 bg-zinc-950/90 rounded-t-2xl border-b border-white/[0.07] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <div className="inline-flex items-center bg-zinc-900/90 p-1 rounded-xl border border-white/[0.08] shadow-inner gap-1">
                   <button
@@ -3290,11 +3187,15 @@ export const FieldPromotoraView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Botones de Acción Estilizados */}
-              <div className="flex flex-wrap items-center gap-2">
+              {/* Barra de Acciones Ejecutivas (3 botones en fila limpia en escritorio) */}
+              <div
+                data-testid="degustaciones-toolbar-actions"
+                className="flex flex-wrap lg:flex-nowrap items-center gap-2 shrink-0"
+              >
                 {tastingViewMode === 'actual' && (
                   <button
                     type="button"
+                    data-testid="btn-toolbar-export-auth-pdf"
                     onClick={handleExportPendingAuthorizationPdf}
                     disabled={isExportingAuthPdf || visiblePendingAuthorizationCount === 0}
                     aria-busy={isExportingAuthPdf}
@@ -3309,7 +3210,7 @@ export const FieldPromotoraView: React.FC = () => {
                               : 'General de Pendientes'
                           })`
                     }
-                    className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed text-amber-100 hover:text-white border border-amber-400/50 hover:border-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_4px_14px_-2px_rgba(245,158,11,0.3)] transition-all cursor-pointer"
+                    className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide whitespace-nowrap bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed text-amber-100 hover:text-white border border-amber-400/50 hover:border-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_4px_14px_-2px_rgba(245,158,11,0.3)] transition-all cursor-pointer"
                   >
                     {isExportingAuthPdf ? (
                       <Loader2 className="w-3.5 h-3.5 text-amber-300 animate-spin" />
@@ -3333,10 +3234,23 @@ export const FieldPromotoraView: React.FC = () => {
 
                 <button
                   type="button"
+                  data-testid="btn-toolbar-enlaces"
+                  onClick={handleScrollToLinksSection}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl whitespace-nowrap bg-zinc-900 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-bold border border-white/15 hover:border-red-500/45 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#DC2626]"
+                  title="Ir a la sección de enlaces de acceso de la aplicación"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <span>Enlaces</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="btn-toolbar-export-global-pdf"
                   onClick={handleExportMonthlyReportPdf}
                   disabled={isExportingMonthlyPdf}
+                  aria-busy={isExportingMonthlyPdf}
                   title={`Descargar Informe Global y Detallado según el filtro aplicado (${activeGlobalReportMeta.summaryLabel})`}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide bg-red-600 hover:bg-red-500 disabled:opacity-60 text-white border border-red-500/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_4px_14px_-2px_rgba(220,38,38,0.5)] transition-all cursor-pointer"
+                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide whitespace-nowrap bg-red-600 hover:bg-red-500 disabled:opacity-60 disabled:cursor-not-allowed text-white border border-red-500/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_4px_14px_-2px_rgba(220,38,38,0.5)] transition-all cursor-pointer"
                 >
                   {isExportingMonthlyPdf ? (
                     <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
@@ -3356,59 +3270,6 @@ export const FieldPromotoraView: React.FC = () => {
                     {activeGlobalReportMeta.badgeLabel}
                   </span>
                 </button>
-
-                <ExportPdfButton
-                  label="PDF Vista Actual"
-                  variant="secondary"
-                  documentTitle={`Cronograma de Degustaciones y Rutas (${tastingViewMode === 'actual' ? 'Semana en Curso' : 'Historial'})`}
-                  subtitle="CODIZULCA C.A. • Gestión de Promotoras y Fuerza de Ventas en PDV (Supabase)"
-                  onExportPdf={() => exportTastingSchedulePdf(displayedItems, tastingViewMode)}
-                />
-
-                <button
-                  type="button"
-                  onClick={() => setActiveSubTab('personal')}
-                  className="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-bold border border-white/15 hover:border-red-500/45 transition flex items-center gap-1.5 cursor-pointer"
-                  title="Generar enlace dinámico firmado por jornada en la pestaña Personal"
-                >
-                  <ShieldCheck className="w-3.5 h-3.5 text-red-400" />
-                  <span>Enlaces Dinámicos</span>
-                </button>
-
-                {FEATURE_FLAGS.ENABLE_MODULO1_CARGAR_ARCHIVO && (
-                  <button
-                    type="button"
-                    onClick={() => setIsMultiFormatUploadOpen(true)}
-                    className="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-500/40 hover:border-emerald-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition flex items-center gap-1.5 cursor-pointer"
-                    title="Cargar planificaciones de degustaciones en formato Excel (.xlsx/.xls), CSV (.csv) o PDF (.pdf) hacia el Módulo 2"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Cargar Archivo (Excel / CSV / PDF)</span>
-                  </button>
-                )}
-
-                {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && (
-                  <button
-                    type="button"
-                    onClick={() => setIsSimulateSellerAppOpen(true)}
-                    className="px-3.5 py-2 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-100 hover:text-white text-xs font-semibold border border-white/10 hover:border-red-500/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Smartphone className="w-3.5 h-3.5 text-red-400" />
-                    <span>+ Enviar Solicitud FDV</span>
-                  </button>
-                )}
-
-                {FEATURE_FLAGS.ENABLE_MODULO1_CICLO_ISO_BADGE && (
-                  <div
-                    className="px-3 py-2 rounded-xl bg-zinc-900/90 text-zinc-300 text-[11px] font-mono border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] flex items-center gap-1.5"
-                    title={`Corte semanal ISO automático todos los lunes a las 00:00:00.000 America/Caracas (Semana actual: ${getCaracasWeekCycleBounds().inicioSemanaActualYmd} al ${getCaracasWeekCycleBounds().finSemanaActualYmd})`}
-                  >
-                    <Clock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>
-                      Ciclo ISO ({liveClock.currentWeek.shortRangeLabel} · UTC-4)
-                    </span>
-                  </div>
-                )}
               </div>
             </div>
 
@@ -4504,15 +4365,6 @@ export const FieldPromotoraView: React.FC = () => {
                                   Ver Historial ({archivedTastingCount})
                                 </button>
                               )}
-                              {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && (
-                                <button
-                                  type="button"
-                                  onClick={() => setIsSimulateSellerAppOpen(true)}
-                                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-bold transition cursor-pointer"
-                                >
-                                  + Enviar Solicitud FDV
-                                </button>
-                              )}
                             </div>
                           </div>
                         ) : (
@@ -4574,295 +4426,6 @@ export const FieldPromotoraView: React.FC = () => {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* MODAL: ENVIAR NUEVA SOLICITUD FDV DIRECTO A SUPABASE (BLINDADO E ÍNTEGRO) */}
-      {/* ========================================================================= */}
-      {FEATURE_FLAGS.ENABLE_MODULO1_ENVIAR_SOLICITUD_FDV && isSimulateSellerAppOpen && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-[#09090B] border-2 border-[#DC2626] rounded-3xl max-w-2xl w-full p-6 shadow-2xl my-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-zinc-900">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#DC2626]/15 border border-[#DC2626]/40 flex items-center justify-center text-[#DC2626]">
-                  <Smartphone className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm sm:text-base font-black text-white uppercase tracking-wider">
-                    Enviar Solicitud de Degustación FDV → Trade Marketing
-                  </h3>
-                  <p className="text-[11px] text-zinc-400 font-mono">
-                    ID Transacción: {newSellerDraftToken} · Sincronización Realtime Supabase
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                disabled={isSubmittingSellerReq}
-                onClick={() => setIsSimulateSellerAppOpen(false)}
-                className="text-zinc-500 hover:text-white disabled:opacity-40 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSendFromSellerApp} className="space-y-3.5 py-4">
-              {sellerSubmitError && (
-                <div className="p-3 rounded-xl bg-red-950/70 border border-[#DC2626] text-xs text-red-200 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
-                  <span>{sellerSubmitError}</span>
-                </div>
-              )}
-
-              <fieldset disabled={isSubmittingSellerReq} className="space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Vendedor Solicitante (FDV) *
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerName}
-                      onChange={(e) => setNewSellerName(e.target.value)}
-                      required
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                      placeholder="Ej. SAIRÚ VALLES / MARIANA CHACÍN"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Ruta / Zona Comercial *
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerZone}
-                      onChange={(e) => setNewSellerZone(e.target.value)}
-                      required
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                      placeholder="Ej. CUENTAS CLAVE 2 / MARACAIBO NORTE"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="sm:col-span-2">
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Cliente PDV Propuesto *
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerStore}
-                      onChange={(e) => setNewSellerStore(e.target.value)}
-                      required
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                      placeholder="Nombre del supermercado o cliente"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Código Cliente
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerClientCode}
-                      onChange={(e) => setNewSellerClientCode(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono focus:outline-none focus:border-red-600"
-                      placeholder="Ej. 7499"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Contacto en Punto (PDV)
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerContacto}
-                      onChange={(e) => setNewSellerContacto(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                      placeholder="Encargado PDV"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Teléfono Contacto
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerTelefono}
-                      onChange={(e) => setNewSellerTelefono(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono focus:outline-none focus:border-red-600"
-                      placeholder="Ej. 0414-0000000"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Dirección Exacta PDV
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerAddress}
-                      onChange={(e) => setNewSellerAddress(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                      placeholder="Av. / Sector"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Producto a Degustar *
-                    </label>
-                    <input
-                      type="text"
-                      value={newSellerProduct}
-                      onChange={(e) => setNewSellerProduct(e.target.value)}
-                      required
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Kilos / Unidades *
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="500"
-                      step="0.5"
-                      required
-                      value={newSellerQuantity}
-                      onChange={(e) => setNewSellerQuantity(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono font-bold focus:outline-none focus:border-red-600"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Personas Estimadas *
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="2000"
-                      required
-                      value={newSellerPersonas}
-                      onChange={(e) => setNewSellerPersonas(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white font-mono font-bold focus:outline-none focus:border-red-600"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Fecha Solicitada *
-                    </label>
-                    <input
-                      type="date"
-                      required
-                      value={newSellerDate}
-                      onChange={(e) => setNewSellerDate(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Horario Propuesto *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={newSellerTime}
-                      onChange={(e) => setNewSellerTime(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Tipo Promotora
-                    </label>
-                    <select
-                      value={newSellerPromoterType}
-                      onChange={(e) =>
-                        setNewSellerPromoterType(e.target.value as 'Fija' | 'Eventual')
-                      }
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                    >
-                      <option value="Fija">Plantilla Fija</option>
-                      <option value="Eventual">Plantilla Eventual</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                      Material POP
-                    </label>
-                    <select
-                      value={newSellerMaterialPop}
-                      onChange={(e) => setNewSellerMaterialPop(e.target.value as 'SI' | 'NO')}
-                      className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                    >
-                      <option value="SI">SÍ Requiere POP</option>
-                      <option value="NO">NO Requiere POP</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-bold text-zinc-400 uppercase block mb-1">
-                    Justificación Comercial / Observaciones del Vendedor
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={newSellerReason}
-                    onChange={(e) => setNewSellerReason(e.target.value)}
-                    placeholder="Detalle comercial, acuerdos con el cliente o requerimientos especiales..."
-                    className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                  />
-                </div>
-              </fieldset>
-
-              <div className="flex items-center justify-between gap-2 pt-3 border-t border-zinc-900">
-                <span className="text-[10px] font-mono text-zinc-500">
-                  Estado inicial: SOLICITADA · leido_trade: false
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isSubmittingSellerReq}
-                    onClick={() => setIsSimulateSellerAppOpen(false)}
-                    className="px-4 py-2 rounded-xl bg-black hover:bg-zinc-900 text-zinc-300 text-xs font-bold border border-zinc-800 disabled:opacity-40 cursor-pointer"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmittingSellerReq}
-                    className="px-5 py-2.5 rounded-xl bg-[#DC2626] hover:bg-red-700 text-white text-xs font-black uppercase tracking-wider border border-red-500 shadow-md flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                  >
-                    {isSubmittingSellerReq ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Send className="w-3.5 h-3.5" />
-                    )}
-                    <span>
-                      {isSubmittingSellerReq
-                        ? 'Confirmando transacción en BD...'
-                        : 'Enviar Degustación a Trade Marketing'}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </form>
           </div>
         </div>
       )}
@@ -6856,16 +6419,23 @@ export const FieldPromotoraView: React.FC = () => {
                 )}
               </div>
 
-              {/* Acción de acceso firmado por jornada */}
+              {/* Botones inferiores: Enviar Link por WhatsApp + Abrir /portal */}
               <div className="flex items-center gap-1.5 pt-0.5">
-                <a
-                  href="#shift-links-personal-panel"
-                  className="flex-1 py-2 px-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 bg-red-600/15 hover:bg-red-600/30 text-red-200 hover:text-white border border-red-500/35 transition"
-                  title="Generar enlace dinámico firmado con expiración para esta promotora"
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSendWhatsAppPortalLink({
+                      promotoraName: member.name,
+                      promotoraEmail: member.email,
+                      phone: member.phone,
+                    })
+                  }
+                  className="flex-1 py-2 px-2.5 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 hover:text-white border border-emerald-500/40 transition cursor-pointer"
+                  title={`Enviar link de /portal por WhatsApp a ${member.name} (${member.phone || 'seleccionar contacto'})`}
                 >
-                  <ShieldCheck className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                  <span className="truncate">Generar Enlace Firmado</span>
-                </a>
+                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">Enviar Link por WhatsApp</span>
+                </button>
                 <a
                   href={buildStaffAppLink(member)}
                   target="_blank"
@@ -6963,24 +6533,20 @@ export const FieldPromotoraView: React.FC = () => {
               </div>
             </div>
 
-            {/* Generador de Enlaces Dinámicos Firmados (Promotoras + Chofer · Cero PII en URL) */}
-            <div id="shift-links-personal-panel">
-              <ShiftLinkManagerPanel
-                sucursal={resolvedFieldSucursal}
-                promotorasOptions={staffList.map((s) => ({
-                  id: s.id,
-                  name: s.name,
-                  roleLabel: s.role || 'Promotora',
-                }))}
-                routeSuggestions={Array.from(
-                  new Set(
-                    tastingSchedule
-                      .map((t) => String(t.zone || '').trim())
-                      .filter(Boolean)
-                  )
-                )}
-              />
-            </div>
+            {/* Accesos rápidos de copiado de enlace para App Promotoras (/portal) y App Chofer (/logistica/) */}
+            <section
+              ref={linksSectionRef}
+              tabIndex={-1}
+              data-testid="field-portal-links-section"
+              aria-label="Enlaces de acceso a aplicaciones"
+              className={`scroll-mt-6 rounded-2xl transition-all duration-300 focus:outline-none ${
+                isLinksSectionHighlighted
+                  ? 'ring-2 ring-[#DC2626] ring-offset-2 ring-offset-[#09090b]'
+                  : ''
+              }`}
+            >
+              <PortalQuickLinksBar />
+            </section>
 
             {/* GRUPO 1: PLANTILLA FIJA */}
             {(selectedStaffCategoryFilter === 'TODAS' || selectedStaffCategoryFilter === 'fija') && (
@@ -7247,25 +6813,6 @@ export const FieldPromotoraView: React.FC = () => {
             } else {
               setTastingDayFilter('TODOS');
             }
-          }}
-        />
-      )}
-
-      {/* Motor de Lectura Multiformato (Excel / CSV / PDF) y Volcado a Módulo 2 */}
-      {FEATURE_FLAGS.ENABLE_MODULO1_CARGAR_ARCHIVO && (
-        <MultiFormatTastingUploadModal
-          isOpen={isMultiFormatUploadOpen}
-          onClose={() => setIsMultiFormatUploadOpen(false)}
-          stores={stores}
-          syncedStoreItems={syncedStoreItemsForUpload}
-          staffMembers={module1Bundle?.staffMembers || []}
-          cargadoPor={currentUser?.name || 'Coordinación Trade Marketing'}
-          cargadoPorRol={currentRole || 'jefe_trade'}
-          onBatchDumpedSuccess={async (res) => {
-            showToast(
-              `✅ Lote volcado a Módulo 2: ${res.total_insertadas} degustación(es) en PENDIENTE_APROBACION (${res.total_duplicadas} duplicadas omitidas).`
-            );
-            await refreshSupabaseData();
           }}
         />
       )}

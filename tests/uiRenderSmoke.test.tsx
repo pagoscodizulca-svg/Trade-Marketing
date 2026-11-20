@@ -381,6 +381,12 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     assert.match(coordinatorHtml, /data-testid="sucursal-personal-module-zulia"/);
     assert.match(coordinatorHtml, /Módulo Personal Zulia/);
     assert.match(coordinatorHtml, /data-testid="locked-sucursal-badge"/);
+    assert.match(coordinatorHtml, /data-testid="portal-quick-links-bar"/);
+    assert.match(coordinatorHtml, /data-testid="btn-copy-link-promotoras"/);
+    assert.match(coordinatorHtml, /data-testid="btn-copy-link-chofer"/);
+    assert.ok(!coordinatorHtml.includes('Enlaces Dinámicos Firmados'));
+    assert.ok(!coordinatorHtml.includes('enlaces activos'));
+    assert.ok(!coordinatorHtml.includes('No se pudieron consultar los enlaces activos'));
     assert.ok(coordinatorHtml.includes('María González Zulia'));
     assert.ok(
       !coordinatorHtml.includes('Intrusa Valencia Filtrada'),
