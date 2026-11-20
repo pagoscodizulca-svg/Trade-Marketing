@@ -17,6 +17,7 @@ import {
   canAccessOficinaMode,
   formatRutaRoleLabel,
   formatSucursalLabel,
+  getRutaSupabaseClient,
   isRutaSuperAdmin,
   resolveEffectiveMode,
   resolveRutaSupabaseConfig,
@@ -248,6 +249,35 @@ export default function App() {
       repo.stop();
     };
   }, [authUser, repo]);
+
+  // Suscripción reactiva a cambios en las 5 entidades maestras (BD <-> App Chofer/Oficina)
+  useEffect(() => {
+    if (!authUser || shiftSession) return;
+    const client = getRutaSupabaseClient();
+    if (!client) return;
+
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (timerId) clearTimeout(timerId);
+      timerId = setTimeout(() => {
+        void refresh();
+      }, 400);
+    };
+
+    const channel = client
+      .channel(`ruta-maestros-sync-${authUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'productos' }, scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'promotoras' }, scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'supervisores' }, scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'regiones' }, scheduleRefresh)
+      .subscribe();
+
+    return () => {
+      if (timerId) clearTimeout(timerId);
+      void client.removeChannel(channel);
+    };
+  }, [authUser, shiftSession, refresh]);
 
   const modo: AppMode = authUser ? resolveEffectiveMode(modoSolicitado, authUser.role) : 'chofer';
   const puedeOficina = authUser ? canAccessOficinaMode(authUser.role) : false;

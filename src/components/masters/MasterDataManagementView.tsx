@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { CadenaLogoUploaderModal } from '../admin/CadenaLogoUploaderModal';
+import { MasterEntitiesSyncPanel } from './MasterEntitiesSyncPanel';
 import { AnimatedTabContainer, SlidingTabRail } from '../ui/AnimatedTabContainer';
 import {
   cambiarEstadoCadenaComercial,
@@ -427,6 +428,9 @@ export const MasterDataManagementView: React.FC = () => {
           <span>{feedback.text}</span>
         </div>
       )}
+
+      {/* Panel Unificado BD <-> Pantallas de las 5 Entidades Maestras y Cuarentena Regional */}
+      <MasterEntitiesSyncPanel />
 
       {/* Encabezado y KPIs */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-5">

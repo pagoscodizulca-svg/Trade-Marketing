@@ -31,6 +31,7 @@ import {
   registerSupabaseSessionResetCallback,
 } from './supabaseClient';
 import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
+import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
 
 export type {
   CadenaComercial,
@@ -1182,6 +1183,7 @@ export function clearMasterDataCaches(): void {
 }
 
 registerSupabaseSessionResetCallback(clearMasterDataCaches);
+registerMemoryCachePurgeCallback(clearMasterDataCaches);
 
 function buildScopedMasterCacheKey(params: Record<string, unknown>): string {
   return `${getActiveClientSucursalHeader() || 'GLOBAL'}::${JSON.stringify(params)}`;

@@ -20,6 +20,12 @@ import {
 } from '../hooks/useDegustacionesNotifications';
 import { useCronogramaRealtimeSync } from '../hooks/useCronogramaRealtimeSync';
 import { useMasterData, type UseMasterDataResult } from '../hooks/useMasterData';
+import {
+  useMasterEntitiesSync,
+  type UseMasterEntitiesSyncResult,
+} from '../hooks/useMasterEntitiesSync';
+import { clearMasterCatalogCaches } from '../services/masterCatalogSyncService';
+import { purgeAllSessionCaches } from '../services/sessionCacheHygiene';
 import { FEATURE_FLAGS } from '../config/featureFlags';
 import {
   useSolicitudesContraloria,
@@ -167,6 +173,8 @@ export interface AppContextType {
   verifiedIamRole: ManagedUserRole | null;
   /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null) */
   verifiedSucursal: SucursalCodigo | null;
+  /** UUID de `public.regiones` asignado al usuario en BD (null para `super_admin` o usuario regional pendiente) */
+  verifiedRegionId: string | null;
   /** Catálogo dinámico de las 5 regiones activas (`public.regiones`) */
   activeRegiones: ActiveRegionItem[];
   /** Sucursal operativa activa en la sesión (`ZULIA | VALENCIA | CENTRO | ORIENTE | CAPITAL | null`) */
@@ -193,6 +201,8 @@ export interface AppContextType {
   stores: Store[];
   /** Fuente Única de Verdad de Maestros (`public.clientes`, `public.vendedores`, `public.cadenas_comerciales`, `public.zonas`) */
   masterData: UseMasterDataResult;
+  /** Sincronización Realtime BD <-> Pantallas de las 5 entidades maestras (`regiones`, `productos`, `supervisores`, `promotoras`, cuarentena) */
+  masterEntities: UseMasterEntitiesSyncResult;
   visits: ScheduledVisit[];
   requests: ControllerRequest[];
   tastingReports: TastingExecutionReport[];
@@ -451,6 +461,7 @@ export const AppProvider: React.FC<{
     appRole?: string | null;
     iamRole?: ManagedUserRole | null;
     sucursal?: SucursalCodigo | null;
+    regionId?: string | null;
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -465,6 +476,7 @@ export const AppProvider: React.FC<{
   const lastFocusRevalidationMsRef = useRef<number>(Date.now());
   const verifiedIamRole: ManagedUserRole | null = verifiedProfile?.iamRole ?? null;
   const verifiedSucursal: SucursalCodigo | null = verifiedProfile?.sucursal ?? null;
+  const verifiedRegionId: string | null = verifiedProfile?.regionId ?? null;
   const [activeRegiones, setActiveRegiones] = useState<ActiveRegionItem[]>(() =>
     DEFAULT_FIVE_REGIONES.map((item) => ({ ...item }))
   );
@@ -677,6 +689,17 @@ export const AppProvider: React.FC<{
     cargarZonas: true,
     suscribirCambiosRealtime: true,
     deshabilitado: requiresSucursalSelection,
+  });
+
+  const isRegionalUserWithoutRegion = Boolean(
+    verifiedProfile && !canSwitchSucursal && !lockedRegionalSucursal && !verifiedRegionId
+  );
+
+  const masterEntities = useMasterEntitiesSync({
+    disabled: isRegionalUserWithoutRegion || (requiresSucursalSelection && verifiedIamRole !== 'super_admin'),
+    enableRealtime: true,
+    scopeKey: `${verifiedProfile?.userId ?? 'local'}:${activeSucursal ?? 'GLOBAL'}`,
+    clientesSnapshot: rawMasterData.clientes,
   });
 
   useEffect(() => {
@@ -1146,6 +1169,11 @@ export const AppProvider: React.FC<{
     sessionDeletedVisitIds.clear();
     sessionVisitsCleared = false;
     clearMasterDataCaches();
+    clearMasterCatalogCaches();
+    void purgeAllSessionCaches({
+      reason: 'region_switch',
+      preserveAuthSession: true,
+    });
     setIsMasterCachePurged(true);
     visitsRef.current = [];
     reconciliationRef.current = EMPTY_RECONCILIATION;
@@ -1203,6 +1231,7 @@ export const AppProvider: React.FC<{
       void rawMasterData.refrescar().finally(() => {
         setIsMasterCachePurged(false);
       });
+      void masterEntities.refresh(true);
       void solicitudesContraloria.refreshSolicitudes();
       void degustacionNotifications.reloadNotifications();
     },
@@ -1212,6 +1241,7 @@ export const AppProvider: React.FC<{
       refreshSupabaseData,
       refreshFinancialData,
       rawMasterData,
+      masterEntities,
       solicitudesContraloria,
       degustacionNotifications,
     ]
@@ -2335,6 +2365,7 @@ export const AppProvider: React.FC<{
       rawMasterData.refrescar().finally(() => {
         setIsMasterCachePurged(false);
       }),
+      masterEntities.refresh(true),
       degustacionNotifications.reloadNotifications(),
       solicitudesContraloria.refreshSolicitudes(),
     ]);
@@ -2348,6 +2379,7 @@ export const AppProvider: React.FC<{
         setCurrentRole,
         verifiedIamRole,
         verifiedSucursal,
+        verifiedRegionId,
         activeRegiones,
         activeSucursal,
         activeSucursalLabel,
@@ -2362,6 +2394,7 @@ export const AppProvider: React.FC<{
         users,
         stores,
         masterData,
+        masterEntities,
         visits,
         requests,
         tastingReports,

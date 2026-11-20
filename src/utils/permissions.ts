@@ -4,7 +4,11 @@ import {
   type VerifiedAuthProfile,
 } from '../services/authService';
 import { getSupabaseClient, isSupabaseConfigured } from '../services/supabaseClient';
-import { normalizeManagedUserRole, type ManagedUserRole } from '../services/userManagementService';
+import {
+  isOperativeSucursal,
+  normalizeManagedUserRole,
+  type ManagedUserRole,
+} from '../services/userManagementService';
 
 export type DashboardModuleId =
   | 'promotoras'
@@ -86,6 +90,49 @@ export function canAccessPromotoraPortal(
  * auditoría desde oficina ejecutada por una sesión verificada `super_admin`.
  */
 export function canBypassFieldGeofence(
+  profile: Pick<VerifiedAuthProfile, 'iamRole'> | null | undefined
+): boolean {
+  return isSuperAdminProfile(profile);
+}
+
+/**
+ * Determina si un perfil autenticado posee un alcance territorial válido para operar:
+ * - `super_admin` siempre tiene alcance global.
+ * - `contraloria` con sucursal `'GLOBAL'` o una sede operativa válida puede operar.
+ * - Cualquier rol regional (`coordinacion`, `promotora`, `vendedor`, `cliente`, `chofer`)
+ *   EXIGE una región asignada (`regionId` UUID o `sucursal` operativa); sin región -> fail-closed.
+ */
+export function hasAssignedRegionalScope(
+  profile: Pick<VerifiedAuthProfile, 'iamRole' | 'sucursal' | 'regionId'> | null | undefined
+): boolean {
+  if (!profile || !profile.iamRole) return false;
+  if (isSuperAdminProfile(profile)) return true;
+  if (profile.iamRole === 'contraloria') {
+    return (
+      profile.sucursal === 'GLOBAL' ||
+      isOperativeSucursal(profile.sucursal) ||
+      Boolean(profile.regionId)
+    );
+  }
+  return isOperativeSucursal(profile.sucursal) || Boolean(profile.regionId);
+}
+
+/** Solo el Administrador General (`super_admin`) puede crear/editar/desactivar `productos` maestros. */
+export function canManageNationalProducts(
+  profile: Pick<VerifiedAuthProfile, 'iamRole'> | null | undefined
+): boolean {
+  return isSuperAdminProfile(profile);
+}
+
+/** Solo el Administrador General (`super_admin`) puede administrar el catálogo `regiones`. */
+export function canManageRegiones(
+  profile: Pick<VerifiedAuthProfile, 'iamRole'> | null | undefined
+): boolean {
+  return isSuperAdminProfile(profile);
+}
+
+/** Solo el Administrador General (`super_admin`) puede inspeccionar y reclasificar filas en cuarentena (`region_id IS NULL`). */
+export function canTriageQuarantinedRecords(
   profile: Pick<VerifiedAuthProfile, 'iamRole'> | null | undefined
 ): boolean {
   return isSuperAdminProfile(profile);

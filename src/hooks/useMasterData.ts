@@ -163,6 +163,10 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cadenas_comerciales' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'zonas' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'regiones' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'productos' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'supervisores' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'promotoras' }, programarRefresco)
       .subscribe();
 
     return () => {

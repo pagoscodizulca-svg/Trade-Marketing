@@ -587,6 +587,46 @@ export async function refreshRutaSession(): Promise<RutaAuthVerificationResult> 
   return verifyRutaProfileAccess(client, data.session);
 }
 
+async function purgeRutaBrowserCaches(): Promise<void> {
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.clear();
+    } catch {
+      // Ignorar bloqueo de sessionStorage
+    }
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const k = window.localStorage.key(i);
+        if (k) keys.push(k);
+      }
+      for (const key of keys) {
+        if (key === 'codizulca.ui_theme' || key === 'app_clean_sync_version') continue;
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Ignorar bloqueo de localStorage
+    }
+  }
+  if (typeof indexedDB !== 'undefined' && typeof indexedDB.deleteDatabase === 'function') {
+    await Promise.all(
+      ['rutadegustacion-offline', 'codizulca_portal_offline_v1'].map(
+        (name) =>
+          new Promise<void>((resolve) => {
+            try {
+              const req = indexedDB.deleteDatabase(name);
+              req.onsuccess = () => resolve();
+              req.onerror = () => resolve();
+              req.onblocked = () => resolve();
+            } catch {
+              resolve();
+            }
+          })
+      )
+    );
+  }
+}
+
 export async function signOutRutaUser(): Promise<void> {
   writeCachedProfile(null);
   await syncTokenToOutbox(null);
@@ -594,6 +634,7 @@ export async function signOutRutaUser(): Promise<void> {
   if (client) {
     await client.auth.signOut().catch(() => {});
   }
+  await purgeRutaBrowserCaches();
 }
 
 export function subscribeRutaAuthEvents(handlers: {
@@ -606,6 +647,7 @@ export function subscribeRutaAuthEvents(handlers: {
     if (event === 'SIGNED_OUT' || !session?.access_token) {
       writeCachedProfile(null);
       void syncTokenToOutbox(null);
+      void purgeRutaBrowserCaches();
       handlers.onSignedOut?.();
       return;
     }

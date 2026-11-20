@@ -129,6 +129,8 @@ export interface Cliente {
   longitud: number | null;
   cadena_id?: string | null;
   zona_id?: string | null;
+  supervisor_id?: string | null;
+  region_id?: string | null;
   radio_geocerca_m?: number | null;
   sucursal?: SucursalMaestro | null;
   vendedor_id: string | null;
@@ -166,6 +168,8 @@ export interface ClienteSincronizacionInput {
   longitud?: number | null;
   cadena_id?: string | null;
   zona_id?: string | null;
+  supervisor_id?: string | null;
+  region_id?: string | null;
   radio_geocerca_m?: number | null;
   sucursal?: SucursalMaestro | null;
   codigo_vendedor?: string | null;
@@ -175,6 +179,106 @@ export interface ClienteSincronizacionInput {
 export interface ClienteCrudInput extends ClienteSincronizacionInput {
   id?: string;
   vendedor_id?: string | null;
+  supervisor_id?: string | null;
+  region_id?: string | null;
+  activo?: boolean;
+}
+
+export type MasterRegionScopeFilter = 'ALL' | 'UNASSIGNED' | SucursalMaestro;
+
+export interface RegionMaestra {
+  id: string;
+  codigo: string;
+  nombre: string;
+  activo: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RegionMaestraInput {
+  id?: string;
+  codigo: string;
+  nombre: string;
+  activo?: boolean;
+}
+
+export interface ProductoMaestro {
+  id: string;
+  codigo: string;
+  nombre: string;
+  categoria: string | null;
+  marca: string | null;
+  unidad_medida: string;
+  activo: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductoMaestroInput {
+  id?: string;
+  codigo: string;
+  nombre: string;
+  categoria?: string | null;
+  marca?: string | null;
+  unidad_medida?: string | null;
+  activo?: boolean;
+}
+
+export interface SupervisorMaestro {
+  id: string;
+  codigo: string | null;
+  nombre: string;
+  email: string | null;
+  telefono: string | null;
+  zona: string | null;
+  sucursal: SucursalMaestro | null;
+  region_id: string | null;
+  activo: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupervisorMaestroInput {
+  id?: string;
+  codigo?: string | null;
+  nombre: string;
+  email?: string | null;
+  telefono?: string | null;
+  zona?: string | null;
+  sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
+  activo?: boolean;
+}
+
+export interface PromotoraMaestra {
+  id: string;
+  nombre_completo: string;
+  email: string | null;
+  telefono: string | null;
+  ciudad: string | null;
+  estado: string | null;
+  direccion: string | null;
+  sucursal: SucursalMaestro | null;
+  region_id: string | null;
+  supervisor_id: string | null;
+  activo: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromotoraMaestraInput {
+  id?: string;
+  nombre_completo: string;
+  email?: string | null;
+  telefono?: string | null;
+  ciudad?: string | null;
+  estado?: string | null;
+  direccion?: string | null;
+  sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
+  supervisor_id?: string | null;
   activo?: boolean;
 }
 

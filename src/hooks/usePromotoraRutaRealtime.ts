@@ -203,6 +203,12 @@ export function usePromotoraRutaRealtime({
           );
         }
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'productos' }, () => {
+        void refreshRoutes();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, () => {
+        void refreshRoutes();
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           setIsRealtimeConnected(true);

@@ -28,8 +28,13 @@ import {
   isSupabaseConfigured,
   SUPABASE_NOT_CONFIGURED_MESSAGE,
 } from '../../services/supabaseClient';
+import { hasAssignedRegionalScope } from '../../utils/permissions';
+import { purgeAllSessionCaches } from '../../services/sessionCacheHygiene';
+import { UnassignedRegionGate } from './UnassignedRegionGate';
 
 interface TradeAuthGateProps {
+  /** Perfil inicial opcional para pruebas SSR/QA determinísticas */
+  initialProfileForQa?: VerifiedAuthProfile | null;
   children: (ctx: {
     profile: VerifiedAuthProfile;
     isLocalDevWorkstation: boolean;
@@ -62,15 +67,23 @@ function isOnClienteRoute(): boolean {
  *   de producción por dead-code elimination de Vite).
  * - Si detecta un perfil `promotora`, redirige de inmediato a `/portal/ruta` sin montar módulos administrativos.
  */
-export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
+export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
+  initialProfileForQa,
+  children,
+}) => {
+  const isDevRuntime = Boolean(import.meta.env?.DEV);
   const canUseLocalWorkstation =
-    import.meta.env.DEV &&
+    isDevRuntime &&
     isLocalLoopbackHost() &&
-    import.meta.env.VITE_ENABLE_LOCAL_DEV_BYPASS === 'true';
+    import.meta.env?.VITE_ENABLE_LOCAL_DEV_BYPASS === 'true';
   const initialHasAuthToken = isSupabaseConfigured && hasStoredSupabaseAuthToken();
 
-  const [checking, setChecking] = useState<boolean>(() => isSupabaseConfigured || initialHasAuthToken);
-  const [profile, setProfile] = useState<VerifiedAuthProfile | null>(null);
+  const [checking, setChecking] = useState<boolean>(() =>
+    initialProfileForQa !== undefined ? false : isSupabaseConfigured || initialHasAuthToken
+  );
+  const [profile, setProfile] = useState<VerifiedAuthProfile | null>(
+    () => initialProfileForQa ?? null
+  );
   const [localDevActive, setLocalDevActive] = useState<boolean>(false);
 
   const [identifier, setIdentifier] = useState<string>('');
@@ -86,6 +99,9 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
   const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (initialProfileForQa !== undefined) {
+      return;
+    }
     if (!isSupabaseConfigured) {
       setChecking(false);
       return;
@@ -138,9 +154,13 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
       setChecking(false);
     });
 
-    const { data: sub } = client.auth.onAuthStateChange(async (_event, session) => {
+    const { data: sub } = client.auth.onAuthStateChange(async (event, session) => {
       if (!active) return;
-      if (!session) {
+      if (event === 'SIGNED_OUT' || !session) {
+        void purgeAllSessionCaches({
+          reason: event === 'SIGNED_OUT' ? 'sign_out' : 'token_expired',
+          preserveAuthSession: false,
+        });
         setProfile(null);
         setChecking(false);
         return;
@@ -255,7 +275,11 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     }
   };
 
-  if (!isSupabaseConfigured && !(import.meta.env.DEV && localDevActive && canUseLocalWorkstation)) {
+  if (
+    initialProfileForQa === undefined &&
+    !isSupabaseConfigured &&
+    !(isDevRuntime && localDevActive && canUseLocalWorkstation)
+  ) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/30 p-6 text-center space-y-3">
@@ -278,7 +302,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
     );
   }
 
-  if (import.meta.env.DEV && localDevActive && !profile && canUseLocalWorkstation) {
+  if (isDevRuntime && localDevActive && !profile && canUseLocalWorkstation) {
     const devProfile: VerifiedAuthProfile = {
       userId: 'local-dev-workstation',
       email: 'estacion.local@codizulca.local',
@@ -386,7 +410,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
             </button>
           </form>
 
-          {import.meta.env.DEV && canUseLocalWorkstation && (
+          {isDevRuntime && canUseLocalWorkstation && (
             <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3.5 space-y-2.5">
               <div className="flex items-start justify-between gap-2">
                 <p className="text-[11px] text-amber-200/90 leading-relaxed">
@@ -556,6 +580,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
         </div>
       </div>
     );
+  }
+
+  if (!hasAssignedRegionalScope(profile)) {
+    return <UnassignedRegionGate profile={profile} onSignOut={handleSignOut} />;
   }
 
   return (

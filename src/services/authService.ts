@@ -7,6 +7,7 @@ import {
   setActiveClientSucursalHeader,
 } from './supabaseClient';
 import { clearMasterDataCaches } from './masterDataSyncService';
+import { purgeAllSessionCaches } from './sessionCacheHygiene';
 import {
   isOperativeSucursal,
   isSucursalValidForRole,
@@ -42,6 +43,8 @@ export interface VerifiedAuthProfile {
   appRole: CanonicalAppRole | null;
   iamRole: ManagedUserRole | null;
   sucursal: SucursalCodigo | null;
+  /** UUID verificado de `public.regiones` asignado al usuario (null en `super_admin` o sin región asignada) */
+  regionId?: string | null;
   rawAppRole: string;
   legacyRole: UserRole;
   staffId: string | null;
@@ -256,6 +259,8 @@ export function extractVerifiedProfileFromAuthUser(
 
   const rawStaffId = String(appMeta.staff_id ?? '').trim();
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
+  const rawRegionId = String(appMeta.region_id ?? '').trim();
+  const regionId = UUID_REGEX.test(rawRegionId) ? rawRegionId : null;
 
   const email = normalizePortalEmail(user.email || '');
   const safeNameFromMeta = String(appMeta.display_name ?? '').trim();
@@ -270,6 +275,7 @@ export function extractVerifiedProfileFromAuthUser(
     appRole,
     iamRole,
     sucursal,
+    regionId,
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
@@ -374,7 +380,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
     const client = getSupabaseClient();
     const { data: iamProfile, error: iamError } = await client
       .from('profiles')
-      .select('role, sucursal, full_name, is_active, must_change_password')
+      .select('role, sucursal, region_id, full_name, is_active, must_change_password')
       .eq('id', base.userId)
       .maybeSingle();
 
@@ -390,6 +396,15 @@ export async function resolveVerifiedProfileWithStaffFallback(
         const sucursal =
           resolveSucursalForIamRole(iamRole, (iamProfile as { sucursal?: unknown }).sucursal) ??
           base.sucursal;
+        const rawProfileRegionId = String(
+          (iamProfile as { region_id?: unknown }).region_id ?? ''
+        ).trim();
+        const regionId =
+          iamRole === 'super_admin'
+            ? null
+            : UUID_REGEX.test(rawProfileRegionId)
+              ? rawProfileRegionId
+              : (base.regionId ?? null);
 
         if (iamRole === 'promotora') {
           const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
@@ -400,6 +415,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
             appRole: 'promotora',
             iamRole: 'promotora',
             sucursal: sucursal ?? activeStaff?.sucursal ?? null,
+            regionId,
             rawAppRole: 'promotora',
             legacyRole: 'promotora',
             staffId: activeStaff?.staffId ?? base.staffId,
@@ -416,6 +432,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
           appRole: iamCanonical,
           iamRole,
           sucursal,
+          regionId,
           rawAppRole: iamRole,
           legacyRole: mapToLegacyUserRole(iamRole, iamCanonical),
           isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(iamCanonical),
@@ -749,6 +766,7 @@ export async function signInWithSupabaseCredentials(
   setActiveClientSucursalHeader(
     profile.sucursal && isOperativeSucursal(profile.sucursal) ? profile.sucursal : null
   );
+  await purgeAllSessionCaches({ reason: 'user_switch', preserveAuthSession: true });
   clearMasterDataCaches();
   client.realtime.setAuth(data.session.access_token);
   return { session: data.session, profile };
@@ -757,6 +775,7 @@ export async function signInWithSupabaseCredentials(
 export async function signOutSupabaseSession(): Promise<void> {
   clearMasterDataCaches();
   setActiveClientSucursalHeader(null);
+  await purgeAllSessionCaches({ reason: 'sign_out', preserveAuthSession: false });
   if (!isSupabaseConfigured) return;
   const client = getSupabaseClient();
   try {
@@ -764,6 +783,7 @@ export async function signOutSupabaseSession(): Promise<void> {
   } finally {
     clearMasterDataCaches();
     setActiveClientSucursalHeader(null);
+    await purgeAllSessionCaches({ reason: 'sign_out', preserveAuthSession: false });
   }
 }
 

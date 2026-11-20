@@ -62,8 +62,10 @@ import {
 } from '../../services/userManagementService';
 import {
   canBypassFieldGeofence,
+  hasAssignedRegionalScope,
   isSuperAdminProfile,
 } from '../../utils/permissions';
+import { UnassignedRegionGate } from '../auth/UnassignedRegionGate';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
 import { ControlRoomThemeToggle } from '../ui/ControlRoomThemeToggle';
 import {
@@ -1053,6 +1055,11 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
       void refreshRoutes();
     }
   };
+
+  // 1b. Fail-closed: usuario regional autenticado sin región asignada -> 0 datos expuestos
+  if (!shiftSessionState && profile && !hasAssignedRegionalScope(profile)) {
+    return <UnassignedRegionGate profile={profile} onSignOut={handleSignOut} />;
+  }
 
   // 2. Vista Operativa Exclusiva del Módulo de Ruta de la Promotora Activa
   return (
