@@ -610,6 +610,30 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
     return { profile: null, unauthorizedReason: null };
   }
 
+  // 1. Verificar primero identidad IAM corporativa (`public.profiles` + `app_metadata` firmado):
+  //    Si corresponde a `super_admin` activo, concede ingreso inmediato a `/portal` en
+  //    Modo Supervisión Global sin exigir fila en `public.staff` ni cerrar su sesión.
+  const resolvedCorporate = await resolveVerifiedProfileWithStaffFallback(session);
+  if (resolvedCorporate && resolvedCorporate.iamRole === 'super_admin') {
+    const client = getSupabaseClient();
+    client.realtime.setAuth(session.access_token);
+    return {
+      profile: {
+        ...resolvedCorporate,
+        appRole: 'admin',
+        iamRole: 'super_admin',
+        sucursal: 'GLOBAL',
+        rawAppRole: 'super_admin',
+        legacyRole: 'gerente_admin',
+        staffId: null,
+        isCoordinatorOrAdmin: true,
+        canAccessTorreControl: true,
+        mustChangePassword: false,
+      },
+      unauthorizedReason: null,
+    };
+  }
+
   const base = extractVerifiedProfileFromAuthUser(session.user);
   if (!base) {
     await signOutSupabaseSession();

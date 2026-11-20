@@ -89,8 +89,8 @@ export const ThemeModeProvider: React.FC<ThemeModeProviderProps> = ({
 };
 
 const FALLBACK_CONTEXT: ThemeModeContextValue = {
-  mode: 'default',
-  isControlRoom: false,
+  mode: 'control-room',
+  isControlRoom: true,
   setMode: applyUiThemeToDocument,
   toggleMode: () => {
     const next: UiThemeMode = readStoredUiThemeMode() === 'control-room' ? 'default' : 'control-room';

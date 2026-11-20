@@ -2,6 +2,7 @@ import React from 'react';
 import { ArrowLeft, ShieldAlert } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import type { ManagedUserRole } from '../../services/userManagementService';
+import { isSuperAdminRole } from '../../utils/permissions';
 
 export interface RoleGuardProps {
   allowedRoles: readonly ManagedUserRole[];
@@ -14,6 +15,7 @@ export interface RoleGuardProps {
 
 /**
  * Guardia declarativo de autorización IAM:
+ * - `super_admin` verificado posee acceso irrestricto a todos los módulos.
  * - En modo `inline` (por defecto, ej. enlaces de menú): oculta completamente el nodo del DOM
  *   si el rol verificado no pertenece a `allowedRoles`.
  * - En modo `route` (acceso directo por URL o pestaña): bloquea el montaje de la vista protegida y
@@ -30,7 +32,8 @@ export const RoleGuard: React.FC<RoleGuardProps> = ({
   const { verifiedIamRole } = useApp();
 
   const isAuthorized =
-    verifiedIamRole !== null && allowedRoles.includes(verifiedIamRole);
+    verifiedIamRole !== null &&
+    (isSuperAdminRole(verifiedIamRole) || allowedRoles.includes(verifiedIamRole));
 
   if (isAuthorized) {
     return <>{children}</>;

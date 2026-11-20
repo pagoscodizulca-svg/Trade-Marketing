@@ -82,25 +82,25 @@ export const SEVERIDAD_INCIDENCIA_OPTIONS: ReadonlyArray<{
     value: 'BAJA',
     label: 'Baja',
     slaLabel: '72h',
-    badgeClass: 'bg-zinc-800 text-zinc-200 border-zinc-600',
+    badgeClass: 'bg-zinc-900 text-zinc-300 border-zinc-700',
   },
   {
     value: 'MEDIA',
     label: 'Media',
     slaLabel: '24h',
-    badgeClass: 'bg-blue-950/70 text-blue-200 border-blue-500/50',
+    badgeClass: 'bg-zinc-800 text-white border-zinc-500',
   },
   {
     value: 'ALTA',
     label: 'Alta',
     slaLabel: '12h',
-    badgeClass: 'bg-amber-950/70 text-amber-200 border-amber-500/50',
+    badgeClass: 'bg-red-950/65 text-red-200 border-red-500/50',
   },
   {
     value: 'CRITICA',
     label: 'Crítica',
     slaLabel: '4h',
-    badgeClass: 'bg-red-950/80 text-red-200 border-red-500/60',
+    badgeClass: 'bg-[#DC2626] text-white border-red-400',
   },
 ];
 

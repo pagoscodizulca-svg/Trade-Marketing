@@ -52,7 +52,6 @@ import {
   buildPendingAuthorizationReportModel,
 } from '../../utils/pdfExport';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
-import { evaluateTastingFeasibility } from '../../utils/tastingFeasibility';
 import { useLiveVenezuelaClock } from '../../utils/weekCalendar';
 import {
   formatToDdMmYyyy,
@@ -2182,17 +2181,6 @@ export const FieldPromotoraView: React.FC = () => {
     historialPageSize,
   ]);
 
-  // Métrica de Factibilidad de Degustación en tiempo real según la semana, rango o temporada filtrada
-  const displayedFeasibility = useMemo(() => {
-    return evaluateTastingFeasibility({
-      periodLabel: activeGlobalReportMeta.summaryLabel,
-      dateMatcher: () => true,
-      returnBasis: 'VENTAS_DIRECTAS_BTL',
-      tastingItems: displayedItems,
-      priceComparisons: module1Bundle?.priceComparisons,
-    });
-  }, [displayedItems, module1Bundle?.priceComparisons, activeGlobalReportMeta.summaryLabel]);
-
   // ----------------------------------------------------
   // SUBMÓDULO 2: INFORMES DE CAMPO (CARGADOS EXACTAMENTE DESDE SUPABASE)
   // Pestañas: Inventario y Degustación (inventory) | Asistencia en PDV (checkins agrupados)
@@ -3833,97 +3821,6 @@ export const FieldPromotoraView: React.FC = () => {
                 </select>
               </div>
             </div>
-
-            {/* FRANJA EJECUTIVA DE FACTIBILIDAD DE DEGUSTACIÓN VS. COSTO DE PRODUCTOS DEGUSTADOS */}
-            {FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS && (
-            <div className="px-4 py-3 bg-zinc-950/90 border-b border-zinc-800/90 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-red-600/15 border border-red-500/30 text-red-400 shrink-0">
-                  <Scale className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] font-black text-white uppercase tracking-wider">
-                      Factibilidad vs. Costo de Productos Degustados
-                    </span>
-                    <span
-                      className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${
-                        displayedFeasibility.verdict === 'ALTAMENTE_FACTIBLE' ||
-                        displayedFeasibility.verdict === 'FACTIBLE'
-                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                          : displayedFeasibility.verdict === 'MARGEN_AJUSTADO'
-                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                          : displayedFeasibility.verdict === 'NO_FACTIBLE'
-                          ? 'bg-red-500/15 text-red-400 border-red-500/30'
-                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                      }`}
-                    >
-                      {displayedFeasibility.verdictLabel}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-zinc-400">
-                    Por cada <strong className="text-white">$1.00 USD</strong> en producto degustado se generaron{' '}
-                    <strong className="text-white">
-                      ${displayedFeasibility.returnMultiplier.toFixed(2)} USD
-                    </strong>{' '}
-                    en ventas directas ({displayedItems.length} activaciones filtradas).
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
-                  <span className="text-[9px] font-bold text-zinc-400 uppercase block">
-                    Costo Prod. Degustados
-                  </span>
-                  <span className="text-xs font-black font-mono text-red-400">
-                    ${displayedFeasibility.totalTastedProductCostUsd.toFixed(2)} USD
-                  </span>
-                </div>
-
-                <div className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
-                  <span className="text-[9px] font-bold text-zinc-400 uppercase block">
-                    Ventas Directas Logradas
-                  </span>
-                  <span className="text-xs font-black font-mono text-white">
-                    ${displayedFeasibility.totalGeneratedRevenueUsd.toFixed(2)} USD
-                  </span>
-                </div>
-
-                <div className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
-                  <span className="text-[9px] font-bold text-zinc-400 uppercase block">
-                    Balance Neto (Venta - Costo)
-                  </span>
-                  <span
-                    className={`text-xs font-black font-mono ${
-                      displayedFeasibility.netBalanceUsd >= 0 ? 'text-emerald-400' : 'text-red-400'
-                    }`}
-                  >
-                    {displayedFeasibility.netBalanceUsd >= 0 ? '+' : ''}$
-                    {displayedFeasibility.netBalanceUsd.toFixed(2)}
-                  </span>
-                </div>
-
-                <div className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
-                  <span className="text-[9px] font-bold text-zinc-400 uppercase block">
-                    Multiplicador / ROI
-                  </span>
-                  <span
-                    className={`text-xs font-black font-mono ${
-                      displayedFeasibility.returnMultiplier >= 1.5
-                        ? 'text-emerald-400'
-                        : displayedFeasibility.returnMultiplier >= 1.0
-                        ? 'text-amber-300'
-                        : 'text-red-400'
-                    }`}
-                  >
-                    {displayedFeasibility.returnMultiplier.toFixed(2)}x ({displayedFeasibility.roiPercent >= 0 ? '+' : ''}
-                    {displayedFeasibility.roiPercent.toFixed(0)}%)
-                  </span>
-                </div>
-              </div>
-            </div>
-            )}
 
             {/* TABLA DE DEGUSTACIONES SINCRONIZADA CON SUPABASE & TRADE MARKETING */}
             <div className="overflow-x-auto">

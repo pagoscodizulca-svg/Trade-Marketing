@@ -6,7 +6,7 @@ import {
   UI_THEME_STORAGE_KEY,
   type RutaUiThemeMode,
 } from './bootTheme';
-import type { AppMode, RutaAuthUser } from './types';
+import { OPERATIVE_SUCURSALES, type AppMode, type OperativeSucursal, type RutaAuthUser } from './types';
 import { ChoferView } from './components/chofer/ChoferView';
 import { OficinaView } from './components/oficina/OficinaView';
 import { RutaAuthGate } from './components/auth/RutaAuthGate';
@@ -17,6 +17,7 @@ import {
   canAccessOficinaMode,
   formatRutaRoleLabel,
   formatSucursalLabel,
+  isRutaSuperAdmin,
   resolveEffectiveMode,
   resolveRutaSupabaseConfig,
   restoreRutaSession,
@@ -47,13 +48,42 @@ export default function App() {
   const [shiftSession, setShiftSession] = useState<StoredChoferShiftSession | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [modoSolicitado, setModoSolicitado] = useState<AppMode>(modoInicial);
+  const [superAdminSucursalFilter, setSuperAdminSucursalFilter] = useState<
+    'TODAS' | OperativeSucursal
+  >('TODAS');
   const [uiTheme, setUiTheme] = useState<RutaUiThemeMode>(() => readStoredRutaUiThemeMode());
   const { entregas, repo, sync, refresh } = useEntregas();
+
+  const isSuperAdmin = isRutaSuperAdmin(authUser);
+
+  const visibleEntregas = useMemo(() => {
+    if (!isSuperAdmin || superAdminSucursalFilter === 'TODAS') return entregas;
+    return entregas.filter((e) => !e.sucursal || e.sucursal === superAdminSucursalFilter);
+  }, [entregas, isSuperAdmin, superAdminSucursalFilter]);
+
+  const scopedRepo = useMemo(() => {
+    if (!isSuperAdmin) return repo;
+    const defaultHub: OperativeSucursal =
+      superAdminSucursalFilter !== 'TODAS' ? superAdminSucursalFilter : 'ZULIA';
+    return {
+      ...repo,
+      add: (entrega: Parameters<typeof repo.add>[0]) =>
+        repo.add({ ...entrega, sucursal: entrega.sucursal ?? defaultHub }),
+      importMany: (
+        items: Parameters<typeof repo.importMany>[0],
+        modoImport: Parameters<typeof repo.importMany>[1]
+      ) =>
+        repo.importMany(
+          items.map((e) => ({ ...e, sucursal: e.sucursal ?? defaultHub })),
+          modoImport
+        ),
+    };
+  }, [isSuperAdmin, repo, superAdminSucursalFilter]);
 
   useEffect(() => {
     const onStorage = (ev: StorageEvent) => {
       if (ev.key === UI_THEME_STORAGE_KEY) {
-        setUiTheme(persistRutaUiThemeMode(ev.newValue === 'control-room' ? 'control-room' : 'default'));
+        setUiTheme(persistRutaUiThemeMode(ev.newValue === 'default' ? 'default' : 'control-room'));
       }
     };
     window.addEventListener('storage', onStorage);
@@ -313,18 +343,18 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-2 shrink-0">
               <span
                 data-testid="ruta-user-badge"
-                className="inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-100 bg-zinc-900 border border-white/15 rounded-full px-2.5 py-1"
+                className="inline-flex items-center gap-1.5 text-[11px] font-bold text-white bg-zinc-900 border border-white/15 rounded-full px-2.5 py-1"
               >
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <ShieldCheck className="w-3.5 h-3.5 text-red-500 shrink-0" />
                 <span className="truncate max-w-[140px]">{authUser.fullName}</span>
                 <span className="text-zinc-400">·</span>
-                <span className="text-red-300">{formatRutaRoleLabel(authUser.role)}</span>
+                <span className="text-red-400">{formatRutaRoleLabel(authUser.role)}</span>
               </span>
               <span
                 data-testid="ruta-sucursal-badge"
-                className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-200 bg-amber-950/60 border border-amber-400/30 rounded-full px-2.5 py-1"
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-white bg-red-600/20 border border-red-500/45 rounded-full px-2.5 py-1"
               >
-                <MapPin className="w-3 h-3 shrink-0" />
+                <MapPin className="w-3 h-3 text-red-400 shrink-0" />
                 {formatSucursalLabel(authUser.sucursal)}
               </span>
               <button
@@ -394,12 +424,48 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 py-4">
+      <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 py-4 space-y-3">
+        {isSuperAdmin && (
+          <section
+            data-testid="ruta-super-admin-bar"
+            aria-label="Modo Supervisión Global Super Admin"
+            className="rounded-xl bg-zinc-950 border border-red-500/40 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-white"
+          >
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand text-white text-[10px] font-mono font-black uppercase">
+                <ShieldCheck className="w-3 h-3" />
+                Supervisión Global · Super Admin
+              </span>
+              <span className="text-zinc-300">
+                Acceso total a Chofer y Oficina en todas las sedes ({visibleEntregas.length} entregas)
+              </span>
+            </div>
+            <label className="inline-flex items-center gap-2 text-xs font-bold text-zinc-200">
+              <span>Sede:</span>
+              <select
+                data-testid="ruta-supervision-sucursal-select"
+                value={superAdminSucursalFilter}
+                onChange={(e) =>
+                  setSuperAdminSucursalFilter(e.target.value as 'TODAS' | OperativeSucursal)
+                }
+                className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-white/15 text-xs text-white font-semibold focus:outline-none focus:border-brand cursor-pointer"
+              >
+                <option value="TODAS">Todas las Sedes (Nacional)</option>
+                {OPERATIVE_SUCURSALES.map((hub) => (
+                  <option key={hub} value={hub}>
+                    {formatSucursalLabel(hub)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </section>
+        )}
+
         <div key={modo} className="cz-tab-panel-enter">
           {modo === 'oficina' && puedeOficina ? (
-            <OficinaView entregas={entregas} repo={repo} sync={sync} />
+            <OficinaView entregas={visibleEntregas} repo={scopedRepo} sync={sync} />
           ) : (
-            <ChoferView entregas={entregas} repo={repo} sync={sync} />
+            <ChoferView entregas={visibleEntregas} repo={scopedRepo} sync={sync} />
           )}
         </div>
       </main>

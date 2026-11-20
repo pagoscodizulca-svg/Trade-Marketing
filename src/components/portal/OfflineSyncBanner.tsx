@@ -56,8 +56,8 @@ export const OfflineSyncBanner: React.FC<OfflineSyncBannerProps> = ({
   const palette =
     visualState === 'offline'
       ? {
-          wrap: 'bg-amber-950/75 border-amber-500/55 text-amber-100',
-          icon: <CloudOff className="w-4 h-4 text-amber-400 shrink-0" />,
+          wrap: 'bg-red-950/45 border-red-500/55 text-white',
+          icon: <CloudOff className="w-4 h-4 text-red-400 shrink-0" />,
           headline:
             pendingCount > 0
               ? `Sin cobertura móvil · ${pendingCount} ${pendingCount === 1 ? 'reporte en cola' : 'reportes en cola'} (sincronización automática al reconectar)`
@@ -65,19 +65,19 @@ export const OfflineSyncBanner: React.FC<OfflineSyncBannerProps> = ({
         }
       : visualState === 'syncing'
         ? {
-            wrap: 'bg-zinc-900 border-red-500/45 text-white',
+            wrap: 'bg-[#18181B] border-red-500/50 text-white',
             icon: <Loader2 className="w-4 h-4 text-[#DC2626] animate-spin shrink-0" />,
             headline: `Sincronizando ${pendingCount} ${pendingCount === 1 ? 'mutación pendiente' : 'mutaciones pendientes'} con el servidor...`,
           }
         : visualState === 'pending_retry'
           ? {
-              wrap: 'bg-red-950/65 border-red-500/50 text-red-100',
+              wrap: 'bg-red-950/65 border-red-500 text-red-100',
               icon: <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />,
               headline: `${pendingCount} ${pendingCount === 1 ? 'registro pendiente' : 'registros pendientes'} por confirmar${lastError ? ` · ${lastError}` : ''}`,
             }
           : {
-              wrap: 'bg-zinc-950/90 border-emerald-500/35 text-emerald-100',
-              icon: <Wifi className="w-4 h-4 text-emerald-400 shrink-0" />,
+              wrap: 'bg-[#121215] border-zinc-800 text-white',
+              icon: <Wifi className="w-4 h-4 text-red-500 shrink-0" />,
               headline: 'En línea · Sincronizado (respaldo Offline PWA listo)',
             };
 

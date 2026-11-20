@@ -15,25 +15,15 @@ import { GlobalExportPdfModal } from './GlobalExportPdfModal';
 import { RoleGuard } from '../auth/RoleGuard';
 import { useApp } from '../../context/AppContext';
 import type { ManagedUserRole } from '../../services/userManagementService';
+import {
+  DASHBOARD_MODULE_ALLOWED_ROLES,
+  type DashboardModuleId,
+} from '../../utils/permissions';
 
-export type MainNavTab =
-  | 'promotoras'
-  | 'llenado_cronograma'
-  | 'maestros'
-  | 'pop_incidencias'
-  | 'contraloria'
-  | 'kpis_trazabilidad'
-  | 'gestion_usuarios';
+export type MainNavTab = DashboardModuleId;
 
-export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]> = {
-  promotoras: ['super_admin', 'coordinacion'],
-  llenado_cronograma: ['super_admin', 'coordinacion'],
-  maestros: ['super_admin', 'coordinacion'],
-  pop_incidencias: ['super_admin', 'coordinacion', 'contraloria'],
-  contraloria: ['super_admin', 'contraloria', 'coordinacion'],
-  kpis_trazabilidad: ['super_admin', 'contraloria', 'coordinacion'],
-  gestion_usuarios: ['super_admin', 'coordinacion'],
-};
+export const MODULE_ALLOWED_ROLES: Record<MainNavTab, readonly ManagedUserRole[]> =
+  DASHBOARD_MODULE_ALLOWED_ROLES;
 
 interface HeaderProps {
   activeTab: MainNavTab;
@@ -289,8 +279,8 @@ export const Header: React.FC<HeaderProps> = ({
 
         <div className="px-2 flex items-center justify-between text-[10px] text-zinc-500 font-mono">
           <span>RIF: J-07011928-0</span>
-          <span className="inline-flex items-center gap-1.5 text-zinc-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+          <span className="inline-flex items-center gap-1.5 text-zinc-300">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
             Online
           </span>
         </div>

@@ -227,6 +227,7 @@ export async function submitPromotoraRouteExecution(params: {
   accuracyMeters?: number | null;
   motivoFueraGeocerca?: string;
   ejecucion?: EjecucionPdvInput | null;
+  superAdminBypass?: boolean;
 }): Promise<ResultadoEjecucionRutaPromotora> {
   const cleanId = String(params.rutaId || '').trim();
   if (!UUID_REGEX.test(cleanId)) {
@@ -243,6 +244,7 @@ export async function submitPromotoraRouteExecution(params: {
     accuracy_m: params.accuracyMeters ?? null,
     motivo_fuera_geocerca: params.motivoFueraGeocerca?.trim() || '',
     ejecucion: params.ejecucion ?? null,
+    super_admin_bypass: params.superAdminBypass === true,
   };
 
   const { data, error } = await client.rpc('rpc_registrar_ejecucion_ruta_promotora', {

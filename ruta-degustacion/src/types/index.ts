@@ -44,6 +44,8 @@ export interface Entrega {
   /** Hora local "HH:mm" o null */
   hora_entrega: string | null;
   notas_chofer: string;
+  /** Sucursal operativa propietaria del registro (usada para filtro global de Super Admin) */
+  sucursal?: OperativeSucursal;
 }
 
 /**
@@ -61,6 +63,6 @@ export interface EntregaVista extends Entrega {
 
 export type NuevaEntrega = Omit<
   Entrega,
-  'id' | 'stand_entregado' | 'producto_entregado' | 'completado' | 'hora_entrega' | 'notas_chofer'
+  'id' | 'stand_entregado' | 'producto_entregado' | 'completado' | 'hora_entrega' | 'notas_chofer' | 'sucursal'
 > &
-  Partial<Pick<Entrega, 'notas_chofer'>>;
+  Partial<Pick<Entrega, 'notas_chofer' | 'sucursal'>>;

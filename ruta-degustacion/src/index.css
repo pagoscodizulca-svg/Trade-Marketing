@@ -9,6 +9,17 @@
 }
 
 :root,
+:root[data-theme="control-room"] {
+  --cz-bg-canvas: #09090b;
+  --cz-bg-surface: #121215;
+  --cz-bg-elevated: #18181b;
+  --cz-border-subtle: #27272a;
+  --cz-text-primary: #ffffff;
+  --cz-text-secondary: #a1a1aa;
+  --cz-accent-red: #dc2626;
+  color-scheme: dark;
+}
+
 :root[data-theme="default"] {
   --cz-bg-canvas: #f8f9fa;
   --cz-bg-surface: #ffffff;
@@ -18,17 +29,6 @@
   --cz-text-secondary: #52525b;
   --cz-accent-red: #dc2626;
   color-scheme: light;
-}
-
-:root[data-theme="control-room"] {
-  --cz-bg-canvas: #09090b;
-  --cz-bg-surface: #121215;
-  --cz-bg-elevated: #18181b;
-  --cz-border-subtle: #27272a;
-  --cz-text-primary: #fafafa;
-  --cz-text-secondary: #a1a1aa;
-  --cz-accent-red: #dc2626;
-  color-scheme: dark;
 }
 
 @layer base {
@@ -62,29 +62,29 @@
   }
 }
 
-/* Adaptación de tarjetas/tablas de /logistica en Modo Sala de Control */
-:root[data-theme="control-room"] .bg-zinc-100,
-:root[data-theme="control-room"] .bg-zinc-50,
-:root[data-theme="control-room"] .bg-neutral-50 {
+/* Adaptación de tarjetas/tablas de /logistica en Modo Oscuro Corporativo (Negro, Rojo y Blanco) */
+:root:not([data-theme="default"]) .bg-zinc-100,
+:root:not([data-theme="default"]) .bg-zinc-50,
+:root:not([data-theme="default"]) .bg-neutral-50 {
   background-color: #09090b !important;
-  color: #fafafa !important;
+  color: #ffffff !important;
 }
 
-:root[data-theme="control-room"] .bg-white:not(.cz-logo-badge) {
+:root:not([data-theme="default"]) .bg-white:not(.cz-logo-badge) {
   background-color: #121215 !important;
-  color: #fafafa !important;
+  color: #ffffff !important;
   border-color: #27272a !important;
 }
 
-:root[data-theme="control-room"] :is(.text-ink, .text-zinc-900, .text-zinc-800, .text-zinc-700, .text-neutral-900, .text-neutral-800) {
-  color: #fafafa !important;
+:root:not([data-theme="default"]) :is(.text-ink, .text-zinc-900, .text-zinc-800, .text-zinc-700, .text-neutral-900, .text-neutral-800) {
+  color: #ffffff !important;
 }
 
-:root[data-theme="control-room"] :is(.text-zinc-600, .text-zinc-500, .text-neutral-600, .text-neutral-500) {
+:root:not([data-theme="default"]) :is(.text-zinc-600, .text-zinc-500, .text-neutral-600, .text-neutral-500) {
   color: #a1a1aa !important;
 }
 
-:root[data-theme="control-room"] :is(.border-zinc-200, .border-zinc-300, .border-neutral-200, .border-neutral-300) {
+:root:not([data-theme="default"]) :is(.border-zinc-200, .border-zinc-300, .border-neutral-200, .border-neutral-300) {
   border-color: #27272a !important;
 }
 

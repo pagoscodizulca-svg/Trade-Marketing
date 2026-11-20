@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { Entrega, EntregaVista } from '../types';
+import { OPERATIVE_SUCURSALES, type Entrega, type EntregaVista, type OperativeSucursal } from '../types';
 import { MENSAJE_REQUIERE_CONEXION, newId, type EntregasRepository } from './entregasRepository';
 import { createSyncStore } from './syncStore';
 import { IMMEDIATE_TIMEOUT_MS, createSyncEngine, registerBackgroundSync } from './syncEngine';
@@ -38,6 +38,10 @@ const esErrorDeRed = (msg: string): boolean =>
 /** Normaliza una fila remota para que la UI nunca reciba null/undefined en campos de texto. */
 function normalizarFila(r: Record<string, unknown>): Entrega {
   const txt = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v));
+  const rawSuc = txt(r.sucursal).trim().toUpperCase();
+  const sucursal = (OPERATIVE_SUCURSALES as readonly string[]).includes(rawSuc)
+    ? (rawSuc as OperativeSucursal)
+    : undefined;
   return {
     id: txt(r.id),
     fecha: txt(r.fecha),
@@ -52,6 +56,7 @@ function normalizarFila(r: Record<string, unknown>): Entrega {
     completado: r.completado === true,
     hora_entrega: typeof r.hora_entrega === 'string' && r.hora_entrega ? r.hora_entrega : null,
     notas_chofer: txt(r.notas_chofer),
+    ...(sucursal ? { sucursal } : {}),
   };
 }
 

@@ -54,9 +54,17 @@ import {
 import { useOfflineSync } from '../../hooks/useOfflineSync';
 import { OfflineSyncBanner } from './OfflineSyncBanner';
 import { createIncidenciaPdv } from '../../services/popIncidenciasService';
-import { isOperativeSucursal } from '../../services/userManagementService';
+import {
+  isOperativeSucursal,
+  OPERATIVE_SUCURSALES,
+  SUCURSAL_LABELS,
+  type OperativeSucursal,
+} from '../../services/userManagementService';
+import {
+  canBypassFieldGeofence,
+  isSuperAdminProfile,
+} from '../../utils/permissions';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
-import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import { ControlRoomThemeToggle } from '../ui/ControlRoomThemeToggle';
 import {
   captureBrowserGeolocation,
@@ -72,7 +80,14 @@ import {
 import type { RutaPromotoraRecord } from '../../types/degustacionesPipeline';
 import { getCaracasTodayYmd } from '../../utils/caracasWeekCycle';
 
-type DateFilterMode = 'hoy' | 'proximas';
+type DateFilterMode = 'todas' | 'hoy' | 'proximas';
+
+export interface PromotoraRutaPortalViewProps {
+  /** Perfil verificado inicial opcional para pruebas SSR/QA determinísticas */
+  initialProfile?: VerifiedAuthProfile | null;
+  /** Rutas iniciales opcionales para pruebas SSR/QA determinísticas */
+  initialRoutes?: RutaPromotoraRecord[] | null;
+}
 
 function formatDisplayDate(ymd: string): string {
   const parts = String(ymd || '').split('-');
@@ -93,12 +108,17 @@ function formatSyncTime(iso: string | null): string {
   }
 }
 
-export const PromotoraRutaPortalView: React.FC = () => {
-  const [authChecking, setAuthChecking] = useState<boolean>(true);
-  const [profile, setProfile] = useState<VerifiedAuthProfile | null>(null);
+export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = ({
+  initialProfile = null,
+  initialRoutes = null,
+}) => {
+  const [authChecking, setAuthChecking] = useState<boolean>(() => !initialProfile);
+  const [profile, setProfile] = useState<VerifiedAuthProfile | null>(() => initialProfile);
   const [shiftSessionState, setShiftSessionState] = useState<StoredPortalShiftSession | null>(null);
   const [shiftRoutes, setShiftRoutes] = useState<RutaPromotoraRecord[]>([]);
-  const [cachedOfflineRoutes, setCachedOfflineRoutes] = useState<RutaPromotoraRecord[]>([]);
+  const [cachedOfflineRoutes, setCachedOfflineRoutes] = useState<RutaPromotoraRecord[]>(
+    () => initialRoutes ?? []
+  );
   const [geofenceCatalog, setGeofenceCatalog] = useState<PortalPdvGeofenceRef[]>([]);
   const [cachedProductsCount, setCachedProductsCount] = useState<number>(0);
   const [shiftSyncedAt, setShiftSyncedAt] = useState<string | null>(null);
@@ -110,7 +130,13 @@ export const PromotoraRutaPortalView: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  const [dateFilter, setDateFilter] = useState<DateFilterMode>('proximas');
+  const [dateFilter, setDateFilter] = useState<DateFilterMode>(() =>
+    initialProfile && isSuperAdminProfile(initialProfile) ? 'todas' : 'proximas'
+  );
+  const [supervisionSucursal, setSupervisionSucursal] = useState<'TODAS' | OperativeSucursal>(
+    'TODAS'
+  );
+  const [supervisionPromotora, setSupervisionPromotora] = useState<string>('TODAS');
   const [liveBanner, setLiveBanner] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [processingRutaId, setProcessingRutaId] = useState<string | null>(null);
@@ -196,6 +222,9 @@ export const PromotoraRutaPortalView: React.FC = () => {
 
   // Verificación criptográfica de Enlace Dinámico (`?t=...`) O sesión Supabase Auth
   useEffect(() => {
+    if (initialProfile) {
+      return;
+    }
     let active = true;
 
     const bootstrapAuthOrShift = async () => {
@@ -334,7 +363,16 @@ export const PromotoraRutaPortalView: React.FC = () => {
       active = false;
       listener.subscription.unsubscribe();
     };
-  }, [hydrateShiftBootstrap]);
+  }, [hydrateShiftBootstrap, initialProfile]);
+
+  const isSuperAdminMode = !shiftSessionState && isSuperAdminProfile(profile);
+  const allowGeofenceBypass = !shiftSessionState && canBypassFieldGeofence(profile);
+
+  useEffect(() => {
+    if (isSuperAdminMode) {
+      setDateFilter((prev) => (prev === 'proximas' ? 'todas' : prev));
+    }
+  }, [isSuperAdminMode]);
 
   const {
     routes,
@@ -346,7 +384,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
     refreshRoutes,
     applyOptimisticRouteUpdate,
   } = usePromotoraRutaRealtime({
-    profile: shiftSessionState ? null : profile,
+    profile: shiftSessionState || initialProfile ? null : profile,
     supervisorFilterPromotoraId: null,
     onLiveBanner: showBanner,
   });
@@ -383,14 +421,52 @@ export const PromotoraRutaPortalView: React.FC = () => {
     [cachedOfflineRoutes, routes, shiftRoutes, shiftSessionState]
   );
 
+  const supervisionPromotorasOptions = useMemo(() => {
+    if (!isSuperAdminMode) return [];
+    const seen = new Map<string, string>();
+    for (const r of activeRoutesList) {
+      const key = String(r.promotora_id || r.promotora_email || r.promotora_nombre || '').trim();
+      const label = String(r.promotora_nombre || r.promotora_email || 'Sin promotora').trim();
+      if (key && !seen.has(key)) {
+        seen.set(key, label);
+      }
+    }
+    return Array.from(seen.entries())
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'es'));
+  }, [activeRoutesList, isSuperAdminMode]);
+
   const todayYmd = getCaracasTodayYmd();
 
   const filteredRoutes = useMemo(() => {
     return activeRoutesList.filter((r) => {
+      if (isSuperAdminMode) {
+        if (supervisionSucursal !== 'TODAS') {
+          const rowSuc = String((r as { sucursal?: unknown }).sucursal || '')
+            .trim()
+            .toUpperCase();
+          if (rowSuc && rowSuc !== supervisionSucursal) return false;
+        }
+        if (supervisionPromotora !== 'TODAS') {
+          const rowKey = String(r.promotora_id || r.promotora_email || r.promotora_nombre || '').trim();
+          if (rowKey !== supervisionPromotora) return false;
+        }
+        if (dateFilter === 'hoy') return r.fecha === todayYmd;
+        if (dateFilter === 'proximas') return r.fecha >= todayYmd;
+        return true;
+      }
+
       if (dateFilter === 'hoy') return r.fecha === todayYmd;
       return r.fecha >= todayYmd;
     });
-  }, [activeRoutesList, dateFilter, todayYmd]);
+  }, [
+    activeRoutesList,
+    dateFilter,
+    isSuperAdminMode,
+    supervisionPromotora,
+    supervisionSucursal,
+    todayYmd,
+  ]);
 
   const handleLoginSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -545,6 +621,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
         accuracyMeters: action.accuracyMeters,
         motivoFueraGeocerca: action.motivoFueraGeocerca,
         ejecucion: action.ejecucion ?? null,
+        superAdminBypass: allowGeofenceBypass,
       });
     },
     onSynced: (count) => {
@@ -616,12 +693,21 @@ export const PromotoraRutaPortalView: React.FC = () => {
       // Se permite continuar, pero queda auditado con motivo por defecto en servidor
     }
 
-    const feedback = evaluation?.hasPdvCoordinates
-      ? evaluation.insideGeofence
-        ? `Dentro de geocerca (${evaluation.distanceMeters} m / ${evaluation.allowedRadiusMeters} m).`
-        : `FUERA de geocerca: ${evaluation.distanceMeters} m (máx. ${evaluation.allowedRadiusMeters} m). Alerta auditada.`
-      : gpsWarning || 'PDV sin coordenadas maestras: no se valida geocerca.';
+    const feedback = allowGeofenceBypass
+      ? evaluation?.hasPdvCoordinates && evaluation.insideGeofence
+        ? `Super Admin · Dentro de geocerca (${evaluation.distanceMeters} m / ${evaluation.allowedRadiusMeters} m).`
+        : 'Modo Supervisión Global (Super Admin): bypass controlado de geocerca GPS habilitado para auditoría.'
+      : evaluation?.hasPdvCoordinates
+        ? evaluation.insideGeofence
+          ? `Dentro de geocerca (${evaluation.distanceMeters} m / ${evaluation.allowedRadiusMeters} m).`
+          : `FUERA de geocerca: ${evaluation.distanceMeters} m (máx. ${evaluation.allowedRadiusMeters} m). Alerta auditada.`
+        : gpsWarning || 'PDV sin coordenadas maestras: no se valida geocerca.';
     setGeoFeedback((prev) => ({ ...prev, [item.id]: feedback }));
+
+    const effectiveMotivoFuera =
+      allowGeofenceBypass && !motivoFuera.trim()
+        ? 'Supervisión Global Super Admin (auditoría operativa)'
+        : motivoFuera;
 
     const submissionId =
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -699,8 +785,9 @@ export const PromotoraRutaPortalView: React.FC = () => {
         lat: fix?.lat ?? null,
         lng: fix?.lng ?? null,
         accuracyMeters: fix?.accuracyMeters ?? null,
-        motivoFueraGeocerca: motivoFuera,
+        motivoFueraGeocerca: effectiveMotivoFuera,
         ejecucion,
+        superAdminBypass: allowGeofenceBypass,
       });
       applyOptimisticRouteUpdate(result.ruta);
       showBanner(
@@ -783,7 +870,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
     );
   };
 
-  if (!isSupabaseConfigured && !shiftSessionState && !authChecking) {
+  if (!isSupabaseConfigured && !shiftSessionState && !authChecking && !initialProfile) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-red-500/35 p-6 text-center space-y-3">
@@ -941,14 +1028,24 @@ export const PromotoraRutaPortalView: React.FC = () => {
   const activeDisplayName = shiftSessionState
     ? shiftSessionState.session.personal_nombre || 'Promotora en Jornada'
     : (profile?.displayName ?? 'Promotora');
-  const activePortalSucursal = shiftSessionState
+  const activePortalSucursal: OperativeSucursal | null = shiftSessionState
     ? shiftSessionState.session.sucursal
     : isOperativeSucursal(profile?.sucursal)
       ? profile.sucursal
-      : null;
+      : isSuperAdminMode
+        ? isOperativeSucursal((incidenciaRutaTarget as { sucursal?: unknown } | null)?.sucursal)
+          ? ((incidenciaRutaTarget as { sucursal?: OperativeSucursal }).sucursal ?? 'ZULIA')
+          : supervisionSucursal !== 'TODAS'
+            ? supervisionSucursal
+            : 'ZULIA'
+        : null;
   const effectiveLastSyncedAt = shiftSessionState ? shiftSyncedAt : lastSyncedAt;
   const effectiveIsRefreshing = shiftSessionState ? shiftRefreshing : isRefreshing;
-  const effectiveIsLoading = shiftSessionState ? shiftRefreshing && shiftRoutes.length === 0 : isLoading;
+  const effectiveIsLoading = shiftSessionState
+    ? shiftRefreshing && shiftRoutes.length === 0
+    : initialProfile
+      ? false
+      : isLoading;
   const handleManualRefresh = () => {
     if (shiftSessionState) {
       void hydrateShiftBootstrap(shiftSessionState.token);
@@ -978,8 +1075,8 @@ export const PromotoraRutaPortalView: React.FC = () => {
                 <span
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border ${
                     isOnline && (isRealtimeConnected || Boolean(shiftSessionState))
-                      ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
-                      : 'bg-amber-950/70 text-amber-300 border-amber-700/60'
+                      ? 'bg-red-600/20 text-white border-red-500/50'
+                      : 'bg-zinc-900 text-zinc-200 border-zinc-700'
                   }`}
                   title={
                     isOnline
@@ -989,11 +1086,11 @@ export const PromotoraRutaPortalView: React.FC = () => {
                 >
                   {isOnline ? (
                     <>
-                      <Wifi className="w-3 h-3" /> {shiftSessionState ? 'Jornada' : 'En Vivo'}
+                      <Wifi className="w-3 h-3 text-red-500" /> {shiftSessionState ? 'Jornada' : 'En Vivo'}
                     </>
                   ) : (
                     <>
-                      <WifiOff className="w-3 h-3" /> Offline
+                      <WifiOff className="w-3 h-3 text-red-400" /> Offline
                     </>
                   )}
                 </span>
@@ -1017,9 +1114,9 @@ export const PromotoraRutaPortalView: React.FC = () => {
                 onClick={() => void flushOfflineQueue(true)}
                 disabled={!isOnline}
                 title="Registros pendientes de sincronizar (cola offline). Toca para reintentar."
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-mono font-bold border bg-amber-950/70 text-amber-300 border-amber-700/60 cursor-pointer disabled:opacity-60"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-mono font-bold border bg-red-950/70 text-red-200 border-red-500/50 cursor-pointer disabled:opacity-60"
               >
-                <WifiOff className="w-3 h-3" />
+                <WifiOff className="w-3 h-3 text-red-400" />
                 {isOnline ? 'Sincronizar' : 'Offline'} · {pendingOffline.length}
               </button>
             )}
@@ -1072,12 +1169,12 @@ export const PromotoraRutaPortalView: React.FC = () => {
           }
         />
         {liveBanner && (
-          <div className="rounded-xl bg-emerald-950/60 border border-emerald-500/40 px-4 py-2.5 text-xs text-emerald-200 font-semibold flex items-center justify-between gap-2">
+          <div className="rounded-xl bg-[#121215] border border-red-500/50 px-4 py-2.5 text-xs text-white font-semibold flex items-center justify-between gap-2">
             <span>{liveBanner}</span>
             <button
               type="button"
               onClick={() => setLiveBanner(null)}
-              className="text-emerald-300 hover:text-white text-[11px] font-mono cursor-pointer"
+              className="text-red-400 hover:text-white text-[11px] font-mono font-bold cursor-pointer"
             >
               OK
             </button>
@@ -1100,14 +1197,83 @@ export const PromotoraRutaPortalView: React.FC = () => {
           </div>
         )}
 
+        {isSuperAdminMode && (
+          <section
+            data-testid="portal-super-admin-banner"
+            aria-label="Controles de Modo Supervisión Global"
+            className="rounded-2xl bg-[#121215] border border-red-600/50 p-4 space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#DC2626] text-white text-[10px] font-mono font-black uppercase tracking-wider">
+                  <ShieldCheck className="w-3 h-3" />
+                  Modo Supervisión Global · Super Admin
+                </span>
+                <span className="text-[11px] text-zinc-300 font-medium">
+                  Acceso irrestricto a todas las sedes, rutas y bypass controlado de geocerca GPS
+                </span>
+              </div>
+              <a
+                href="/"
+                className="text-[11px] font-bold text-red-400 hover:text-red-300 underline underline-offset-2"
+              >
+                Volver al Dashboard
+              </a>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <label className="block text-[11px] font-bold text-zinc-300">
+                Sucursal / Sede
+                <select
+                  data-testid="portal-supervision-sucursal-select"
+                  value={supervisionSucursal}
+                  onChange={(e) =>
+                    setSupervisionSucursal(e.target.value as 'TODAS' | OperativeSucursal)
+                  }
+                  className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-white/15 text-xs text-white font-semibold focus:outline-none focus:border-red-500 cursor-pointer"
+                >
+                  <option value="TODAS">Todas las Sedes (Nacional)</option>
+                  {OPERATIVE_SUCURSALES.map((hub) => (
+                    <option key={hub} value={hub}>
+                      {SUCURSAL_LABELS[hub]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block text-[11px] font-bold text-zinc-300">
+                Promotora asignada
+                <select
+                  data-testid="portal-supervision-promotora-select"
+                  value={supervisionPromotora}
+                  onChange={(e) => setSupervisionPromotora(e.target.value)}
+                  className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-white/15 text-xs text-white font-semibold focus:outline-none focus:border-red-500 cursor-pointer"
+                >
+                  <option value="TODAS">Todas las Promotoras ({supervisionPromotorasOptions.length})</option>
+                  {supervisionPromotorasOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </section>
+        )}
+
         {/* Filtros rápidos de horizonte temporal */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="inline-flex rounded-xl bg-zinc-950 border border-white/10 p-1 gap-1">
-            {(
-              [
-                { id: 'proximas', label: 'Hoy y Programación Próxima' },
-                { id: 'hoy', label: 'Solo Hoy' },
-              ] as const
+            {(isSuperAdminMode
+              ? ([
+                  { id: 'todas', label: 'Todas las Fechas' },
+                  { id: 'proximas', label: 'Hoy y Próximas' },
+                  { id: 'hoy', label: 'Solo Hoy' },
+                ] as const)
+              : ([
+                  { id: 'proximas', label: 'Hoy y Programación Próxima' },
+                  { id: 'hoy', label: 'Solo Hoy' },
+                ] as const)
             ).map((tab) => (
               <button
                 key={tab.id}
@@ -1133,9 +1299,9 @@ export const PromotoraRutaPortalView: React.FC = () => {
               type="button"
               data-testid="btn-open-incidencia-general"
               onClick={() => openIncidenciaModalForRuta(null)}
-              className="px-3 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer"
+              className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-red-950/70 border border-red-500/45 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition cursor-pointer"
             >
-              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
               <span>Reportar Incidencia</span>
             </button>
           </div>
@@ -1167,12 +1333,12 @@ export const PromotoraRutaPortalView: React.FC = () => {
               return (
                 <article
                   key={ruta.id}
-                  className={`rounded-2xl bg-zinc-950 border p-4 sm:p-5 transition ${
+                  className={`rounded-2xl bg-[#121215] border p-4 sm:p-5 transition ${
                     ruta.estado_ruta === 'EN_CURSO'
-                      ? 'border-red-500/70 shadow-lg shadow-red-950/30'
+                      ? 'border-red-600 shadow-lg shadow-red-950/30'
                       : isToday
-                        ? 'border-white/20'
-                        : 'border-white/10'
+                        ? 'border-zinc-700'
+                        : 'border-zinc-800'
                   }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
@@ -1191,6 +1357,14 @@ export const PromotoraRutaPortalView: React.FC = () => {
                             HOY
                           </span>
                         )}
+                        {isSuperAdminMode && (
+                          <span className="px-2 py-0.5 rounded bg-zinc-900 border border-white/15 text-[10px] font-mono font-bold text-zinc-200">
+                            {ruta.promotora_nombre || ruta.promotora_email || 'Sin promotora'}
+                            {isOperativeSucursal((ruta as { sucursal?: unknown }).sucursal)
+                              ? ` · ${(ruta as { sucursal?: OperativeSucursal }).sucursal}`
+                              : ''}
+                          </span>
+                        )}
                       </div>
 
                       <h3 className="text-base sm:text-lg font-extrabold text-white mt-2">
@@ -1207,71 +1381,71 @@ export const PromotoraRutaPortalView: React.FC = () => {
                     <span
                       className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-mono font-black uppercase border ${
                         ruta.estado_ruta === 'COMPLETADA'
-                          ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700'
+                          ? 'bg-white text-[#09090B] border-white'
                           : ruta.estado_ruta === 'EN_CURSO'
-                            ? 'bg-red-600 text-white border-red-400'
+                            ? 'bg-red-600 text-white border-red-500'
                             : 'bg-zinc-900 text-zinc-200 border-zinc-700'
                       }`}
                     >
-                      {ruta.estado_ruta === 'COMPLETADA' && <CheckCircle2 className="w-3.5 h-3.5" />}
+                      {ruta.estado_ruta === 'COMPLETADA' && <CheckCircle2 className="w-3.5 h-3.5 text-[#DC2626]" />}
                       {ruta.estado_ruta === 'EN_CURSO' && <Play className="w-3 h-3 fill-white" />}
                       {ruta.estado_ruta}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-3 border-t border-white/10 text-xs">
-                    <div className="rounded-xl bg-black/60 border border-zinc-900 p-2.5">
-                      <span className="text-[10px] uppercase font-mono text-zinc-500 block">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-3 border-t border-zinc-800 text-xs">
+                    <div className="rounded-xl bg-[#09090B] border border-zinc-800 p-2.5">
+                      <span className="text-[10px] uppercase font-mono text-zinc-400 block">
                         Producto(s) Aprobados
                       </span>
                       <span className="font-bold text-white flex items-center gap-1.5 mt-0.5">
-                        <Package className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                        <Package className="w-3.5 h-3.5 text-red-500 shrink-0" />
                         <span>{ruta.producto_resumen}</span>
                       </span>
                     </div>
 
-                    <div className="rounded-xl bg-black/60 border border-zinc-900 p-2.5">
-                      <span className="text-[10px] uppercase font-mono text-zinc-500 block">
+                    <div className="rounded-xl bg-[#09090B] border border-zinc-800 p-2.5">
+                      <span className="text-[10px] uppercase font-mono text-zinc-400 block">
                         Meta Operativa
                       </span>
-                      <span className="font-mono font-bold text-zinc-200 block mt-0.5">
+                      <span className="font-mono font-bold text-white block mt-0.5">
                         {ruta.cantidad_kilos} kg/un · {ruta.personas_estimadas || 0} impactos est.
                       </span>
                     </div>
 
-                    <div className="rounded-xl bg-black/60 border border-zinc-900 p-2.5">
-                      <span className="text-[10px] uppercase font-mono text-zinc-500 block">
+                    <div className="rounded-xl bg-[#09090B] border border-zinc-800 p-2.5">
+                      <span className="text-[10px] uppercase font-mono text-zinc-400 block">
                         Solicitante FDV / Coord.
                       </span>
-                      <span className="font-semibold text-zinc-200 block mt-0.5 truncate">
+                      <span className="font-semibold text-white block mt-0.5 truncate">
                         {ruta.vendedor_fdv || ruta.aprobado_por || 'Trade Marketing'}
                       </span>
                     </div>
                   </div>
 
                   {geoFeedback[ruta.id] && (
-                    <p className="mt-2.5 text-xs font-mono text-amber-200 bg-amber-950/40 border border-amber-700/40 rounded-xl px-3 py-2 flex items-center gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 shrink-0" />
+                    <p className="mt-2.5 text-xs font-mono text-zinc-100 bg-red-950/40 border border-red-500/45 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-red-400 shrink-0" />
                       <span>{geoFeedback[ruta.id]}</span>
                     </p>
                   )}
 
                   {ruta.observaciones && (
-                    <p className="mt-2.5 text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800/80 rounded-xl px-3 py-2">
+                    <p className="mt-2.5 text-xs text-zinc-300 bg-[#09090B] border border-zinc-800 rounded-xl px-3 py-2">
                       {ruta.observaciones}
                     </p>
                   )}
 
                   {/* Controles operativos exclusivos para la promotora propietaria */}
                   {ruta.estado_ruta !== 'COMPLETADA' && (
-                    <div className="mt-4 pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2">
+                    <div className="mt-4 pt-3 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
                       <button
                         type="button"
                         data-testid={`btn-reportar-incidencia-${ruta.id}`}
                         onClick={() => openIncidenciaModalForRuta(ruta)}
-                        className="px-3.5 py-2 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer"
+                        className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-red-950/70 border border-red-500/45 text-white text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer"
                       >
-                        <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                        <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
                         <span>Reportar Incidencia</span>
                       </button>
 
@@ -1297,12 +1471,12 @@ export const PromotoraRutaPortalView: React.FC = () => {
                             type="button"
                             disabled={isBusy}
                             onClick={() => void handleRouteStep(ruta, 'CHECKOUT')}
-                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-emerald-950/50 cursor-pointer"
+                            className="px-4 py-2 rounded-xl bg-white hover:bg-zinc-200 disabled:opacity-50 text-[#09090B] border border-white text-xs font-extrabold flex items-center gap-2 shadow-md shadow-black/50 cursor-pointer"
                           >
                             {isBusy ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#DC2626]" />
                             ) : (
-                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <CheckCircle2 className="w-3.5 h-3.5 text-[#DC2626]" />
                             )}
                             <span>Finalizar Degustación (Check-out)</span>
                           </button>
@@ -1412,7 +1586,7 @@ export const PromotoraRutaPortalView: React.FC = () => {
               <button
                 type="submit"
                 disabled={processingRutaId === executionTarget.id}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-extrabold cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-extrabold cursor-pointer"
               >
                 {processingRutaId === executionTarget.id ? 'Enviando...' : 'Finalizar y enviar'}
               </button>

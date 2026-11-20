@@ -47,8 +47,39 @@ export const CORPORATE_MANAGED_ROLES = new Set([
   'chofer',
 ]);
 
+export const CANONICAL_SUPER_ADMIN_EMAIL = 'admin@codizulca.com';
+
 export function normalizeCanonicalEmail(raw: unknown): string {
   return String(raw ?? '').trim().toLowerCase();
+}
+
+/**
+ * Verificación criptográfica/servidor de privilegio `super_admin`:
+ * - Jamás lee `user_metadata` (modificable por el cliente).
+ * - Falla cerrado (`false`) si el perfil existe con `is_active === false`.
+ * - Acepta `public.profiles.role === 'super_admin'` activo o respaldo en
+ *   `app_metadata.role / app_role === 'super_admin'` exclusivamente para
+ *   el correo verificado `admin@codizulca.com`.
+ */
+export function isVerifiedServerSuperAdmin(params: {
+  canonicalEmail?: unknown;
+  profile?: { role?: unknown; is_active?: unknown } | null;
+  appMetadata?: Record<string, unknown> | null;
+}): boolean {
+  const email = normalizeCanonicalEmail(params.canonicalEmail);
+  const profile = params.profile ?? null;
+
+  if (profile) {
+    if (profile.is_active !== true) return false;
+    return String(profile.role ?? '').trim().toLowerCase() === 'super_admin';
+  }
+
+  const appMeta = (params.appMetadata ?? {}) as Record<string, unknown>;
+  const appMetaRole = String(appMeta.role ?? appMeta.app_role ?? '')
+    .trim()
+    .toLowerCase();
+
+  return email === CANONICAL_SUPER_ADMIN_EMAIL && appMetaRole === 'super_admin';
 }
 
 export function isOperativeServerSucursal(value: unknown): value is OperativeSucursal {
@@ -425,6 +456,7 @@ export interface AuthenticatedServerUser {
   sucursal?: ServerSucursalCodigo | null;
   activeSucursalHeader?: OperativeSucursal | null;
   staffId?: string | null;
+  isSuperAdmin?: boolean;
   isCoordinatorOrAdmin?: boolean;
   /**
    * Verdadero para roles de supervisión de solo lectura (p. ej. `contraloria`): pueden consultar
@@ -1126,13 +1158,16 @@ export async function requireCoordinatorOrAdminAuth(
       return;
     }
 
+    const isSuperAdmin = appRole === 'super_admin';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
-      sucursal: effective.sucursal,
+      sucursal: isSuperAdmin ? 'GLOBAL' : effective.sucursal,
       activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      isSuperAdmin,
       isCoordinatorOrAdmin: true,
+      isReadOnlyViewer: false,
       accessToken: token,
     };
     next();
@@ -1215,17 +1250,20 @@ export async function requireAttendanceActorAuth(
     }
 
     if (isCoordinatorOrAdminRole(appRole)) {
+      const isSuperAdmin = appRole === 'super_admin';
       req.authUser = {
         id: data.user.id,
         email: canonicalEmail,
         appRole,
-        sucursal: effective.sucursal,
+        sucursal: isSuperAdmin ? 'GLOBAL' : effective.sucursal,
         activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
         staffId:
           typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id)
             ? appMeta.staff_id
             : null,
+        isSuperAdmin,
         isCoordinatorOrAdmin: true,
+        isReadOnlyViewer: false,
         accessToken: token,
       };
       next();
@@ -1768,8 +1806,16 @@ export async function requireSuperAdminAuth(
       }
     }
 
-    const activeRole = String(profile?.role ?? '').trim().toLowerCase();
-    if (profileErr || !profile || profile.is_active !== true || activeRole !== 'super_admin') {
+    const appMetadata = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const authorizedSuperAdmin =
+      !profileErr &&
+      isVerifiedServerSuperAdmin({
+        canonicalEmail,
+        profile,
+        appMetadata,
+      });
+
+    if (!authorizedSuperAdmin) {
       res.status(403).json({
         error: 'Acceso denegado: esta acción es exclusiva del Administrador General activo.',
         code: 'SUPER_ADMIN_REQUIRED',
@@ -1783,7 +1829,9 @@ export async function requireSuperAdminAuth(
       appRole: 'super_admin',
       sucursal: 'GLOBAL',
       activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      isSuperAdmin: true,
       isCoordinatorOrAdmin: true,
+      isReadOnlyViewer: false,
       accessToken: token,
     };
     next();

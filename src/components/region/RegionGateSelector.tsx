@@ -114,9 +114,9 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
           <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
             <div
               data-testid="region-bar-locked-badge"
-              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-emerald-500/30 text-zinc-100 font-semibold"
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-red-500/40 text-white font-semibold"
             >
-              <Lock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
               <span>Sucursal asignada por correo: {activeDisplayLabel}</span>
             </div>
 
@@ -143,11 +143,11 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
               data-testid="region-bar-active-pill"
               className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
                 effectiveActiveSucursal
-                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
-                  : 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                  ? 'bg-red-600/15 text-white border-red-500/45'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-700'
               }`}
             >
-              <MapPin className="w-3.5 h-3.5 shrink-0" />
+              <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
               <span>
                 Sucursal Activa:{' '}
                 {effectiveActiveSucursal ? activeDisplayLabel : 'Pendiente de selección'}
@@ -325,13 +325,13 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
                 </div>
 
                 <div className="pt-2.5 border-t border-white/[0.06] flex items-center justify-between text-xs font-bold">
-                  <span className={isSelected ? 'text-emerald-300' : 'text-red-400 group-hover:text-white'}>
+                  <span className={isSelected ? 'text-white' : 'text-red-400 group-hover:text-white'}>
                     {isSelected ? 'Sucursal Activa' : `Abrir ${reg.nombre}`}
                   </span>
                   <CheckCircle2
                     className={`w-4 h-4 ${
                       isSelected
-                        ? 'text-emerald-400'
+                        ? 'text-red-500'
                         : 'text-zinc-600 group-hover:text-red-400'
                     }`}
                   />

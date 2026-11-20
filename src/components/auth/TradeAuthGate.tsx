@@ -102,8 +102,26 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({ children }) => {
         return;
       }
 
-      const resolved = await resolveVerifiedProfileWithStaffFallback(data.session);
+      let resolved = await resolveVerifiedProfileWithStaffFallback(data.session);
       if (!active) return;
+
+      // Si `public.profiles` ya promovió a `super_admin` pero el JWT local conserva claims antiguos,
+      // refrescar la sesión de forma transparente para sincronizar `app_metadata` en el token activo.
+      const jwtAppMeta = (data.session.user.app_metadata ?? {}) as Record<string, unknown>;
+      const jwtMetaRole = String(jwtAppMeta.role ?? jwtAppMeta.app_role ?? '')
+        .trim()
+        .toLowerCase();
+      if (resolved?.iamRole === 'super_admin' && jwtMetaRole !== 'super_admin') {
+        const { data: refreshed } = await client.auth.refreshSession().catch(() => ({
+          data: { session: null },
+        }));
+        if (!active) return;
+        if (refreshed?.session) {
+          client.realtime.setAuth(refreshed.session.access_token);
+          resolved = await resolveVerifiedProfileWithStaffFallback(refreshed.session);
+          if (!active) return;
+        }
+      }
       if (isClienteProfile(resolved) && !isOnClienteRoute()) {
         window.location.replace('/cliente');
         return;

@@ -52,9 +52,32 @@
 }
 
 /* =========================================================================
-   VARIABLES SEMÁNTICAS POR MODO (`default` 60/30/10 vs `control-room`)
+   VARIABLES SEMÁNTICAS POR MODO (Dark Negro/Rojo/Blanco por defecto)
    ========================================================================= */
 :root,
+:root[data-theme="control-room"],
+[data-theme-preview="control-room"] {
+  --cz-bg-canvas: #09090b;
+  --cz-bg-surface: #121215;
+  --cz-bg-elevated: #18181b;
+  --cz-bg-obsidian: #09090b;
+  --cz-border-subtle: #27272a;
+  --cz-border-strong: #3f3f46;
+  --cz-text-primary: #ffffff;
+  --cz-text-secondary: #a1a1aa;
+  --cz-text-muted: #a1a1aa;
+  --cz-accent-red: #dc2626;
+  --cz-accent-red-focal: #ef4444;
+  --cz-accent-red-soft: rgba(220, 38, 38, 0.16);
+  --cz-chart-grid: #27272a;
+  --cz-chart-axis: #a1a1aa;
+  --cz-chart-surface: #121215;
+  --cz-cobrand-capsule-bg: #f4f4f5;
+  --cz-cobrand-capsule-border: #3f3f46;
+  --cz-scrollbar-track: #09090b;
+  --cz-scrollbar-thumb: #27272a;
+}
+
 :root[data-theme="default"],
 [data-theme-preview="default"] {
   --cz-bg-canvas: #f8f9fa;
@@ -78,34 +101,12 @@
   --cz-scrollbar-thumb: #d4d4d8;
 }
 
-:root[data-theme="control-room"],
-[data-theme-preview="control-room"] {
-  --cz-bg-canvas: #09090b;
-  --cz-bg-surface: #121215;
-  --cz-bg-elevated: #18181b;
-  --cz-bg-obsidian: #09090b;
-  --cz-border-subtle: #27272a;
-  --cz-border-strong: #3f3f46;
-  --cz-text-primary: #fafafa;
-  --cz-text-secondary: #a1a1aa;
-  --cz-text-muted: #a1a1aa;
-  --cz-accent-red: #dc2626;
-  --cz-accent-red-focal: #ef4444;
-  --cz-accent-red-soft: rgba(220, 38, 38, 0.14);
-  --cz-chart-grid: #27272a;
-  --cz-chart-axis: #a1a1aa;
-  --cz-chart-surface: #121215;
-  --cz-cobrand-capsule-bg: #f4f4f5;
-  --cz-cobrand-capsule-border: #3f3f46;
-  --cz-scrollbar-track: #09090b;
-  --cz-scrollbar-thumb: #27272a;
-}
-
 @layer base {
   :root {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    color-scheme: dark;
   }
 
   :root[data-theme="default"] {
@@ -162,8 +163,8 @@
     box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.24);
   }
 
-  :root[data-theme="control-room"] button.bg-red-600:hover,
-  :root[data-theme="control-room"] a.bg-red-600:hover {
+  :root:not([data-theme="default"]) button.bg-red-600:hover,
+  :root:not([data-theme="default"]) a.bg-red-600:hover {
     background-color: #ef4444;
     box-shadow: none;
   }
@@ -193,13 +194,13 @@
 }
 
 /* =========================================================================
-   CALIBRACIÓN SALA DE CONTROL (`[data-theme="control-room"]`)
-   Lienzo #09090B, Superficies #121215, Cabeceras #18181B, Bordes 1px #27272A,
-   Texto #FAFAFA / #A1A1AA (WCAG AA >= 4.5:1), cero resplandores neón.
+   CALIBRACIÓN MODO OSCURO CORPORATIVO (`:root:not([data-theme="default"])`)
+   Lienzo #09090B (Negro Obsidiana), Superficies #121215, Cabeceras #18181B,
+   Bordes 1px #27272A, Rojo Corporativo #DC2626, Texto Blanco #FFFFFF / #A1A1AA.
    ========================================================================= */
-:root[data-theme="control-room"] .glass-panel,
-:root[data-theme="control-room"] .glass-card,
-:root[data-theme="control-room"] .cz-surface {
+:root:not([data-theme="default"]) .glass-panel,
+:root:not([data-theme="default"]) .glass-card,
+:root:not([data-theme="default"]) .cz-surface {
   background: #121215;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -207,38 +208,37 @@
   box-shadow: none;
 }
 
-:root[data-theme="control-room"] .glass-card:hover {
+:root:not([data-theme="default"]) .glass-card:hover {
   border-color: #dc2626;
   box-shadow: none;
 }
 
-:root[data-theme="control-room"] .text-zinc-400,
-:root[data-theme="control-room"] .text-zinc-500,
-:root[data-theme="control-room"] .text-slate-400,
-:root[data-theme="control-room"] .text-slate-500 {
+:root:not([data-theme="default"]) .text-zinc-400,
+:root:not([data-theme="default"]) .text-zinc-500,
+:root:not([data-theme="default"]) .text-slate-400,
+:root:not([data-theme="default"]) .text-slate-500 {
   color: #a1a1aa;
 }
 
-:root[data-theme="control-room"] .border-white\/10,
-:root[data-theme="control-room"] .border-white\/5,
-:root[data-theme="control-room"] .border-white\/\[0\.06\],
-:root[data-theme="control-room"] .border-white\/\[0\.07\],
-:root[data-theme="control-room"] .border-zinc-800,
-:root[data-theme="control-room"] .border-slate-800 {
+:root:not([data-theme="default"]) .border-white\/10,
+:root:not([data-theme="default"]) .border-white\/5,
+:root:not([data-theme="default"]) .border-white\/\[0\.06\],
+:root:not([data-theme="default"]) .border-white\/\[0\.07\],
+:root:not([data-theme="default"]) .border-zinc-800,
+:root:not([data-theme="default"]) .border-slate-800 {
   border-color: #27272a;
 }
 
 /* =========================================================================
-   CALIBRACIÓN MODO DÍA EJECUTIVO (`:root:not([data-theme="control-room"])`)
-   60 % Blanco/Hielo (#FFFFFF / #F8F9FA), 30 % Negro Obsidiana (.cz-obsidian-anchor
-   + tipografía #09090B), 10 % Rojo Corporativo (#DC2626).
+   CALIBRACIÓN MODO DÍA EJECUTIVO OPCIONAL (`:root[data-theme="default"]`)
+   Solo activo cuando el usuario selecciona explícitamente Modo Día.
    ========================================================================= */
-:root:not([data-theme="control-room"]) .cz-workspace-canvas {
+:root[data-theme="default"] .cz-workspace-canvas {
   background-color: #f8f9fa !important;
   color: #09090b !important;
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     .bg-\[\#09090b\],
     .bg-\[\#09090B\],
     .bg-\[\#09090c\],
@@ -264,7 +264,7 @@
   box-shadow: 0 1px 2px 0 rgba(9, 9, 11, 0.04);
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     .bg-\[\#18181b\],
     .bg-\[\#18181B\],
     .bg-\[\#18181B\]\/90,
@@ -285,6 +285,7 @@
     .bg-slate-900\/80,
     .bg-slate-800,
     .bg-black\/70,
+    .bg-black\/60,
     .bg-black\/40,
     .bg-black\/30,
     .bg-black\/20,
@@ -295,7 +296,7 @@
   border-color: #e4e4e7;
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     .text-white,
     .text-\[\#FFFFFF\],
     .text-\[\#FAFAFA\],
@@ -310,7 +311,7 @@
 }
 
 /* Preservar texto blanco únicamente dentro de botones/insignias con fondo sólido real */
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     button.bg-red-600,
     a.bg-red-600,
     .bg-red-600,
@@ -321,7 +322,7 @@
     .bg-emerald-700,
     .cz-keep-inverse
   ),
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     button.bg-red-600,
     a.bg-red-600,
     .bg-red-600,
@@ -335,7 +336,7 @@
   color: #ffffff !important;
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     .text-zinc-300,
     .text-zinc-400,
     .text-zinc-500,
@@ -347,32 +348,32 @@
 }
 
 /* Contraste WCAG AA >= 4.5:1 para píldoras semánticas sobre blanco en Modo Día Ejecutivo */
-:root:not([data-theme="control-room"]) :is(.text-red-200, .text-red-300, .text-red-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.text-red-200, .text-red-300, .text-red-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   color: #b91c1c !important;
 }
-:root:not([data-theme="control-room"]) :is(.bg-red-950, .bg-red-950\/50, .bg-red-950\/40, .bg-red-950\/30, .bg-red-500\/10, .bg-red-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.bg-red-950, .bg-red-950\/50, .bg-red-950\/40, .bg-red-950\/30, .bg-red-500\/10, .bg-red-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   background-color: #fef2f2 !important;
   border-color: #fecaca !important;
 }
-:root:not([data-theme="control-room"]) :is(.text-emerald-200, .text-emerald-300, .text-emerald-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.text-emerald-200, .text-emerald-300, .text-emerald-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   color: #047857 !important;
 }
-:root:not([data-theme="control-room"]) :is(.bg-emerald-950, .bg-emerald-950\/50, .bg-emerald-950\/40, .bg-emerald-500\/10, .bg-emerald-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.bg-emerald-950, .bg-emerald-950\/50, .bg-emerald-950\/40, .bg-emerald-500\/10, .bg-emerald-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   background-color: #ecfdf5 !important;
   border-color: #a7f3d0 !important;
 }
-:root:not([data-theme="control-room"]) :is(.text-amber-200, .text-amber-300, .text-amber-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.text-amber-200, .text-amber-300, .text-amber-400):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   color: #b45309 !important;
 }
-:root:not([data-theme="control-room"]) :is(.bg-amber-950, .bg-amber-950\/40, .bg-amber-500\/10, .bg-amber-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.bg-amber-950, .bg-amber-950\/40, .bg-amber-500\/10, .bg-amber-500\/15):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   background-color: #fffbeb !important;
   border-color: #fde68a !important;
 }
-:root:not([data-theme="control-room"]) :is(.text-cyan-200, .text-cyan-300, .text-blue-200, .text-blue-300):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
+:root[data-theme="default"] :is(.text-cyan-200, .text-cyan-300, .text-blue-200, .text-blue-300):not(.cz-obsidian-anchor *):not([data-theme-preview="control-room"] *) {
   color: #18181b !important;
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     .border-white\/5,
     .border-white\/10,
     .border-white\/15,
@@ -391,7 +392,7 @@
   border-color: #e4e4e7 !important;
 }
 
-:root:not([data-theme="control-room"]) :is(
+:root[data-theme="default"] :is(
     input:not([type="checkbox"]):not([type="radio"]),
     select,
     textarea
@@ -401,24 +402,24 @@
   border-color: #d4d4d8 !important;
 }
 
-/* Hoja formal MP-07 en pantalla durante Sala de Control: elimina deslumbramiento blanco */
+/* Hoja formal MP-07 en pantalla durante Modo Oscuro: elimina deslumbramiento blanco */
 @media screen {
-  :root[data-theme="control-room"] .cz-format-sheet,
-  :root[data-theme="control-room"] .cz-format-sheet .bg-\[\#FFFFFF\],
-  :root[data-theme="control-room"] .cz-format-sheet .bg-neutral-50,
-  :root[data-theme="control-room"] .cz-format-sheet .bg-neutral-100 {
+  :root:not([data-theme="default"]) .cz-format-sheet,
+  :root:not([data-theme="default"]) .cz-format-sheet .bg-\[\#FFFFFF\],
+  :root:not([data-theme="default"]) .cz-format-sheet .bg-neutral-50,
+  :root:not([data-theme="default"]) .cz-format-sheet .bg-neutral-100 {
     background-color: #121215 !important;
     color: #fafafa !important;
     border-color: #27272a !important;
   }
 
-  :root[data-theme="control-room"] .cz-format-sheet .text-\[\#000000\],
-  :root[data-theme="control-room"] .cz-format-sheet .text-neutral-700,
-  :root[data-theme="control-room"] .cz-format-sheet .text-neutral-800 {
+  :root:not([data-theme="default"]) .cz-format-sheet .text-\[\#000000\],
+  :root:not([data-theme="default"]) .cz-format-sheet .text-neutral-700,
+  :root:not([data-theme="default"]) .cz-format-sheet .text-neutral-800 {
     color: #fafafa !important;
   }
 
-  :root[data-theme="control-room"] .cz-format-sheet .bg-\[\#FCA5A5\] {
+  :root:not([data-theme="default"]) .cz-format-sheet .bg-\[\#FCA5A5\] {
     background-color: #18181b !important;
     color: #fafafa !important;
   }

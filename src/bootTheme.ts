@@ -7,15 +7,15 @@ export type UiThemeMode = 'default' | 'control-room';
 export const UI_THEME_STORAGE_KEY = 'codizulca.ui_theme';
 
 export function normalizeUiThemeMode(raw: unknown): UiThemeMode {
-  return raw === 'control-room' ? 'control-room' : 'default';
+  return raw === 'default' ? 'default' : 'control-room';
 }
 
 export function readStoredUiThemeMode(): UiThemeMode {
-  if (typeof window === 'undefined') return 'default';
+  if (typeof window === 'undefined') return 'control-room';
   try {
     return normalizeUiThemeMode(window.localStorage.getItem(UI_THEME_STORAGE_KEY));
   } catch {
-    return 'default';
+    return 'control-room';
   }
 }
 

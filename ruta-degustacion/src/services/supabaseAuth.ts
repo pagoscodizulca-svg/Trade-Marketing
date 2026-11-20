@@ -250,6 +250,10 @@ export function canAccessOficinaMode(role: RutaAppRole): boolean {
   return role === 'super_admin' || role === 'coordinacion';
 }
 
+export function isRutaSuperAdmin(user: Pick<RutaAuthUser, 'role'> | null | undefined): boolean {
+  return Boolean(user && user.role === 'super_admin');
+}
+
 export function canAccessChoferMode(role: RutaAppRole): boolean {
   return role === 'super_admin' || role === 'coordinacion' || role === 'chofer';
 }
@@ -426,6 +430,25 @@ export async function verifyRutaProfileAccess(
   }
 
   if (!profile) {
+    // Respaldo verificado exclusivamente sobre app_metadata firmado en servidor (jamás user_metadata)
+    // para la cuenta maestra `admin@codizulca.com`.
+    const appMeta = (session.user.app_metadata ?? {}) as Record<string, unknown>;
+    const appMetaRole = normalizeRutaRole(appMeta.role ?? appMeta.app_role);
+    if (canonicalSessionEmail === 'admin@codizulca.com' && appMetaRole === 'super_admin') {
+      const superAdminUser: RutaAuthUser = {
+        id: session.user.id,
+        email: canonicalSessionEmail,
+        fullName:
+          String(appMeta.display_name || '').trim() || 'Administrador General CODIZULCA',
+        role: 'super_admin',
+        sucursal: 'GLOBAL',
+      };
+      writeCachedProfile(superAdminUser);
+      await syncTokenToOutbox(session.access_token);
+      client.realtime.setAuth(session.access_token);
+      return { ok: true, user: superAdminUser, accessToken: session.access_token };
+    }
+
     writeCachedProfile(null);
     await syncTokenToOutbox(null);
     await client.auth.signOut().catch(() => {});
@@ -549,6 +572,18 @@ export async function signInRutaUser(
     };
   }
 
+  return verifyRutaProfileAccess(client, data.session);
+}
+
+export async function refreshRutaSession(): Promise<RutaAuthVerificationResult> {
+  const client = getRutaSupabaseClient();
+  if (!client) {
+    return { ok: false, code: 'UNCONFIGURED', error: 'Cliente Supabase no inicializado.' };
+  }
+  const { data, error } = await client.auth.refreshSession();
+  if (error || !data.session) {
+    return restoreRutaSession();
+  }
   return verifyRutaProfileAccess(client, data.session);
 }
 
