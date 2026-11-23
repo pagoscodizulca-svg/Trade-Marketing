@@ -711,6 +711,7 @@ export async function completeOwnPasswordChange(newPassword: string): Promise<vo
   const client = getSupabaseClient();
   const { error: updateError } = await client.auth.updateUser({
     password: cleanPassword,
+    data: { must_change_password: false },
   });
 
   if (updateError) {
@@ -728,4 +729,6 @@ export async function completeOwnPasswordChange(newPassword: string): Promise<vo
       )
     );
   }
+
+  await client.auth.refreshSession().catch(() => {});
 }

@@ -37,6 +37,9 @@
     "verify:pdf-autorizacion": "tsx scripts/verifyPendingAuthorizationPdf.ts",
     "verify:maestros": "tsx scripts/verifyMasterDataSync.ts",
     "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts",
+    "audit:promotoras": "tsx scripts/audit-promotoras-identities.ts",
+    "provision:promotoras": "tsx scripts/provision-promotoras-auth.ts",
+    "verify:promotoras-isolation": "tsx scripts/verify-promotoras-regional-isolation.ts",
     "seed:promotoras": "tsx scripts/seed-promotoras.ts",
     "seed:coordinadora-occidente": "node scripts/seed-coordinadora-occidente.mjs",
     "seed:coordinadora-centro-andes": "node scripts/seed-coordinadora-centro-andes.mjs"

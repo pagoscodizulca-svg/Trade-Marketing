@@ -635,6 +635,11 @@ export async function resolveVerifiedProfileWithStaffFallback(
               })();
         const profileAssignedRegionLabels = profileAssignedRegions.map(formatOfficialRegionLabel);
 
+        const resolvedMustChangePassword =
+          'must_change_password' in iamProfile && typeof iamProfile.must_change_password === 'boolean'
+            ? iamProfile.must_change_password
+            : base.mustChangePassword;
+
         if (iamRole === 'promotora') {
           const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
           return {
@@ -652,7 +657,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
             staffId: activeStaff?.staffId ?? base.staffId,
             isCoordinatorOrAdmin: false,
             canAccessTorreControl: false,
-            mustChangePassword: Boolean(iamProfile.must_change_password),
+            mustChangePassword: resolvedMustChangePassword,
           };
         }
 
@@ -674,7 +679,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
           legacyRole: mapToLegacyUserRole(iamRole, iamCanonical),
           isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(iamCanonical),
           canAccessTorreControl: canCanonicalRoleAccessTorre(iamCanonical),
-          mustChangePassword: Boolean(iamProfile.must_change_password),
+          mustChangePassword: resolvedMustChangePassword,
         };
       }
     }
@@ -707,7 +712,7 @@ export async function resolveVerifiedProfileWithStaffFallback(
       displayName: activeStaff.name || base.displayName,
       isCoordinatorOrAdmin: false,
       canAccessTorreControl: false,
-      mustChangePassword: false,
+      mustChangePassword: base.mustChangePassword,
     };
   }
 
@@ -946,16 +951,71 @@ export async function signInPromotoraPortalWithPassword(
   setActiveClientSucursalHeader(null);
 
   const client = getSupabaseClient();
-  const { data, error } = await client.auth.signInWithPassword({
-    email,
-    password,
-  });
+  let session: Session | null = null;
 
-  if (error || !data.session || !data.user) {
+  // Intentar primero el endpoint backend con rate limiting estricto por (IP + correo)
+  let fallbackToDirectSupabase = true;
+  if (typeof window !== 'undefined' && typeof fetch === 'function') {
+    try {
+      const apiRes = await fetch('/api/auth/promotora-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (apiRes.status === 429) {
+        const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(
+          body.error || 'Demasiados intentos fallidos. Espera unos minutos antes de reintentar.'
+        );
+      }
+      if (apiRes.status === 401) {
+        const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || GENERIC_INVALID_CREDENTIALS_MESSAGE);
+      }
+      if (apiRes.ok) {
+        const body = (await apiRes.json().catch(() => ({}))) as {
+          session?: { access_token?: string; refresh_token?: string };
+        };
+        if (body.session?.access_token && body.session?.refresh_token) {
+          const { data: hydrated, error: setErr } = await client.auth.setSession({
+            access_token: body.session.access_token,
+            refresh_token: body.session.refresh_token,
+          });
+          if (!setErr && hydrated.session && hydrated.user) {
+            session = hydrated.session;
+            fallbackToDirectSupabase = false;
+          }
+        }
+      }
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        (/Demasiados intentos|Credenciales inválidas|Verifica tu correo/i.test(err.message) ||
+          err.message === GENERIC_INVALID_CREDENTIALS_MESSAGE)
+      ) {
+        throw err;
+      }
+      // En despliegues estáticos sin backend Express, degrada de forma segura al Auth directo
+      fallbackToDirectSupabase = true;
+    }
+  }
+
+  if (fallbackToDirectSupabase) {
+    const { data, error } = await client.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error || !data.session || !data.user) {
+      throw new Error(GENERIC_INVALID_CREDENTIALS_MESSAGE);
+    }
+    session = data.session;
+  }
+
+  if (!session) {
     throw new Error(GENERIC_INVALID_CREDENTIALS_MESSAGE);
   }
 
-  const verification = await verifyActivePromotoraPortalAccess(data.session);
+  const verification = await verifyActivePromotoraPortalAccess(session);
   if (!verification.profile) {
     throw new Error(verification.unauthorizedReason || PORTAL_UNAUTHORIZED_ACCESS_MESSAGE);
   }
@@ -967,7 +1027,7 @@ export async function signInPromotoraPortalWithPassword(
   );
   clearMasterDataCaches();
 
-  return { session: data.session, profile: verification.profile };
+  return { session, profile: verification.profile };
 }
 
 export async function signInWithSupabaseCredentials(

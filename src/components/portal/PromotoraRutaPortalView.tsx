@@ -30,6 +30,10 @@ import {
   type VerifiedAuthProfile,
 } from '../../services/authService';
 import {
+  completeOwnPasswordChange,
+  MIN_SUPABASE_PASSWORD_LENGTH,
+} from '../../services/userManagementService';
+import {
   fetchPortalPdvGeofences,
   matchRutaPdvGeofence,
   submitPromotoraRouteExecution,
@@ -155,6 +159,13 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+
+  // Estado para cambio obligatorio de contraseña en primer ingreso (`must_change_password = true`)
+  const [newPasswordInput, setNewPasswordInput] = useState<string>('');
+  const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState<string>('');
+  const [showNewPassword, setShowNewPassword] = useState<boolean>(false);
+  const [changingPassword, setChangingPassword] = useState<boolean>(false);
+  const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null);
 
   const [dateFilter, setDateFilter] = useState<DateFilterMode>(() =>
     initialProfile && isSuperAdminProfile(initialProfile) ? 'todas' : 'proximas'
@@ -1114,6 +1125,160 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
                   <span>Iniciar Sesión</span>
                 </>
               )}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // 1.B. Cambio obligatorio de contraseña en primer ingreso (`must_change_password = true`)
+  if (profile && profile.mustChangePassword && !shiftSessionState) {
+    const handlePortalPasswordChangeSubmit = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (changingPassword) return;
+      setPasswordChangeError(null);
+
+      if (
+        newPasswordInput.trim().length === 0 ||
+        newPasswordInput.length < MIN_SUPABASE_PASSWORD_LENGTH
+      ) {
+        setPasswordChangeError(
+          `La nueva contraseña debe tener al menos ${MIN_SUPABASE_PASSWORD_LENGTH} caracteres.`
+        );
+        return;
+      }
+      if (newPasswordInput !== confirmNewPasswordInput) {
+        setPasswordChangeError('Las contraseñas no coinciden. Verifícalas e intenta nuevamente.');
+        return;
+      }
+
+      setChangingPassword(true);
+      try {
+        await completeOwnPasswordChange(newPasswordInput);
+        setNewPasswordInput('');
+        setConfirmNewPasswordInput('');
+        setShowNewPassword(false);
+        setProfile((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+      } catch (err) {
+        setPasswordChangeError(
+          err instanceof Error ? err.message : 'No se pudo actualizar tu contraseña.'
+        );
+      } finally {
+        setChangingPassword(false);
+      }
+    };
+
+    return (
+      <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center px-4 py-8 font-sans selection:bg-red-600 selection:text-white">
+        <div className="w-full max-w-sm rounded-2xl bg-zinc-950 border border-white/15 shadow-[0_24px_64px_-16px_rgba(0,0,0,0.9)] p-6 sm:p-8 space-y-6">
+          <div className="flex flex-col items-center text-center space-y-3">
+            <div className="w-14 h-14 rounded-2xl bg-white p-2 flex items-center justify-center shadow-[0_4px_20px_rgba(220,38,38,0.28)] border border-white/90">
+              <img
+                src="/codizulca-logo.png"
+                alt="Logo CODIZULCA C.A."
+                className="w-full h-full object-contain"
+              />
+            </div>
+            <div className="space-y-1">
+              <span className="inline-flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                <Lock className="w-3 h-3" /> Cambio Obligatorio
+              </span>
+              <h1 className="text-xl font-extrabold tracking-tight text-white">
+                Actualiza tu Contraseña
+              </h1>
+              <p className="text-xs text-zinc-400">
+                Por seguridad, define una contraseña personal antes de ingresar a tu ruta.
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handlePortalPasswordChangeSubmit} noValidate className="space-y-4">
+            <div>
+              <label
+                htmlFor="portal-new-password"
+                className="block text-xs font-bold text-zinc-200 mb-1.5"
+              >
+                Nueva contraseña (mín. {MIN_SUPABASE_PASSWORD_LENGTH} caracteres)
+              </label>
+              <div className="relative">
+                <input
+                  id="portal-new-password"
+                  type={showNewPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  required
+                  disabled={changingPassword}
+                  value={newPasswordInput}
+                  onChange={(e) => setNewPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-3.5 pr-11 py-3 rounded-xl bg-black border border-zinc-700 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition cursor-pointer"
+                  aria-label={showNewPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                >
+                  {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="portal-confirm-new-password"
+                className="block text-xs font-bold text-zinc-200 mb-1.5"
+              >
+                Confirmar nueva contraseña
+              </label>
+              <input
+                id="portal-confirm-new-password"
+                type={showNewPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                required
+                disabled={changingPassword}
+                value={confirmNewPasswordInput}
+                onChange={(e) => setConfirmNewPasswordInput(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3.5 py-3 rounded-xl bg-black border border-zinc-700 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
+              />
+            </div>
+
+            {passwordChangeError && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-xl bg-red-950/60 border border-red-500/40 px-3.5 py-2.5 text-xs text-red-200"
+              >
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{passwordChangeError}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={changingPassword}
+              className="w-full py-3 px-4 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-55 text-white font-extrabold text-sm flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-red-950/60"
+            >
+              {changingPassword ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Guardando contraseña...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Guardar y Continuar</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="w-full py-2.5 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Cerrar sesión</span>
             </button>
           </form>
         </div>

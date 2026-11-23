@@ -56,6 +56,7 @@ import {
 import { defaultShiftLinksHandlers } from './src/server/shiftLinksHandler';
 import { defaultTastingAlertDispatcher } from './src/server/tastingAlertDispatcher';
 import { defaultPromotorasHandlers } from './src/server/promotorasHandler';
+import { createPromotoraLoginHandler } from './src/server/promotoraLoginHandler';
 import { defaultMasterDataErpHandlers } from './src/server/masterDataErpHandler';
 import { defaultBcvRateHandlers } from './src/server/bcvRateHandler';
 import { defaultPriceOcrHandlers } from './src/server/priceOcrHandler';
@@ -242,6 +243,22 @@ const adminAuthRateLimiter = createRateLimiter({
   windowMs: 5 * 60 * 1000,
   maxRequests: 30,
 });
+
+const promotoraLoginIpRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 25,
+});
+
+const handlePromotoraLogin = createPromotoraLoginHandler({
+  maxFailedAttempts: 5,
+  windowMs: 15 * 60 * 1000,
+});
+
+app.post(
+  '/api/auth/promotora-login',
+  promotoraLoginIpRateLimiter,
+  handlePromotoraLogin
+);
 
 app.post(
   '/api/degustaciones/extract-pdf',
