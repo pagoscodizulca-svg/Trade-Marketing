@@ -276,7 +276,7 @@ export interface InventorySamplingRecord {
   isoDate: string;
   storeName: string;
   zone: string;
-  region?: 'Occidente' | 'Valencia';
+  region?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes';
   promotoraId?: string;
   promotora: string;
   creatorEmail: string;
@@ -1082,11 +1082,25 @@ async function fetchAsistenciaEvidenciasSafe(): Promise<{
   }
 }
 
-function matchesAssignedRegionForExternalFdvRow(
+function matchesAssignedRegionsForExternalFdvRow(
   row: RawSupabaseSurvey,
-  assignedRegion?: 'Occidente' | 'Valencia' | null
+  assignedRegions?: readonly string[] | null
 ): boolean {
-  if (!assignedRegion) return true;
+  if (!assignedRegions || assignedRegions.length === 0) return true;
+  const allowedNorm = new Set(
+    assignedRegions
+      .map((r) =>
+        String(r || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim()
+          .toUpperCase()
+      )
+      .map((token) => (token === 'VALENCIA' || token === 'CAPITAL' ? 'CENTRO' : token === 'ZULIA' ? 'OCCIDENTE' : token))
+      .filter(Boolean)
+  );
+  if (allowedNorm.size === 0) return true;
+
   const parsed = safeParseJson<Record<string, unknown>>(row.comments);
   const rawTokens = [
     (row as unknown as Record<string, unknown>).region,
@@ -1108,31 +1122,43 @@ function matchesAssignedRegionForExternalFdvRow(
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-  const isExplicitValencia =
+  const isExplicitCentro =
     /\b(valencia|carabobo|tocuyito|los guayos|naguanagua|san diego|guacara|maracay|turmero|aragua|caracas|distrito capital|miranda|centro)\b/.test(
       rawTokens
     );
+  const isExplicitAndes =
+    /\b(andes|tachira|san cristobal|merida|barinas|el vigia)\b/.test(rawTokens);
   const isExplicitOccidente =
     /\b(occidente|zulia|maracaibo|san francisco|cabimas|coro|punto fijo|falcon|trujillo|valera|la villa|mara|ciudad ojeda|lagunillas)\b/.test(
       rawTokens
     );
 
-  if (assignedRegion === 'Occidente') {
-    if (isExplicitValencia && !isExplicitOccidente) return false;
-    return true;
+  if (isExplicitOccidente && !allowedNorm.has('OCCIDENTE')) return false;
+  if (isExplicitCentro && !allowedNorm.has('CENTRO')) return false;
+  if (isExplicitAndes && !allowedNorm.has('ANDES')) return false;
+
+  // Si el registro externo no tiene etiqueta regional explícita y el usuario NO tiene acceso a Occidente
+  // (ej. María: solo Centro y Andes), aplicar criterio fail-closed para no filtrar degustaciones legacy de Occidente.
+  if (!isExplicitCentro && !isExplicitAndes && !isExplicitOccidente && !allowedNorm.has('OCCIDENTE')) {
+    return false;
   }
-  if (assignedRegion === 'Valencia') {
-    if (isExplicitOccidente && !isExplicitValencia) return false;
-    return isExplicitValencia;
-  }
+
   return true;
 }
 
 export async function fetchAllModule1FromSupabase(
   explicitExchangeRateBs?: number,
-  options?: { assignedRegion?: 'Occidente' | 'Valencia' | null }
+  options?: {
+    assignedRegion?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null;
+    assignedRegions?: readonly string[] | null;
+  }
 ): Promise<Module1SupabaseBundle> {
-  const assignedRegion = options?.assignedRegion ?? null;
+  const effectiveAssignedRegions: string[] | null =
+    Array.isArray(options?.assignedRegions) && options!.assignedRegions!.length > 0
+      ? [...options!.assignedRegions!]
+      : options?.assignedRegion
+        ? [options.assignedRegion]
+        : null;
   // Sin tasa de respaldo: si no se puede obtener en vivo, es null y los importes en Bs no se calculan.
   const liveBcvRate: number | null =
     explicitExchangeRateBs && explicitExchangeRateBs > 50 ? explicitExchangeRateBs : await fetchLiveBcvRate();
@@ -1265,9 +1291,11 @@ export async function fetchAllModule1FromSupabase(
       phone: cleanPhone,
       address: cleanAddress,
       region:
-        String(statusObj.address || '').match(/valencia|carabobo|maracay|turmero|caracas/i)
-          ? 'Valencia'
-          : 'Occidente',
+        String(statusObj.address || '').match(/merida|mérida|tachira|táchira|san cristobal|san cristóbal|trujillo|valera|barinas|el vigia|el vigía|andes/i)
+          ? 'Andes'
+          : String(statusObj.address || '').match(/valencia|carabobo|maracay|turmero|caracas/i)
+            ? 'Valencia'
+            : 'Occidente',
       assignedStore: assignedLoc,
       status: 'Activo',
       // Seguridad Zero Trust: jamás hidratar contraseñas de base de datos en memoria del cliente
@@ -1319,13 +1347,20 @@ export async function fetchAllModule1FromSupabase(
 
     const cleanAddress = p.direccion ? String(p.direccion).trim() : '';
     const cleanPhone = p.telefono ? String(p.telefono).trim() : '';
-    const regionLabel: 'Occidente' | 'Valencia' =
-      p.region === 'Valencia' ||
-      String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
-      p.sucursal === 'VALENCIA' ||
-      p.sucursal === 'CENTRO'
-        ? 'Valencia'
-        : 'Occidente';
+    const rawMetaReg = String(p.metadata?.region_codigo || p.metadata?.region_perfil || '').trim().toUpperCase();
+    const rawDirectReg = String(p.region || '').trim().toUpperCase();
+    const regionLabel: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' =
+      rawDirectReg === 'ANDES' || rawMetaReg === 'ANDES'
+        ? 'Andes'
+        : rawDirectReg === 'CENTRO'
+          ? 'Centro'
+          : rawDirectReg === 'VALENCIA' ||
+              rawMetaReg === 'VALENCIA' ||
+              rawMetaReg === 'CENTRO' ||
+              p.sucursal === 'VALENCIA' ||
+              p.sucursal === 'CENTRO'
+            ? 'Valencia'
+            : 'Occidente';
 
     staffMembers.push({
       id: String(p.id),
@@ -1399,7 +1434,7 @@ export async function fetchAllModule1FromSupabase(
       .then((lateRenderRows) => {
         if (!Array.isArray(lateRenderRows) || lateRenderRows.length === 0) return;
         const scopedLateRows = lateRenderRows.filter((r) =>
-          matchesAssignedRegionForExternalFdvRow(r, assignedRegion)
+          matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions)
         );
         if (scopedLateRows.length === 0) return;
         const { renderOnlyRows } = mergeSupabaseAndRenderDegustacionRows(
@@ -1419,7 +1454,7 @@ export async function fetchAllModule1FromSupabase(
   // 1. DEGUSTACIONES (surveys where type = 'Degustacion' + reconciliación Render FDV) + VISITS PARA MÓDULO 2
   // --------------------------------------------------------------------------
   const scopedRenderDegustacionRows = (rawRenderDegustacionRowsFast ?? []).filter((r) =>
-    matchesAssignedRegionForExternalFdvRow(r, assignedRegion)
+    matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions)
   );
   const { mergedRows: degustacionSurveys } = mergeSupabaseAndRenderDegustacionRows(
     cleanDegustacionSurveys,
@@ -2461,14 +2496,22 @@ export async function fetchAllModule1FromSupabase(
       activeMember?.address ||
       resolvePromoterZone(promoterName, staffMembers);
     const rawRegion = String(inv.region || '').trim().toLowerCase();
-    const resolvedRegion: 'Occidente' | 'Valencia' =
-      rawRegion === 'valencia' || rawRegion === 'centro'
-        ? 'Valencia'
-        : rawRegion === 'occidente' || rawRegion === 'zulia'
-          ? 'Occidente'
-          : activeMember?.region === 'Valencia'
+    const resolvedRegion: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' =
+      rawRegion === 'andes' || rawRegion === 'los andes'
+        ? 'Andes'
+        : rawRegion === 'centro'
+          ? 'Centro'
+          : rawRegion === 'valencia'
             ? 'Valencia'
-            : 'Occidente';
+            : rawRegion === 'occidente' || rawRegion === 'zulia'
+              ? 'Occidente'
+              : activeMember?.region === 'Andes'
+                ? 'Andes'
+                : activeMember?.region === 'Centro'
+                  ? 'Centro'
+                  : activeMember?.region === 'Valencia'
+                    ? 'Valencia'
+                    : 'Occidente';
     const dateIso = inv.date || inv.created_at || '';
 
     return {
@@ -3976,7 +4019,7 @@ export async function createSupabaseInventoryRecord(params: {
   finalQuantity: number;
   degustations: number;
   comments: string;
-  region?: 'Occidente' | 'Valencia';
+  region?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes';
 }): Promise<RawSupabaseInventory | null> {
   const res = await supabaseFetch(`${SUPABASE_REST_URL}/inventory`, {
     method: 'POST',
@@ -4044,7 +4087,7 @@ export async function saveSupabaseStaffMember(params: {
   status: 'Activo' | 'Inactivo';
   password?: string;
   photoUrl?: string;
-  region?: 'Occidente' | 'Valencia';
+  region?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes';
   regionId?: string | null;
 }): Promise<{ id: string }> {
   const cleanId = String(params.id || '').trim();

@@ -17,6 +17,10 @@ import {
   type OperativeSucursal,
   type SucursalCodigo,
 } from './userManagementService';
+import {
+  normalizeRegionName,
+  type AllowedRegionCode,
+} from '../utils/regionalSyncClassifier';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -45,8 +49,12 @@ export interface VerifiedAuthProfile {
   sucursal: SucursalCodigo | null;
   /** UUID verificado de `public.regiones` asignado al usuario (null en `super_admin` o sin región asignada) */
   regionId?: string | null;
-  /** Región operativa de perfil para promotoras (`'Occidente'` | `'Valencia'`) */
-  regionLabel?: 'Occidente' | 'Valencia' | null;
+  /** Región operativa de perfil para promotoras (`'Occidente'` | `'Valencia'` | `'Centro'` | `'Andes'`) */
+  regionLabel?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null;
+  /** Códigos oficiales de regiones asignadas (`['CENTRO', 'ANDES']`, `['OCCIDENTE']`, o `[]` para Global) */
+  assignedRegions?: AllowedRegionCode[];
+  /** Etiquetas legibles de regiones asignadas (`['Centro', 'Andes']`, `['Occidente']`, o `[]` para Global) */
+  assignedRegionLabels?: string[];
   rawAppRole: string;
   legacyRole: UserRole;
   staffId: string | null;
@@ -242,7 +250,9 @@ function resolveSucursalForIamRole(
   return null;
 }
 
-function mapRawRegionToPromotoraLabel(raw: unknown): 'Occidente' | 'Valencia' | null {
+function mapRawRegionToPromotoraLabel(
+  raw: unknown
+): 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null {
   const token = String(raw ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -250,19 +260,52 @@ function mapRawRegionToPromotoraLabel(raw: unknown): 'Occidente' | 'Valencia' | 
     .toLowerCase();
   if (!token) return null;
   if (token === 'occidente' || token === 'zulia') return 'Occidente';
-  if (token === 'valencia' || token === 'centro' || token === 'capital') return 'Valencia';
+  if (token === 'valencia') return 'Valencia';
+  if (token === 'centro' || token === 'capital') return 'Centro';
+  if (token === 'andes') return 'Andes';
   return null;
 }
 
-function mapPromotoraLabelToSucursal(label: 'Occidente' | 'Valencia' | null): SucursalCodigo | null {
+function mapPromotoraLabelToSucursal(
+  label: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null
+): SucursalCodigo | null {
   if (label === 'Occidente') return 'ZULIA';
   if (label === 'Valencia') return 'VALENCIA';
+  if (label === 'Centro') return 'CENTRO';
   return null;
+}
+
+export function formatOfficialRegionLabel(code: AllowedRegionCode): 'Occidente' | 'Centro' | 'Andes' {
+  if (code === 'CENTRO') return 'Centro';
+  if (code === 'ANDES') return 'Andes';
+  return 'Occidente';
+}
+
+export function extractAssignedRegionCodesList(
+  rawRegions: unknown,
+  fallbackSingle?: unknown
+): AllowedRegionCode[] {
+  const result: AllowedRegionCode[] = [];
+  const push = (val: unknown) => {
+    const code = normalizeRegionName(val);
+    if (code && !result.includes(code)) {
+      result.push(code);
+    }
+  };
+  if (Array.isArray(rawRegions)) {
+    for (const item of rawRegions) push(item);
+  } else if (typeof rawRegions === 'string' && rawRegions.trim()) {
+    for (const part of rawRegions.split(',')) push(part);
+  }
+  if (result.length === 0 && fallbackSingle !== undefined && fallbackSingle !== null) {
+    push(fallbackSingle);
+  }
+  return result;
 }
 
 /**
  * Extrae el perfil verificado EXCLUSIVAMENTE desde `app_metadata` (`raw_app_meta_data` firmado en servidor).
- * REGLA DE SEGURIDAD: Jamás lee roles, sucursal ni `staff_id` desde `user_metadata`.
+ * REGLA DE SEGURIDAD: Jamás lee roles, sucursal, regiones ni `staff_id` desde `user_metadata`.
  */
 export function extractVerifiedProfileFromAuthUser(
   user: SupabaseAuthUser | null | undefined
@@ -276,9 +319,27 @@ export function extractVerifiedProfileFromAuthUser(
   const iamRole = normalizeManagedUserRole(rawAppRole);
   const appRole = normalizeCanonicalAppRole(rawAppRole);
   const regionLabel = mapRawRegionToPromotoraLabel(appMeta.region);
+  const assignedRegions: AllowedRegionCode[] =
+    iamRole === 'super_admin'
+      ? []
+      : extractAssignedRegionCodesList(
+          appMeta.regions,
+          appMeta.region ?? appMeta.sucursal
+        );
+  const assignedRegionLabels = assignedRegions.map(formatOfficialRegionLabel);
   const sucursal =
     resolveSucursalForIamRole(iamRole, appMeta.sucursal) ??
-    resolveSucursalForIamRole(iamRole, mapPromotoraLabelToSucursal(regionLabel));
+    resolveSucursalForIamRole(iamRole, mapPromotoraLabelToSucursal(regionLabel)) ??
+    (assignedRegions.length > 0
+      ? resolveSucursalForIamRole(
+          iamRole,
+          assignedRegions[0] === 'OCCIDENTE'
+            ? 'ZULIA'
+            : assignedRegions[0] === 'CENTRO'
+              ? 'CENTRO'
+              : null
+        )
+      : null);
 
   const rawStaffId = String(appMeta.staff_id ?? '').trim();
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
@@ -299,7 +360,19 @@ export function extractVerifiedProfileFromAuthUser(
     iamRole,
     sucursal,
     regionId,
-    regionLabel: regionLabel ?? (sucursal === 'ZULIA' ? 'Occidente' : sucursal === 'VALENCIA' ? 'Valencia' : null),
+    regionLabel:
+      regionLabel ??
+      (assignedRegions.length === 1
+        ? formatOfficialRegionLabel(assignedRegions[0]!)
+        : sucursal === 'ZULIA'
+          ? 'Occidente'
+          : sucursal === 'VALENCIA'
+            ? 'Valencia'
+            : sucursal === 'CENTRO'
+              ? 'Centro'
+              : null),
+    assignedRegions,
+    assignedRegionLabels,
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
@@ -314,15 +387,21 @@ export interface ActivePromotoraStaffMatch {
   name: string;
   email: string;
   sucursal: SucursalCodigo | null;
-  regionLabel?: 'Occidente' | 'Valencia' | null;
+  regionLabel?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null;
   regionId?: string | null;
 }
 
-function inferPromotoraRegionFromRow(row: Record<string, unknown>, normalizedEmail: string): 'Occidente' | 'Valencia' | null {
+function inferPromotoraRegionFromRow(
+  row: Record<string, unknown>,
+  normalizedEmail: string
+): 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null {
   const explicit = mapRawRegionToPromotoraLabel(row.region ?? row.sucursal);
   if (explicit) return explicit;
   if (normalizedEmail === 'joseabraham.barroso@gmail.com') return 'Occidente';
   const addr = String(row.direccion ?? row.ciudad ?? '').toLowerCase();
+  if (/merida|mérida|tachira|táchira|san cristobal|san cristóbal|trujillo|valera|barinas|el vigia|el vigía|andes/.test(addr)) {
+    return 'Andes';
+  }
   if (/valencia|carabobo|los guayos|tocuyito|maracay|turmero|aragua|caracas|paraiso|montalban|plaza venezuela/.test(addr)) {
     return 'Valencia';
   }
@@ -482,6 +561,8 @@ let profilesHasMustChangePasswordCol: boolean | null = null;
 interface IamProfileRow {
   role?: unknown;
   sucursal?: unknown;
+  region?: unknown;
+  regiones_asignadas?: unknown;
   region_id?: unknown;
   full_name?: unknown;
   is_active?: boolean | null;
@@ -536,6 +617,18 @@ export async function resolveVerifiedProfileWithStaffFallback(
             : UUID_REGEX.test(rawProfileRegionId)
               ? rawProfileRegionId
               : (base.regionId ?? null);
+        const profileAssignedRegions: AllowedRegionCode[] =
+          iamRole === 'super_admin'
+            ? []
+            : (() => {
+                const fromProfile = extractAssignedRegionCodesList(
+                  iamProfile.regiones_asignadas,
+                  iamProfile.region ?? sucursal
+                );
+                if (fromProfile.length > 0) return fromProfile;
+                return base.assignedRegions ?? [];
+              })();
+        const profileAssignedRegionLabels = profileAssignedRegions.map(formatOfficialRegionLabel);
 
         if (iamRole === 'promotora') {
           const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
@@ -547,6 +640,8 @@ export async function resolveVerifiedProfileWithStaffFallback(
             iamRole: 'promotora',
             sucursal: sucursal ?? activeStaff?.sucursal ?? null,
             regionId,
+            assignedRegions: profileAssignedRegions,
+            assignedRegionLabels: profileAssignedRegionLabels,
             rawAppRole: 'promotora',
             legacyRole: 'promotora',
             staffId: activeStaff?.staffId ?? base.staffId,
@@ -564,7 +659,13 @@ export async function resolveVerifiedProfileWithStaffFallback(
           iamRole,
           sucursal,
           regionId,
-          rawAppRole: iamRole,
+          regionLabel:
+            profileAssignedRegions.length === 1
+              ? formatOfficialRegionLabel(profileAssignedRegions[0]!)
+              : base.regionLabel,
+          assignedRegions: profileAssignedRegions,
+          assignedRegionLabels: profileAssignedRegionLabels,
+          rawAppRole: rawIamRole || iamRole,
           legacyRole: mapToLegacyUserRole(iamRole, iamCanonical),
           isCoordinatorOrAdmin: isTradeCoordinatorOrAdminCanonical(iamCanonical),
           canAccessTorreControl: canCanonicalRoleAccessTorre(iamCanonical),

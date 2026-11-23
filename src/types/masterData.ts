@@ -414,6 +414,7 @@ export interface FiltrosConsultaVendedores {
   soloActivos?: boolean;
   sucursal?: SucursalMaestro | null;
   region?: AllowedRegionCode;
+  regions?: readonly AllowedRegionCode[];
   regionId?: string;
   zona?: string;
   supervisor?: string;
@@ -430,6 +431,7 @@ export interface FiltrosConsultaClientes {
   codigoVendedor?: string;
   canal?: string;
   region?: AllowedRegionCode;
+  regions?: readonly AllowedRegionCode[];
   regionId?: string;
   busqueda?: string;
   incluirVendedor?: boolean;

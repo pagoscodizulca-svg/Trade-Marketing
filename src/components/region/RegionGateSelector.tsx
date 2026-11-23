@@ -23,17 +23,18 @@ import {
   type AllowedRegionCode,
 } from '../../utils/regionalSyncClassifier';
 
-export type RegionSelectorChoice = AllowedRegionCode | OperativeSucursal | 'ALL';
+export type RegionSelectorChoice = AllowedRegionCode | OperativeSucursal | 'ALL' | 'ASSIGNED';
 
 export interface RegionGateSelectorProps {
   mode?: 'gate' | 'bar';
   regiones?: readonly ActiveRegionItem[];
   activeSucursal?: RegionSelectorChoice | null;
   canSwitchSucursal?: boolean;
+  assignedRegionCodes?: readonly AllowedRegionCode[];
   userRoleLabel?: string;
   userEmail?: string;
   onSelectSucursal?: (sucursal: OperativeSucursal) => void;
-  onSelectRegion?: (region: AllowedRegionCode | 'ALL') => void;
+  onSelectRegion?: (region: AllowedRegionCode | 'ALL' | 'ASSIGNED') => void;
   onOpenComparativo?: () => void;
 }
 
@@ -77,11 +78,18 @@ function mapRegionChoiceToLegacySucursal(choice: RegionSelectorChoice): Operativ
   return 'ZULIA';
 }
 
+function formatFriendlyRegionName(code: AllowedRegionCode): string {
+  if (code === 'CENTRO') return 'Centro';
+  if (code === 'ANDES') return 'Andes';
+  return 'Occidente';
+}
+
 export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
   mode = 'gate',
   regiones,
   activeSucursal,
   canSwitchSucursal,
+  assignedRegionCodes,
   userRoleLabel,
   userEmail,
   onSelectSucursal,
@@ -107,6 +115,13 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
       ? canSwitchSucursal
       : (appCtx?.canSwitchSucursal ?? true);
 
+  const effectiveAssignedCodes: readonly AllowedRegionCode[] =
+    assignedRegionCodes !== undefined
+      ? assignedRegionCodes
+      : (appCtx?.assignedRegionCodes ?? []);
+
+  const isMultiRegionRestricted = !effectiveCanSwitch && effectiveAssignedCodes.length >= 2;
+
   const effectiveRoleLabel: string =
     userRoleLabel ??
     (appCtx?.verifiedIamRole ? MANAGED_USER_ROLE_LABELS[appCtx.verifiedIamRole] : undefined) ??
@@ -115,13 +130,27 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
   const effectiveEmail: string = userEmail ?? appCtx?.currentUser?.email ?? '';
 
   const handleChooseRegion = (choice: RegionSelectorChoice) => {
-    if (!effectiveCanSwitch) return;
+    if (!effectiveCanSwitch && !isMultiRegionRestricted) return;
+    if (isMultiRegionRestricted) {
+      if (choice === 'ALL') return;
+      const officialChoice: AllowedRegionCode | 'ASSIGNED' | null =
+        choice === 'ASSIGNED' ? 'ASSIGNED' : normalizeRegionName(choice);
+      if (!officialChoice) return;
+      if (officialChoice !== 'ASSIGNED' && !effectiveAssignedCodes.includes(officialChoice)) return;
+      if (onSelectRegion) {
+        onSelectRegion(officialChoice);
+        return;
+      }
+      appCtx?.setActiveRegionScope(officialChoice);
+      return;
+    }
+
     const official = choice === 'ALL' ? 'ALL' : normalizeRegionName(choice);
     if (onSelectRegion && official) {
       onSelectRegion(official);
       return;
     }
-    if (onSelectSucursal && choice !== 'ALL') {
+    if (onSelectSucursal && choice !== 'ALL' && choice !== 'ASSIGNED') {
       onSelectSucursal(mapRegionChoiceToLegacySucursal(choice));
       return;
     }
@@ -129,7 +158,7 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
       appCtx.setActiveRegionScope(official);
       return;
     }
-    if (choice !== 'ALL') {
+    if (choice !== 'ALL' && choice !== 'ASSIGNED') {
       appCtx?.setActiveSucursal(mapRegionChoiceToLegacySucursal(choice));
     }
   };
@@ -139,9 +168,112 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
     const activeOfficialCode =
       effectiveSelection === 'ALL'
         ? 'ALL'
-        : effectiveSelection
-          ? normalizeRegionName(effectiveSelection) ?? effectiveSelection
-          : null;
+        : effectiveSelection === 'ASSIGNED'
+          ? 'ASSIGNED'
+          : effectiveSelection
+            ? normalizeRegionName(effectiveSelection) ?? effectiveSelection
+            : null;
+
+    // Caso Multi-Región Restringido (ej. María -> Centro y Andes):
+    // Muestra ÚNICAMENTE "Centro y Andes (Mis Regiones)", "Centro" y "Andes" (cero Occidente, cero Global).
+    if (isMultiRegionRestricted) {
+      const assignedFriendlyLabels = effectiveAssignedCodes.map(formatFriendlyRegionName);
+      const combinedLabel = assignedFriendlyLabels.join(' y ');
+      const activeMultiValue: AllowedRegionCode | 'ASSIGNED' =
+        activeOfficialCode === 'ASSIGNED' ||
+        (activeOfficialCode &&
+          effectiveAssignedCodes.includes(activeOfficialCode as AllowedRegionCode))
+          ? (activeOfficialCode as AllowedRegionCode | 'ASSIGNED')
+          : 'ASSIGNED';
+      const activeBadgeText =
+        activeMultiValue === 'ASSIGNED'
+          ? `Regiones: ${combinedLabel}`
+          : `Región: ${formatFriendlyRegionName(activeMultiValue)}`;
+
+      return (
+        <div
+          data-testid="region-bar-selector"
+          className="bg-zinc-950/95 border-b border-white/[0.07] no-print"
+        >
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span
+                data-testid="region-bar-locked-badge"
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-red-600/15 text-white border border-red-500/45 shadow-sm shadow-red-950/40"
+              >
+                <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                <span>{activeBadgeText}</span>
+              </span>
+
+              <div
+                className="hidden sm:inline-flex items-center gap-1 p-0.5 rounded-xl bg-zinc-900 border border-white/10"
+                role="group"
+                aria-label="Seleccionar región asignada"
+              >
+                <button
+                  type="button"
+                  data-testid="region-bar-btn-ASSIGNED"
+                  onClick={() => handleChooseRegion('ASSIGNED')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                    activeMultiValue === 'ASSIGNED'
+                      ? 'bg-red-600 text-white shadow-sm'
+                      : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
+                  }`}
+                >
+                  {combinedLabel} (Mis Regiones)
+                </button>
+                {effectiveAssignedCodes.map((code) => {
+                  const isSelected = activeMultiValue === code;
+                  return (
+                    <button
+                      key={code}
+                      type="button"
+                      data-testid={`region-bar-btn-${code}`}
+                      onClick={() => handleChooseRegion(code)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                        isSelected
+                          ? 'bg-red-600 text-white shadow-sm'
+                          : 'text-zinc-300 hover:text-white hover:bg-zinc-800'
+                      }`}
+                    >
+                      {formatFriendlyRegionName(code)}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <select
+                aria-label="Seleccionar Región Asignada"
+                data-testid="region-bar-select-assigned"
+                value={activeMultiValue}
+                onChange={(e) => {
+                  const val = e.target.value as AllowedRegionCode | 'ASSIGNED';
+                  if (val) handleChooseRegion(val);
+                }}
+                className="sm:hidden px-2.5 py-1 rounded-xl bg-zinc-900 border border-white/15 text-xs font-bold text-white focus:outline-none focus:border-red-500 cursor-pointer"
+              >
+                <option value="ASSIGNED" className="bg-zinc-900 text-white">
+                  {combinedLabel} (Mis Regiones)
+                </option>
+                {effectiveAssignedCodes.map((code) => (
+                  <option key={code} value={code} className="bg-zinc-900 text-white">
+                    {formatFriendlyRegionName(code)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+              <ShieldCheck className="w-3.5 h-3.5 text-red-400 shrink-0" />
+              <span>
+                Aislamiento RLS activo · {effectiveRoleLabel}
+                {effectiveEmail ? ` (${effectiveEmail})` : ''}
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     if (!effectiveCanSwitch) {
       const rawLocked =

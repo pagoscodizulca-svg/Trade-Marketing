@@ -53,12 +53,26 @@ export { normalizeSearchText };
  * Filtra tarjetas diarias de evidencias de asistencia de forma pura, segura ante `null`/`undefined`
  * y completamente insensible a acentos/diacríticos (NFD) y mayúsculas.
  */
+export type AttendanceRegionFilter = 'TODAS' | 'ASSIGNED' | 'Occidente' | 'Valencia' | 'Centro' | 'Andes';
+
+function normalizeAttendanceRegionCode(raw: unknown): 'OCCIDENTE' | 'CENTRO' | 'ANDES' {
+  const token = String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  if (token === 'ANDES') return 'ANDES';
+  if (token === 'VALENCIA' || token === 'CENTRO' || token === 'CAPITAL') return 'CENTRO';
+  return 'OCCIDENTE';
+}
+
 export function filterAttendanceViewModels(
   items: readonly DailyPromotoraAttendanceViewModel[],
   options: {
     searchQuery?: string | null;
     profileFilter?: 'TODOS' | PerfilAsistencia;
-    regionFilter?: 'TODAS' | 'Occidente' | 'Valencia';
+    regionFilter?: AttendanceRegionFilter;
+    allowedRegionCodes?: readonly ('OCCIDENTE' | 'CENTRO' | 'ANDES')[] | null;
     promoterFilter?: string | null;
     dateFrom?: string | null;
     dateTo?: string | null;
@@ -68,6 +82,10 @@ export function filterAttendanceViewModels(
   const cleanQ = normalizeSearchText(options.searchQuery);
   const profileFilter = options.profileFilter ?? 'TODOS';
   const regionFilter = options.regionFilter ?? 'TODAS';
+  const allowedRegionCodes =
+    Array.isArray(options.allowedRegionCodes) && options.allowedRegionCodes.length > 0
+      ? options.allowedRegionCodes
+      : null;
   const promoterFilter = String(options.promoterFilter || '').trim();
   const dateFrom = String(options.dateFrom || '').trim();
   const dateTo = String(options.dateTo || '').trim();
@@ -77,8 +95,15 @@ export function filterAttendanceViewModels(
     if (profileFilter !== 'TODOS' && item.perfilAplicado !== profileFilter) {
       return false;
     }
-    if (regionFilter !== 'TODAS' && (item.region || 'Occidente') !== regionFilter) {
+    const itemCode = normalizeAttendanceRegionCode(item.region || 'Occidente');
+    if (allowedRegionCodes && !allowedRegionCodes.includes(itemCode)) {
       return false;
+    }
+    if (regionFilter !== 'TODAS' && regionFilter !== 'ASSIGNED') {
+      const targetCode = normalizeAttendanceRegionCode(regionFilter);
+      if (itemCode !== targetCode) {
+        return false;
+      }
     }
     if (promoterFilter && promoterFilter !== 'TODAS' && item.promotoraId !== promoterFilter) {
       return false;
@@ -213,8 +238,15 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
 }) => {
   const appCtx = useOptionalApp();
   const isRegionalRestricted = Boolean(appCtx?.isRegionalRestricted);
-  const lockedRegion: 'Occidente' | 'Valencia' | null =
-    isRegionalRestricted && appCtx?.assignedRegion ? appCtx.assignedRegion : null;
+  const assignedRegionCodes = appCtx?.assignedRegionCodes ?? [];
+  const isMultiRegionRestricted = isRegionalRestricted && assignedRegionCodes.length >= 2;
+  const lockedRegion: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null =
+    isRegionalRestricted && !isMultiRegionRestricted && appCtx?.assignedRegion
+      ? appCtx.assignedRegion
+      : null;
+  const defaultRegionFilter: AttendanceRegionFilter = isMultiRegionRestricted
+    ? 'ASSIGNED'
+    : lockedRegion ?? 'TODAS';
 
   const todayCaracasYmd = useMemo(() => getCaracasTodayYmd(), []);
 
@@ -223,8 +255,8 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   const [selectedDateYmd, setSelectedDateYmd] = useState<string>(todayCaracasYmd);
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
-  const [regionFilter, setRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
-    () => lockedRegion ?? 'TODAS'
+  const [regionFilter, setRegionFilter] = useState<AttendanceRegionFilter>(
+    () => defaultRegionFilter
   );
   const [promoterFilter, setPromoterFilter] = useState<string>('TODAS');
   const [profileFilter, setProfileFilter] = useState<'TODOS' | PerfilAsistencia>('TODOS');
@@ -233,8 +265,14 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   useEffect(() => {
     if (lockedRegion) {
       setRegionFilter(lockedRegion);
+    } else if (isMultiRegionRestricted) {
+      setRegionFilter((prev) => {
+        if (prev === 'ASSIGNED') return prev;
+        const code = normalizeAttendanceRegionCode(prev);
+        return assignedRegionCodes.includes(code) ? prev : 'ASSIGNED';
+      });
     }
-  }, [lockedRegion]);
+  }, [lockedRegion, isMultiRegionRestricted, assignedRegionCodes]);
 
   // Estado optimista local tras subidas/reemplazos inmediatos
   const [optimisticJornadas, setOptimisticJornadas] = useState<
@@ -354,6 +392,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
       searchQuery,
       profileFilter,
       regionFilter,
+      allowedRegionCodes: isRegionalRestricted ? assignedRegionCodes : null,
       promoterFilter,
       dateFrom: dateFilterMode === 'historial' ? dateFrom : '',
       dateTo: dateFilterMode === 'historial' ? dateTo : '',
@@ -363,6 +402,8 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     allViewModels,
     profileFilter,
     regionFilter,
+    isRegionalRestricted,
+    assignedRegionCodes,
     promoterFilter,
     dateFilterMode,
     dateFrom,
@@ -1057,13 +1098,41 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
                 <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
                 <span>Región: {lockedRegion}</span>
               </span>
+            ) : isMultiRegionRestricted ? (
+              (
+                [
+                  {
+                    id: 'ASSIGNED' as const,
+                    label: `${(appCtx?.assignedRegions ?? []).join(' y ')} (Mis Regiones)`,
+                  },
+                  ...assignedRegionCodes.map((code) => ({
+                    id: (code === 'CENTRO' ? 'Centro' : code === 'ANDES' ? 'Andes' : 'Occidente') as AttendanceRegionFilter,
+                    label: code === 'CENTRO' ? 'Centro' : code === 'ANDES' ? 'Andes' : 'Occidente',
+                  })),
+                ]
+              ).map((reg) => (
+                <button
+                  key={reg.id}
+                  type="button"
+                  data-testid={`asistencia-region-${reg.id}`}
+                  onClick={() => setRegionFilter(reg.id)}
+                  className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                    regionFilter === reg.id
+                      ? 'bg-red-600 text-white border-red-500 shadow'
+                      : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                  }`}
+                >
+                  {reg.label}
+                </button>
+              ))
             ) : (
               (
                 [
-                  { id: 'TODAS', label: 'Todas las Regiones' },
-                  { id: 'Occidente', label: 'Occidente' },
-                  { id: 'Valencia', label: 'Valencia' },
-                ] as const
+                  { id: 'TODAS' as const, label: 'Todas las Regiones' },
+                  { id: 'Occidente' as const, label: 'Occidente' },
+                  { id: 'Centro' as const, label: 'Centro / Valencia' },
+                  { id: 'Andes' as const, label: 'Andes' },
+                ]
               ).map((reg) => (
                 <button
                   key={reg.id}
@@ -1117,7 +1186,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
             )}
           </div>
 
-          {((!lockedRegion && regionFilter !== 'TODAS') ||
+          {((!lockedRegion && regionFilter !== defaultRegionFilter) ||
             promoterFilter !== 'TODAS' ||
             profileFilter !== 'TODOS' ||
             searchQuery.trim() !== '' ||
@@ -1127,7 +1196,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
               type="button"
               data-testid="asistencia-clear-filters"
               onClick={() => {
-                setRegionFilter(lockedRegion ?? 'TODAS');
+                setRegionFilter(defaultRegionFilter);
                 setPromoterFilter('TODAS');
                 setProfileFilter('TODOS');
                 setDateFrom('');

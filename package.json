@@ -38,7 +38,8 @@
     "verify:maestros": "tsx scripts/verifyMasterDataSync.ts",
     "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts",
     "seed:promotoras": "tsx scripts/seed-promotoras.ts",
-    "seed:coordinadora-occidente": "node scripts/seed-coordinadora-occidente.mjs"
+    "seed:coordinadora-occidente": "node scripts/seed-coordinadora-occidente.mjs",
+    "seed:coordinadora-centro-andes": "node scripts/seed-coordinadora-centro-andes.mjs"
   },
   "dependencies": {
     "@google/genai": "3.1.0",

@@ -254,15 +254,21 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
     (emailRaw === 'joseabraham.barroso@gmail.com' ? 'OCCIDENTE' : null);
   const rawRegionText = limpiarCeldaTexto(raw.region ?? metadata.region_perfil ?? '');
   const normalizedRegionLabel =
-    /^valencia$/i.test(rawRegionText)
-      ? 'Valencia'
-      : /^occidente$/i.test(rawRegionText)
-        ? 'Occidente'
-        : regionCode === 'OCCIDENTE'
-          ? 'Occidente'
-          : regionCode === 'CENTRO'
-            ? 'Valencia'
-            : null;
+    /^andes$/i.test(rawRegionText)
+      ? 'Andes'
+      : /^centro$/i.test(rawRegionText)
+        ? 'Centro'
+        : /^valencia$/i.test(rawRegionText)
+          ? 'Valencia'
+          : /^occidente$/i.test(rawRegionText)
+            ? 'Occidente'
+            : regionCode === 'OCCIDENTE'
+              ? 'Occidente'
+              : regionCode === 'CENTRO'
+                ? 'Valencia'
+                : regionCode === 'ANDES'
+                  ? 'Andes'
+                  : null;
   const compatSucursal =
     asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede) ??
     (normalizedRegionLabel === 'Valencia'

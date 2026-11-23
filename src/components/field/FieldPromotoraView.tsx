@@ -287,7 +287,11 @@ export const FieldPromotoraView: React.FC = () => {
     currentUser,
     currentRole,
     assignedRegion,
+    assignedRegions,
+    assignedRegionCodes,
     isRegionalRestricted,
+    canSwitchAmongAssignedRegions,
+    activeRegiones,
     verifiedRegionId,
     isStrictAdmin,
     caracasWeekStartYmd,
@@ -2191,14 +2195,146 @@ export const FieldPromotoraView: React.FC = () => {
   // Pestañas: Inventario y Degustación (inventory) | Asistencia en PDV (checkins agrupados)
   // ----------------------------------------------------
   type ReportSubTab = 'inventario' | 'asistencia';
+  type FieldRegionBucket = 'Occidente' | 'Centro' | 'Andes';
+  type FieldRegionFilter = 'TODAS' | 'ASSIGNED' | FieldRegionBucket;
+
+  const normalizeFieldRegionBucket = useCallback(
+    (raw?: string | null, address?: string | null): FieldRegionBucket => {
+      const token = String(raw || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toUpperCase();
+      if (
+        token === 'ANDES' ||
+        token === 'LOS ANDES' ||
+        token === 'MERIDA' ||
+        token === 'TACHIRA' ||
+        token === 'TRUJILLO' ||
+        token === 'BARINAS'
+      ) {
+        return 'Andes';
+      }
+      if (
+        token === 'CENTRO' ||
+        token === 'VALENCIA' ||
+        token === 'CAPITAL' ||
+        token === 'CARABOBO' ||
+        token === 'ARAGUA'
+      ) {
+        return 'Centro';
+      }
+      if (token === 'OCCIDENTE' || token === 'ZULIA' || token === 'FALCON') {
+        return 'Occidente';
+      }
+      const addr = String(address || '');
+      if (
+        /merida|mérida|tachira|táchira|san cristobal|san cristóbal|trujillo|valera|barinas|el vigia|el vigía|andes/i.test(
+          addr
+        )
+      ) {
+        return 'Andes';
+      }
+      if (
+        /valencia|carabobo|los guayos|tocuyito|maracay|turmero|caracas|el paraiso|montalban|plaza venezuela/i.test(
+          addr
+        )
+      ) {
+        return 'Centro';
+      }
+      return 'Occidente';
+    },
+    []
+  );
+
+  const allowedRegionBuckets = useMemo<FieldRegionBucket[] | null>(() => {
+    if (!isRegionalRestricted) return null;
+    if (assignedRegionCodes.length > 0) {
+      const buckets: FieldRegionBucket[] = [];
+      for (const code of assignedRegionCodes) {
+        const b: FieldRegionBucket =
+          code === 'ANDES' ? 'Andes' : code === 'CENTRO' ? 'Centro' : 'Occidente';
+        if (!buckets.includes(b)) buckets.push(b);
+      }
+      return buckets.length > 0 ? buckets : null;
+    }
+    if (assignedRegion) {
+      return [normalizeFieldRegionBucket(assignedRegion)];
+    }
+    return null;
+  }, [isRegionalRestricted, assignedRegionCodes, assignedRegion, normalizeFieldRegionBucket]);
+
+  const singleLockedRegionBucket: FieldRegionBucket | null =
+    isRegionalRestricted && allowedRegionBuckets && allowedRegionBuckets.length === 1
+      ? allowedRegionBuckets[0]
+      : null;
+
+  const singleLockedRegionDisplay: string | null =
+    singleLockedRegionBucket !== null
+      ? assignedRegion ?? singleLockedRegionBucket
+      : null;
+
+  const isMultiRegionScope = Boolean(
+    isRegionalRestricted &&
+      canSwitchAmongAssignedRegions &&
+      allowedRegionBuckets &&
+      allowedRegionBuckets.length >= 2
+  );
+
+  const assignedRegionsDisplayLabel = useMemo(() => {
+    if (assignedRegions.length > 0) return assignedRegions.join(' y ');
+    if (allowedRegionBuckets && allowedRegionBuckets.length > 0) {
+      return allowedRegionBuckets.join(' y ');
+    }
+    return 'Mis Regiones';
+  }, [assignedRegions, allowedRegionBuckets]);
+
+  const defaultFieldRegionFilter: FieldRegionFilter =
+    singleLockedRegionBucket ?? (isMultiRegionScope ? 'ASSIGNED' : 'TODAS');
+
+  const editableRegionBuckets: FieldRegionBucket[] = useMemo(
+    () => allowedRegionBuckets ?? ['Occidente', 'Centro', 'Andes'],
+    [allowedRegionBuckets]
+  );
+
+  const defaultWriteRegionBucket: FieldRegionBucket =
+    singleLockedRegionBucket ?? editableRegionBuckets[0] ?? 'Occidente';
+
+  const formatBucketLabel = useCallback(
+    (bucket: FieldRegionBucket): string => {
+      if (bucket === 'Centro' && !isRegionalRestricted) {
+        return 'Centro / Valencia';
+      }
+      return bucket;
+    },
+    [isRegionalRestricted]
+  );
+
+  const resolveRegionIdForBucket = useCallback(
+    (bucket: FieldRegionBucket): string | undefined => {
+      if (singleLockedRegionBucket && verifiedRegionId) {
+        return verifiedRegionId;
+      }
+      const targetCode =
+        bucket === 'Andes' ? 'ANDES' : bucket === 'Centro' ? 'CENTRO' : 'OCCIDENTE';
+      const found = (activeRegiones || []).find(
+        (r) => String(r.codigo || '').trim().toUpperCase() === targetCode
+      );
+      if (found?.id) return found.id;
+      const masterFound = (masterEntities?.regiones || []).find(
+        (r) => String(r.codigo || '').trim().toUpperCase() === targetCode
+      );
+      return masterFound?.id || undefined;
+    },
+    [singleLockedRegionBucket, verifiedRegionId, activeRegiones, masterEntities?.regiones]
+  );
+
   const [activeReportTab, setActiveReportTab] = useState<ReportSubTab>('asistencia');
   const [reportSearchQuery, setReportSearchQuery] = useState('');
   const [reportRowLimit, setReportRowLimit] = useState<number>(150);
-  const lockedRegion: 'Occidente' | 'Valencia' | null =
-    isRegionalRestricted && assignedRegion ? assignedRegion : null;
 
-  const [invRegionFilter, setInvRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
-    () => lockedRegion ?? 'TODAS'
+  const [invRegionFilter, setInvRegionFilter] = useState<FieldRegionFilter>(
+    () => defaultFieldRegionFilter
   );
   const [invPromoterFilter, setInvPromoterFilter] = useState<string>('TODAS');
   const [invDateFrom, setInvDateFrom] = useState<string>('');
@@ -2206,10 +2342,22 @@ export const FieldPromotoraView: React.FC = () => {
   const [checkinPhotosMap, setCheckinPhotosMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (lockedRegion) {
-      setInvRegionFilter(lockedRegion);
-    }
-  }, [lockedRegion]);
+    setInvRegionFilter((prev) => {
+      if (singleLockedRegionBucket) return singleLockedRegionBucket;
+      if (isMultiRegionScope) {
+        if (prev === 'ASSIGNED') return 'ASSIGNED';
+        if (
+          prev !== 'TODAS' &&
+          allowedRegionBuckets &&
+          allowedRegionBuckets.includes(prev)
+        ) {
+          return prev;
+        }
+        return 'ASSIGNED';
+      }
+      return prev === 'ASSIGNED' ? 'TODAS' : prev;
+    });
+  }, [singleLockedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
 
   // Estados sincronizados para Inventario y Degustación
   const [editingInventoryObs, setEditingInventoryObs] = useState<{ id: string; text: string } | null>(null);
@@ -2224,7 +2372,7 @@ export const FieldPromotoraView: React.FC = () => {
     finalInventory: number;
     samplesGiven: number;
     promoterObservation: string;
-    region: 'Occidente' | 'Valencia';
+    region: FieldRegionBucket;
   }>({
     date: new Date().toISOString().slice(0, 10),
     storeName: '',
@@ -2234,16 +2382,16 @@ export const FieldPromotoraView: React.FC = () => {
     finalInventory: 0,
     samplesGiven: 0,
     promoterObservation: '',
-    region: lockedRegion ?? 'Occidente',
+    region: defaultWriteRegionBucket,
   });
 
   useEffect(() => {
-    if (lockedRegion) {
-      setNewInventoryForm((prev) =>
-        prev.region === lockedRegion ? prev : { ...prev, region: lockedRegion }
-      );
-    }
-  }, [lockedRegion]);
+    setNewInventoryForm((prev) =>
+      editableRegionBuckets.includes(prev.region)
+        ? prev
+        : { ...prev, region: defaultWriteRegionBucket }
+    );
+  }, [editableRegionBuckets, defaultWriteRegionBucket]);
 
   // Opciones de PDV y productos derivadas EXCLUSIVAMENTE de los registros sincronizados (sin catálogos cableados)
   const syncedStoreOptions = useMemo<string[]>(() => {
@@ -2284,20 +2432,27 @@ export const FieldPromotoraView: React.FC = () => {
   const inventoryPromoterOptions = useMemo<string[]>(() => {
     const names = new Set<string>();
     inventorySampling.forEach((inv) => {
-      const invReg = inv.region === 'Valencia' ? 'Valencia' : 'Occidente';
-      if (lockedRegion && invReg !== lockedRegion) return;
+      const invReg = normalizeFieldRegionBucket(inv.region, inv.zone);
+      if (allowedRegionBuckets && !allowedRegionBuckets.includes(invReg)) return;
       const clean = String(inv.promotora || '').trim();
       if (clean) names.add(clean);
     });
     return Array.from(names).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [inventorySampling, lockedRegion]);
+  }, [inventorySampling, allowedRegionBuckets, normalizeFieldRegionBucket]);
 
   const filteredInventorySampling = useMemo<InventorySamplingRecord[]>(() => {
     const q = reportSearchQuery.trim().toLowerCase();
     return inventorySampling.filter((inv) => {
       if (!inv) return false;
-      const invReg = inv.region === 'Valencia' ? 'Valencia' : 'Occidente';
-      if (invRegionFilter !== 'TODAS' && invReg !== invRegionFilter) return false;
+      const invReg = normalizeFieldRegionBucket(inv.region, inv.zone);
+      if (allowedRegionBuckets && !allowedRegionBuckets.includes(invReg)) return false;
+      if (
+        invRegionFilter !== 'TODAS' &&
+        invRegionFilter !== 'ASSIGNED' &&
+        invReg !== invRegionFilter
+      ) {
+        return false;
+      }
       if (
         invPromoterFilter !== 'TODAS' &&
         String(inv.promotora || '').trim().toLowerCase() !== invPromoterFilter.trim().toLowerCase()
@@ -2318,7 +2473,16 @@ export const FieldPromotoraView: React.FC = () => {
         String(inv.observations || '').toLowerCase().includes(q)
       );
     });
-  }, [inventorySampling, invRegionFilter, invPromoterFilter, invDateFrom, invDateTo, reportSearchQuery]);
+  }, [
+    inventorySampling,
+    allowedRegionBuckets,
+    invRegionFilter,
+    invPromoterFilter,
+    invDateFrom,
+    invDateTo,
+    reportSearchQuery,
+    normalizeFieldRegionBucket,
+  ]);
 
   const attendanceRecords = useMemo<AttendanceRecord[]>(() => {
     return module1Bundle?.attendanceRecords || [];
@@ -2349,6 +2513,11 @@ export const FieldPromotoraView: React.FC = () => {
     e.preventDefault();
     setIsSubmittingInventory(true);
     try {
+      const effectiveInvRegion: FieldRegionBucket = editableRegionBuckets.includes(
+        newInventoryForm.region
+      )
+        ? newInventoryForm.region
+        : defaultWriteRegionBucket;
       await createSupabaseInventoryRecord({
         date: newInventoryForm.date,
         storeName: newInventoryForm.storeName,
@@ -2358,7 +2527,7 @@ export const FieldPromotoraView: React.FC = () => {
         finalQuantity: Number(newInventoryForm.finalInventory) || 0,
         degustations: Number(newInventoryForm.samplesGiven) || 0,
         comments: newInventoryForm.promoterObservation,
-        region: lockedRegion ?? newInventoryForm.region,
+        region: effectiveInvRegion,
       });
       await refreshSupabaseData();
       setIsNewInventoryModalOpen(false);
@@ -2383,9 +2552,11 @@ export const FieldPromotoraView: React.FC = () => {
     let body: (string | number)[][] = [];
 
     if (activeReportTab === 'inventario') {
-      title = lockedRegion
-        ? `Control de Inventario y Degustación en PDV — Región ${lockedRegion}`
-        : 'Control de Inventario y Degustación en PDV (Supabase)';
+      title = singleLockedRegionDisplay
+        ? `Control de Inventario y Degustación en PDV — Región ${singleLockedRegionDisplay}`
+        : isMultiRegionScope
+          ? `Control de Inventario y Degustación en PDV — Regiones ${assignedRegionsDisplayLabel}`
+          : 'Control de Inventario y Degustación en PDV (Supabase)';
       head = [['PDV / TIENDA', 'PRODUCTO & ID', 'STOCK INIC.', 'DEGUSTACIÓN', 'ROTACIÓN / VENTA', 'STOCK FINAL', 'PROMOTORA']];
       body = filteredInventorySampling.slice(0, 300).map((i) => [
         `${i.storeName}\n${i.date}`,
@@ -2579,18 +2750,30 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   // ----------------------------------------------------
-  // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (OCCIDENTE + VALENCIA · SUPABASE `promotoras`)
+  // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (OCCIDENTE + CENTRO + ANDES · SUPABASE `promotoras`)
   // ----------------------------------------------------
-  const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
-    () => lockedRegion ?? 'TODAS'
+  const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<FieldRegionFilter>(
+    () => defaultFieldRegionFilter
   );
   const [selectedStaffCategoryFilter, setSelectedStaffCategoryFilter] = useState<'TODAS' | StaffCategory>('TODAS');
 
   useEffect(() => {
-    if (lockedRegion) {
-      setSelectedStaffRegionFilter(lockedRegion);
-    }
-  }, [lockedRegion]);
+    setSelectedStaffRegionFilter((prev) => {
+      if (singleLockedRegionBucket) return singleLockedRegionBucket;
+      if (isMultiRegionScope) {
+        if (prev === 'ASSIGNED') return 'ASSIGNED';
+        if (
+          prev !== 'TODAS' &&
+          allowedRegionBuckets &&
+          allowedRegionBuckets.includes(prev)
+        ) {
+          return prev;
+        }
+        return 'ASSIGNED';
+      }
+      return prev === 'ASSIGNED' ? 'TODAS' : prev;
+    });
+  }, [singleLockedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
   const [selectedStaffSearch, setSelectedStaffSearch] = useState('');
   const [fallbackPromotorasStaff, setFallbackPromotorasStaff] = useState<StaffMemberRecord[]>([]);
   const [loadingPersonalCatalog, setLoadingPersonalCatalog] = useState(false);
@@ -2607,7 +2790,7 @@ export const FieldPromotoraView: React.FC = () => {
     email: string;
     assignedStore: string;
     address: string;
-    region: 'Occidente' | 'Valencia';
+    region: FieldRegionBucket;
     password: string;
     status: 'Activo' | 'Inactivo';
     photoUrl?: string;
@@ -2620,7 +2803,7 @@ export const FieldPromotoraView: React.FC = () => {
     email: '',
     assignedStore: 'VARIAS',
     address: '',
-    region: lockedRegion ?? 'Occidente',
+    region: defaultWriteRegionBucket,
     password: '',
     status: 'Activo',
   });
@@ -2657,13 +2840,16 @@ export const FieldPromotoraView: React.FC = () => {
             : catRaw.includes('event')
               ? 'eventual'
               : 'fija';
-          const regionLabel: 'Occidente' | 'Valencia' =
-            p.region === 'Valencia' ||
-            String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
-            p.sucursal === 'VALENCIA' ||
-            p.sucursal === 'CENTRO'
-              ? 'Valencia'
-              : 'Occidente';
+          const regionLabel: FieldRegionBucket = normalizeFieldRegionBucket(
+            String(
+              p.region ||
+                p.metadata?.region_codigo ||
+                p.metadata?.region_perfil ||
+                p.sucursal ||
+                ''
+            ),
+            String(p.direccion || p.ciudad || '')
+          );
           return {
             id: String(p.id),
             name: displayName,
@@ -2705,39 +2891,38 @@ export const FieldPromotoraView: React.FC = () => {
     }
   }, [activeSubTab, module1Bundle?.staffMembers, fallbackPromotorasStaff.length, loadFallbackPromotorasCatalog]);
 
-  const resolveMemberRegion = useCallback((m: StaffMemberRecord): 'Occidente' | 'Valencia' => {
-    if (m.region === 'Valencia' || String(m.region || '').toLowerCase() === 'valencia') {
-      return 'Valencia';
-    }
-    if (m.region === 'Occidente' || String(m.region || '').toLowerCase() === 'occidente') {
-      return 'Occidente';
-    }
-    if (String(m.address || '').match(/valencia|carabobo|los guayos|tocuyito|maracay|turmero|caracas|el paraiso|montalban|plaza venezuela/i)) {
-      return 'Valencia';
-    }
-    return 'Occidente';
-  }, []);
+  const resolveMemberRegion = useCallback(
+    (m: StaffMemberRecord): FieldRegionBucket => {
+      return normalizeFieldRegionBucket(m.region, m.address);
+    },
+    [normalizeFieldRegionBucket]
+  );
 
   const staffList = useMemo<StaffMemberRecord[]>(() => {
     const fromBundle = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
     const base = fromBundle.length > 0 ? fromBundle : fallbackPromotorasStaff;
-    if (!lockedRegion) return base;
-    return base.filter((m) => resolveMemberRegion(m) === lockedRegion);
-  }, [module1Bundle, fallbackPromotorasStaff, lockedRegion, resolveMemberRegion]);
+    if (!allowedRegionBuckets) return base;
+    return base.filter((m) => allowedRegionBuckets.includes(resolveMemberRegion(m)));
+  }, [module1Bundle, fallbackPromotorasStaff, allowedRegionBuckets, resolveMemberRegion]);
 
   const occidenteStaffCount = useMemo(
     () => staffList.filter((m) => resolveMemberRegion(m) === 'Occidente').length,
     [staffList, resolveMemberRegion]
   );
 
-  const valenciaStaffCount = useMemo(
-    () => staffList.filter((m) => resolveMemberRegion(m) === 'Valencia').length,
+  const centroStaffCount = useMemo(
+    () => staffList.filter((m) => resolveMemberRegion(m) === 'Centro').length,
+    [staffList, resolveMemberRegion]
+  );
+
+  const andesStaffCount = useMemo(
+    () => staffList.filter((m) => resolveMemberRegion(m) === 'Andes').length,
     [staffList, resolveMemberRegion]
   );
 
   const regionFilteredStaffList = useMemo(
     () =>
-      selectedStaffRegionFilter === 'TODAS'
+      selectedStaffRegionFilter === 'TODAS' || selectedStaffRegionFilter === 'ASSIGNED'
         ? staffList
         : staffList.filter((m) => resolveMemberRegion(m) === selectedStaffRegionFilter),
     [staffList, selectedStaffRegionFilter, resolveMemberRegion]
@@ -2857,6 +3042,13 @@ export const FieldPromotoraView: React.FC = () => {
 
   const openCreateStaffModal = (defaultCategory: StaffCategory = 'fija') => {
     setStaffFormError(null);
+    const preferredRegion: FieldRegionBucket =
+      singleLockedRegionBucket ??
+      (selectedStaffRegionFilter !== 'TODAS' &&
+      selectedStaffRegionFilter !== 'ASSIGNED' &&
+      editableRegionBuckets.includes(selectedStaffRegionFilter)
+        ? selectedStaffRegionFilter
+        : defaultWriteRegionBucket);
     setStaffFormModal({
       isOpen: true,
       id: undefined,
@@ -2867,7 +3059,7 @@ export const FieldPromotoraView: React.FC = () => {
       email: '',
       assignedStore: defaultCategory === 'merchandising' ? 'MERCHANDISING' : defaultCategory === 'eventual' ? 'TODAS' : 'VARIAS',
       address: '',
-      region: lockedRegion ?? (selectedStaffRegionFilter === 'Valencia' ? 'Valencia' : 'Occidente'),
+      region: preferredRegion,
       password: '',
       status: 'Activo',
       photoUrl: undefined,
@@ -2876,6 +3068,10 @@ export const FieldPromotoraView: React.FC = () => {
 
   const openEditStaffModal = (member: StaffMemberRecord) => {
     setStaffFormError(null);
+    const memberRegion = resolveMemberRegion(member);
+    const safeRegion: FieldRegionBucket =
+      singleLockedRegionBucket ??
+      (editableRegionBuckets.includes(memberRegion) ? memberRegion : defaultWriteRegionBucket);
     setStaffFormModal({
       isOpen: true,
       id: member.id,
@@ -2886,7 +3082,7 @@ export const FieldPromotoraView: React.FC = () => {
       email: String(member.email ?? ''),
       assignedStore: String(member.assignedStore ?? 'VARIAS'),
       address: String(member.address ?? ''),
-      region: lockedRegion ?? resolveMemberRegion(member),
+      region: safeRegion,
       // Seguridad Zero Trust: nunca poblar ni mostrar contraseñas almacenadas
       password: '',
       status: member.status === 'Inactivo' ? 'Inactivo' : 'Activo',
@@ -2905,7 +3101,11 @@ export const FieldPromotoraView: React.FC = () => {
     setStaffFormError(null);
     setIsSavingStaffModal(true);
     try {
-      const effectiveStaffRegion: 'Occidente' | 'Valencia' = lockedRegion ?? staffFormModal.region;
+      const effectiveStaffRegion: FieldRegionBucket = singleLockedRegionBucket
+        ? singleLockedRegionBucket
+        : editableRegionBuckets.includes(staffFormModal.region)
+          ? staffFormModal.region
+          : defaultWriteRegionBucket;
       const saved = await saveSupabaseStaffMember({
         id: staffFormModal.id,
         name: cleanName,
@@ -2919,7 +3119,7 @@ export const FieldPromotoraView: React.FC = () => {
         password: staffFormModal.password,
         photoUrl: staffFormModal.photoUrl,
         region: effectiveStaffRegion,
-        regionId: lockedRegion ? verifiedRegionId : undefined,
+        regionId: resolveRegionIdForBucket(effectiveStaffRegion),
       });
 
       // Aprovisionar/actualizar cuenta segura en Supabase Auth (sin texto plano en public.staff)
@@ -5200,20 +5400,54 @@ export const FieldPromotoraView: React.FC = () => {
             <div className="space-y-3 p-3.5 rounded-2xl bg-zinc-950 border border-zinc-900">
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {lockedRegion ? (
+                  {singleLockedRegionDisplay ? (
                     <span
                       data-testid="inv-region-locked-badge"
                       className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-red-600/15 text-white border border-red-500/45 shadow-sm"
                     >
                       <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                      <span>Región: {lockedRegion}</span>
+                      <span>Región: {singleLockedRegionDisplay}</span>
                     </span>
+                  ) : isMultiRegionScope ? (
+                    <>
+                      <span
+                        data-testid="inv-region-multiregion-badge"
+                        className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-red-600/15 text-white border border-red-500/45 shadow-sm"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                        <span>Regiones: {assignedRegionsDisplayLabel}</span>
+                      </span>
+                      {(
+                        [
+                          { id: 'ASSIGNED' as const, label: `${assignedRegionsDisplayLabel} (Mis Regiones)` },
+                          ...editableRegionBuckets.map((b) => ({
+                            id: b,
+                            label: formatBucketLabel(b),
+                          })),
+                        ]
+                      ).map((reg) => (
+                        <button
+                          key={reg.id}
+                          type="button"
+                          data-testid={`inv-region-${reg.id}`}
+                          onClick={() => setInvRegionFilter(reg.id)}
+                          className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                            invRegionFilter === reg.id
+                              ? 'bg-red-600 text-white border-red-500 shadow'
+                              : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                          }`}
+                        >
+                          {reg.label}
+                        </button>
+                      ))}
+                    </>
                   ) : (
                     (
                       [
-                        { id: 'TODAS', label: 'Todas las Regiones' },
-                        { id: 'Occidente', label: 'Occidente' },
-                        { id: 'Valencia', label: 'Valencia' },
+                        { id: 'TODAS' as const, label: 'Todas las Regiones' },
+                        { id: 'Occidente' as const, label: 'Occidente' },
+                        { id: 'Centro' as const, label: 'Centro / Valencia' },
+                        { id: 'Andes' as const, label: 'Andes' },
                       ] as const
                     ).map((reg) => (
                       <button
@@ -5266,7 +5500,7 @@ export const FieldPromotoraView: React.FC = () => {
                   </div>
                 </div>
 
-                {((!lockedRegion && invRegionFilter !== 'TODAS') ||
+                {((!singleLockedRegionBucket && invRegionFilter !== defaultFieldRegionFilter) ||
                   invPromoterFilter !== 'TODAS' ||
                   invDateFrom !== '' ||
                   invDateTo !== '' ||
@@ -5275,7 +5509,7 @@ export const FieldPromotoraView: React.FC = () => {
                     type="button"
                     data-testid="inv-clear-filters"
                     onClick={() => {
-                      setInvRegionFilter(lockedRegion ?? 'TODAS');
+                      setInvRegionFilter(defaultFieldRegionFilter);
                       setInvPromoterFilter('TODAS');
                       setInvDateFrom('');
                       setInvDateTo('');
@@ -5603,27 +5837,31 @@ export const FieldPromotoraView: React.FC = () => {
                         </div>
                         <div>
                           <label className="block text-xs text-slate-400 mb-1">Región Operativa</label>
-                          {lockedRegion ? (
+                          {singleLockedRegionDisplay ? (
                             <div
                               data-testid="new-inv-region-locked"
                               className="w-full bg-red-950/30 border border-red-500/40 rounded-lg px-3 py-2 text-sm text-white font-bold flex items-center gap-2"
                             >
                               <Lock className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                              <span>Región: {lockedRegion}</span>
+                              <span>Región: {singleLockedRegionDisplay}</span>
                             </div>
                           ) : (
                             <select
+                              data-testid="new-inv-region-select"
                               value={newInventoryForm.region}
                               onChange={(e) =>
                                 setNewInventoryForm({
                                   ...newInventoryForm,
-                                  region: e.target.value as 'Occidente' | 'Valencia',
+                                  region: e.target.value as FieldRegionBucket,
                                 })
                               }
                               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
                             >
-                              <option value="Occidente">Occidente</option>
-                              <option value="Valencia">Valencia</option>
+                              {editableRegionBuckets.map((bucket) => (
+                                <option key={bucket} value={bucket}>
+                                  {formatBucketLabel(bucket)}
+                                </option>
+                              ))}
                             </select>
                           )}
                         </div>
@@ -6566,9 +6804,11 @@ export const FieldPromotoraView: React.FC = () => {
                       </span>
                       <span
                         className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
-                          resolveMemberRegion(member) === 'Valencia'
+                          resolveMemberRegion(member) === 'Centro'
                             ? 'bg-sky-500/15 text-sky-300 border-sky-500/35'
-                            : 'bg-red-500/15 text-red-300 border-red-500/35'
+                            : resolveMemberRegion(member) === 'Andes'
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                              : 'bg-red-500/15 text-red-300 border-red-500/35'
                         }`}
                       >
                         {resolveMemberRegion(member)}
@@ -6718,28 +6958,50 @@ export const FieldPromotoraView: React.FC = () => {
                     <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider">
                       Padrón Activo Sincronizado • Supabase `promotoras`
                     </span>
-                    {lockedRegion ? (
+                    {singleLockedRegionDisplay ? (
                       <span
                         data-testid="personal-region-header-badge"
                         className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-red-600/15 text-white border border-red-500/45"
                       >
                         <Lock className="w-3 h-3 text-red-400 shrink-0" />
-                        <span>Región: {lockedRegion} ({regionFilteredStaffList.length})</span>
+                        <span>Región: {singleLockedRegionDisplay} ({regionFilteredStaffList.length})</span>
+                      </span>
+                    ) : isMultiRegionScope ? (
+                      <span
+                        data-testid="personal-region-header-badge"
+                        className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-red-600/15 text-white border border-red-500/45"
+                      >
+                        <Lock className="w-3 h-3 text-red-400 shrink-0" />
+                        <span>
+                          Regiones: {assignedRegionsDisplayLabel} (
+                          {editableRegionBuckets
+                            .map(
+                              (b) =>
+                                `${b}: ${b === 'Centro' ? centroStaffCount : b === 'Andes' ? andesStaffCount : occidenteStaffCount}`
+                            )
+                            .join(' · ')}
+                          )
+                        </span>
                       </span>
                     ) : (
                       <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-950 text-zinc-300 border border-white/10">
-                        Occidente: {occidenteStaffCount} · Valencia: {valenciaStaffCount}
+                        Occidente: {occidenteStaffCount} · Centro / Valencia: {centroStaffCount} · Andes: {andesStaffCount}
                       </span>
                     )}
                   </div>
                   <h3 className="text-lg font-black text-white mt-1.5">
                     Personal y Promotoras Activas ({regionFilteredStaffList.length}
-                    {!lockedRegion && selectedStaffRegionFilter !== 'TODAS' ? ` de ${staffList.length}` : ''})
+                    {!singleLockedRegionBucket && selectedStaffRegionFilter !== defaultFieldRegionFilter
+                      ? ` de ${staffList.length}`
+                      : ''}
+                    )
                   </h3>
                   <p className="text-xs text-zinc-400">
-                    {lockedRegion
-                      ? `Directorio sincronizado con Supabase exclusivo de la región ${lockedRegion} y vinculado a cuentas de acceso en Supabase Auth.`
-                      : 'Directorio sincronizado con Supabase por región operativa (Occidente y Valencia) y vinculado a cuentas de acceso en Supabase Auth.'}
+                    {singleLockedRegionDisplay
+                      ? `Directorio sincronizado con Supabase exclusivo de la región ${singleLockedRegionDisplay} y vinculado a cuentas de acceso en Supabase Auth.`
+                      : isMultiRegionScope
+                        ? `Directorio sincronizado con Supabase exclusivo de las regiones ${assignedRegionsDisplayLabel} y vinculado a cuentas de acceso en Supabase Auth.`
+                        : 'Directorio sincronizado con Supabase por región operativa (Occidente, Centro / Valencia y Andes) y vinculado a cuentas de acceso en Supabase Auth.'}
                   </p>
                 </div>
 
@@ -6787,15 +7049,15 @@ export const FieldPromotoraView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Selector de Región / Perfil (Occidente vs Valencia) + Categoría */}
+              {/* Selector de Región / Perfil + Categoría */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-white/[0.06]">
-                {lockedRegion ? (
+                {singleLockedRegionDisplay ? (
                   <div
                     data-testid="personal-region-locked-pill"
                     className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-red-600/15 border border-red-500/45 text-xs font-bold text-white"
                   >
                     <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                    <span>Región: {lockedRegion}</span>
+                    <span>Región: {singleLockedRegionDisplay}</span>
                     <span className="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-black/30 text-white">
                       {regionFilteredStaffList.length}
                     </span>
@@ -6806,12 +7068,52 @@ export const FieldPromotoraView: React.FC = () => {
                     role="tablist"
                     aria-label="Filtrar personal por región"
                   >
-                    {(
-                      [
-                        { id: 'TODAS', label: 'Todas las Regiones', count: staffList.length, testId: 'personal-region-tab-todas' },
-                        { id: 'Occidente', label: 'Occidente', count: occidenteStaffCount, testId: 'personal-region-tab-occidente' },
-                        { id: 'Valencia', label: 'Valencia', count: valenciaStaffCount, testId: 'personal-region-tab-valencia' },
-                      ] as const
+                    {(isMultiRegionScope
+                      ? [
+                          {
+                            id: 'ASSIGNED' as const,
+                            label: `${assignedRegionsDisplayLabel} (Mis Regiones)`,
+                            count: staffList.length,
+                            testId: 'personal-region-tab-assigned',
+                          },
+                          ...editableRegionBuckets.map((b) => ({
+                            id: b,
+                            label: formatBucketLabel(b),
+                            count:
+                              b === 'Centro'
+                                ? centroStaffCount
+                                : b === 'Andes'
+                                  ? andesStaffCount
+                                  : occidenteStaffCount,
+                            testId: `personal-region-tab-${b.toLowerCase()}`,
+                          })),
+                        ]
+                      : [
+                          {
+                            id: 'TODAS' as const,
+                            label: 'Todas las Regiones',
+                            count: staffList.length,
+                            testId: 'personal-region-tab-todas',
+                          },
+                          {
+                            id: 'Occidente' as const,
+                            label: 'Occidente',
+                            count: occidenteStaffCount,
+                            testId: 'personal-region-tab-occidente',
+                          },
+                          {
+                            id: 'Centro' as const,
+                            label: 'Centro / Valencia',
+                            count: centroStaffCount,
+                            testId: 'personal-region-tab-centro',
+                          },
+                          {
+                            id: 'Andes' as const,
+                            label: 'Andes',
+                            count: andesStaffCount,
+                            testId: 'personal-region-tab-andes',
+                          },
+                        ]
                     ).map((regTab) => {
                       const active = selectedStaffRegionFilter === regTab.id;
                       return (
@@ -7072,27 +7374,31 @@ export const FieldPromotoraView: React.FC = () => {
 
                       <div>
                         <label className="block text-zinc-300 font-bold mb-1">Región Operativa</label>
-                        {lockedRegion ? (
+                        {singleLockedRegionDisplay ? (
                           <div
                             data-testid="staff-modal-region-locked"
                             className="w-full px-3 py-2 rounded-xl bg-red-950/30 border border-red-500/40 text-white font-bold flex items-center gap-2"
                           >
                             <Lock className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                            <span>Región: {lockedRegion}</span>
+                            <span>Región: {singleLockedRegionDisplay}</span>
                           </div>
                         ) : (
                           <select
+                            data-testid="staff-modal-region-select"
                             value={staffFormModal.region}
                             onChange={(e) =>
                               setStaffFormModal((prev) => ({
                                 ...prev,
-                                region: e.target.value as 'Occidente' | 'Valencia',
+                                region: e.target.value as FieldRegionBucket,
                               }))
                             }
                             className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white focus:outline-none focus:border-red-500"
                           >
-                            <option value="Occidente">Occidente</option>
-                            <option value="Valencia">Valencia</option>
+                            {editableRegionBuckets.map((bucket) => (
+                              <option key={bucket} value={bucket}>
+                                {formatBucketLabel(bucket)}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </div>

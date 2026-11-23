@@ -82,20 +82,35 @@ export const MasterDataManagementView: React.FC = () => {
     activeSucursal,
     activeRegionScope,
     assignedRegion,
+    assignedRegions,
+    assignedRegionCodes,
     isRegionalRestricted,
+    canSwitchAmongAssignedRegions,
   } = useApp();
   const isGlobalUser = verifiedSucursal === 'GLOBAL' && !isRegionalRestricted;
   const defaultRegionalBranch: SucursalMaestro =
     activeSucursal ??
-    (verifiedSucursal && verifiedSucursal !== 'GLOBAL' ? verifiedSucursal : 'ZULIA');
+    (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
+      ? verifiedSucursal
+      : assignedRegionCodes.includes('CENTRO')
+        ? 'CENTRO'
+        : 'ZULIA');
   const activeRegionBadgeLabel: string =
-    isRegionalRestricted && assignedRegion
-      ? `Región: ${assignedRegion}`
-      : activeRegionScope === 'ALL'
-        ? 'Todas las Regiones'
-        : activeRegionScope
-          ? activeRegionScope
-          : normalizeRegionName(activeSucursal ?? verifiedSucursal) ?? 'Todas las Regiones';
+    isRegionalRestricted && canSwitchAmongAssignedRegions
+      ? activeRegionScope === 'ASSIGNED' || !activeRegionScope
+        ? `Regiones: ${assignedRegions.length > 0 ? assignedRegions.join(' y ') : 'Mis Regiones'}`
+        : activeRegionScope === 'CENTRO'
+          ? 'Región: Centro'
+          : activeRegionScope === 'ANDES'
+            ? 'Región: Andes'
+            : `Región: ${activeRegionScope}`
+      : isRegionalRestricted && assignedRegion
+        ? `Región: ${assignedRegion}`
+        : activeRegionScope === 'ALL'
+          ? 'Todas las Regiones'
+          : activeRegionScope
+            ? activeRegionScope
+            : normalizeRegionName(activeSucursal ?? verifiedSucursal) ?? 'Todas las Regiones';
 
   const [subTab, setSubTab] = useState<MasterSubTab>('clientes');
   const [searchTerm, setSearchTerm] = useState('');
@@ -503,7 +518,7 @@ export const MasterDataManagementView: React.FC = () => {
                 data-testid="master-active-region-badge"
                 className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-300 border border-white/10"
               >
-                Región activa: {activeRegionBadgeLabel}
+                {isRegionalRestricted ? activeRegionBadgeLabel : `Región activa: ${activeRegionBadgeLabel}`}
               </span>
             </div>
             <h2 className="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">

@@ -861,6 +861,8 @@ export function filterNormalizedErpClientes(
   const soloActivos = filtros.soloActivos !== false;
   const sucursalFiltro = filtros.sucursal ?? null;
   const regionFiltro = filtros.region ?? null;
+  const regionsFiltro =
+    Array.isArray(filtros.regions) && filtros.regions.length > 0 ? filtros.regions : null;
   const regionIdFiltro = cleanText(filtros.regionId);
   const zonaFiltro = normalizeToken(filtros.zona);
   const rutaFiltro = normalizeToken(filtros.ruta);
@@ -873,10 +875,11 @@ export function filterNormalizedErpClientes(
     if (soloActivos && c.activo !== true) return false;
     if (sucursalFiltro && c.sucursal !== sucursalFiltro) return false;
     if (regionIdFiltro && c.region_id !== regionIdFiltro) return false;
-    if (regionFiltro) {
+    if (regionFiltro || regionsFiltro) {
       const metaRegion =
         normalizeErpRegionCode(c.metadata?.region_codigo) ?? normalizeRegionName(c.sucursal ?? c.estado);
-      if (metaRegion !== regionFiltro) return false;
+      if (regionFiltro && metaRegion !== regionFiltro) return false;
+      if (regionsFiltro && (!metaRegion || !regionsFiltro.includes(metaRegion))) return false;
     }
     if (zonaFiltro && !normalizeToken(c.zona).includes(zonaFiltro)) return false;
     if (rutaFiltro && !normalizeToken(c.ruta).includes(rutaFiltro)) return false;
@@ -906,6 +909,8 @@ export function filterNormalizedErpVendedores(
   const soloActivos = filtros.soloActivos !== false;
   const sucursalFiltro = filtros.sucursal ?? null;
   const regionFiltro = filtros.region ?? null;
+  const regionsFiltro =
+    Array.isArray(filtros.regions) && filtros.regions.length > 0 ? filtros.regions : null;
   const regionIdFiltro = cleanText(filtros.regionId);
   const zonaFiltro = normalizeToken(filtros.zona);
   const supervisorFiltro = normalizeToken(filtros.supervisor);
@@ -915,10 +920,11 @@ export function filterNormalizedErpVendedores(
     if (soloActivos && v.activo !== true) return false;
     if (sucursalFiltro && v.sucursal !== sucursalFiltro) return false;
     if (regionIdFiltro && v.region_id !== regionIdFiltro) return false;
-    if (regionFiltro) {
+    if (regionFiltro || regionsFiltro) {
       const metaRegion =
         normalizeErpRegionCode(v.metadata?.region_codigo) ?? normalizeRegionName(v.sucursal ?? v.zona);
-      if (metaRegion !== regionFiltro) return false;
+      if (regionFiltro && metaRegion !== regionFiltro) return false;
+      if (regionsFiltro && (!metaRegion || !regionsFiltro.includes(metaRegion))) return false;
     }
     if (zonaFiltro && !normalizeToken(v.zona).includes(zonaFiltro)) return false;
     if (supervisorFiltro && !normalizeToken(v.supervisor).includes(supervisorFiltro)) return false;
@@ -1106,19 +1112,30 @@ export function normalizeErpSupervisoresDataset(
   return out;
 }
 
-export type PromotoraRegionPerfil = 'Occidente' | 'Valencia';
+export type PromotoraRegionPerfil = 'Occidente' | 'Valencia' | 'Centro' | 'Andes';
 
 export function normalizePromotoraRegionPerfil(raw: unknown): PromotoraRegionPerfil | null {
   const token = normalizeToken(raw);
   if (!token) return null;
   if (token === 'OCCIDENTE' || token === 'ZULIA') return 'Occidente';
-  if (token === 'VALENCIA' || token === 'CENTRO' || token === 'CAPITAL') return 'Valencia';
+  if (token === 'VALENCIA') return 'Valencia';
+  if (token === 'CENTRO' || token === 'CAPITAL') return 'Centro';
+  if (
+    token === 'ANDES' ||
+    token === 'LOS ANDES' ||
+    token === 'MERIDA' ||
+    token === 'TACHIRA' ||
+    token === 'TRUJILLO' ||
+    token === 'BARINAS'
+  ) {
+    return 'Andes';
+  }
   return null;
 }
 
 /**
  * 4. Normaliza `public.promotoras` (leyendo `correo ?? email`, `region` explícita
- * `'Occidente' | 'Valencia'`, `auth_user_id`, clasificación estricta
+ * `'Occidente' | 'Valencia' | 'Centro' | 'Andes'`, `auth_user_id`, clasificación estricta
  * `Fijas`/`Eventuales`/`Merchandising`, y resolución dinámica de `region_id` desde `"Regiones"`).
  */
 export function normalizeErpPromotorasDataset(
@@ -1145,7 +1162,12 @@ export function normalizeErpPromotorasDataset(
     const explicitRegionPerfil = normalizePromotoraRegionPerfil(p.region);
 
     if (!regionCode && explicitRegionPerfil) {
-      regionCode = explicitRegionPerfil === 'Valencia' ? 'CENTRO' : 'OCCIDENTE';
+      regionCode =
+        explicitRegionPerfil === 'Andes'
+          ? 'ANDES'
+          : explicitRegionPerfil === 'Valencia' || explicitRegionPerfil === 'Centro'
+            ? 'CENTRO'
+            : 'OCCIDENTE';
       const matchedReg = byCode.get(regionCode);
       if (matchedReg?.id_regi) {
         regionId = String(matchedReg.id_regi);
@@ -1181,7 +1203,9 @@ export function normalizeErpPromotorasDataset(
         ? 'Occidente'
         : regionCode === 'CENTRO'
           ? 'Valencia'
-          : null);
+          : regionCode === 'ANDES'
+            ? 'Andes'
+            : null);
 
     const createdAt = p.created_at || new Date().toISOString();
     const updatedAt = p.updated_at || createdAt;

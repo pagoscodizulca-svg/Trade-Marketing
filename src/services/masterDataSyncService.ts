@@ -1779,9 +1779,12 @@ async function fetchVendedoresFromBackendApi(
   effectiveSucursal: SucursalMaestro | null
 ): Promise<BackendMasterApiResult<Vendedor>> {
   const params = new URLSearchParams();
+  const hasMultiRegions = Array.isArray(filtros.regions) && filtros.regions.length > 0;
   if (filtros.soloActivos === false) params.set('soloActivos', 'false');
   if (filtros.region) {
     params.set('region', filtros.region);
+  } else if (hasMultiRegions) {
+    params.set('regions', filtros.regions!.join(','));
   } else if (effectiveSucursal) {
     params.set('sucursal', effectiveSucursal);
   }
@@ -1795,7 +1798,7 @@ async function fetchVendedoresFromBackendApi(
     'vendedores',
     params,
     client,
-    filtros.region ? null : effectiveSucursal
+    filtros.region || hasMultiRegions ? null : effectiveSucursal
   );
 }
 
@@ -1805,9 +1808,12 @@ async function fetchClientesFromBackendApi(
   effectiveSucursal: SucursalMaestro | null
 ): Promise<BackendMasterApiResult<ClienteConVendedor>> {
   const params = new URLSearchParams();
+  const hasMultiRegions = Array.isArray(filtros.regions) && filtros.regions.length > 0;
   if (filtros.soloActivos === false) params.set('soloActivos', 'false');
   if (filtros.region) {
     params.set('region', filtros.region);
+  } else if (hasMultiRegions) {
+    params.set('regions', filtros.regions!.join(','));
   } else if (effectiveSucursal) {
     params.set('sucursal', effectiveSucursal);
   }
@@ -1824,7 +1830,7 @@ async function fetchClientesFromBackendApi(
     'clientes',
     params,
     client,
-    filtros.region ? null : effectiveSucursal
+    filtros.region || hasMultiRegions ? null : effectiveSucursal
   );
 }
 
@@ -1852,7 +1858,10 @@ async function fetchVendedoresFromSupabaseErpTables(
 
   return filterNormalizedErpVendedores(normalized, {
     ...filtros,
-    sucursal: filtros.region ? undefined : (effectiveSucursal ?? undefined),
+    sucursal:
+      filtros.region || (filtros.regions && filtros.regions.length > 0)
+        ? undefined
+        : (effectiveSucursal ?? undefined),
   });
 }
 
@@ -1882,7 +1891,10 @@ async function fetchClientesFromSupabaseErpTables(
 
   return filterNormalizedErpClientes(normalized, {
     ...filtros,
-    sucursal: filtros.region ? undefined : (effectiveSucursal ?? undefined),
+    sucursal:
+      filtros.region || (filtros.regions && filtros.regions.length > 0)
+        ? undefined
+        : (effectiveSucursal ?? undefined),
   });
 }
 
@@ -1902,6 +1914,7 @@ export async function obtenerVendedoresMaestros(
       soloActivos,
       sucursal: effectiveSucursal || '',
       region: filtros.region || '',
+      regions: filtros.regions?.join(',') || '',
       regionId: filtros.regionId?.trim() || '',
       zona: filtros.zona?.trim().toUpperCase() || '',
       supervisor: filtros.supervisor?.trim().toUpperCase() || '',
@@ -2070,6 +2083,7 @@ export async function obtenerClientesMaestros(
       codigoVendedor: filtros.codigoVendedor?.trim().toUpperCase() || '',
       canal: filtros.canal?.trim().toUpperCase() || '',
       region: filtros.region || '',
+      regions: filtros.regions?.join(',') || '',
       regionId: filtros.regionId?.trim() || '',
       busqueda: filtros.busqueda?.trim().toUpperCase() || '',
     },

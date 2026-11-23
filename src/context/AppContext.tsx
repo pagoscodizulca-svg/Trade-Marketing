@@ -192,22 +192,28 @@ export interface AppContextType {
   setCurrentRole: (role: UserRole) => void;
   /** Rol autorizado del usuario autenticado (ej. `'coordinador_trade'`, `'super_admin'`, `'promotora'`) */
   role: string | null;
-  /** Región operativa asignada en formato legible (`'Occidente' | 'Valencia' | null` para Admin Global) */
-  assignedRegion: 'Occidente' | 'Valencia' | null;
-  /** Verdadero cuando la sesión está restringida estrictamente a una región (ej. Grecia -> Occidente) */
+  /** Región operativa singular cuando el usuario está acotado a una sola región (`'Occidente' | 'Centro' | 'Andes' | null`) */
+  assignedRegion: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null;
+  /** Etiquetas legibles de TODAS las regiones asignadas (`['Centro', 'Andes']`, `['Occidente']`, o `[]` para Admin Global) */
+  assignedRegions: string[];
+  /** Códigos oficiales normalizados de las regiones asignadas (`['CENTRO', 'ANDES']`, `['OCCIDENTE']`, o `[]` para Admin Global) */
+  assignedRegionCodes: AllowedRegionCode[];
+  /** Verdadero cuando la sesión está restringida estrictamente a 1 o más regiones (ej. Grecia -> Occidente, María -> Centro y Andes) */
   isRegionalRestricted: boolean;
+  /** Verdadero cuando un usuario regional tiene >= 2 regiones asignadas y puede alternar exclusivamente entre ellas (ej. María -> Centro y Andes) */
+  canSwitchAmongAssignedRegions: boolean;
   /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'vendedor' | 'promotora' | 'cliente' | 'chofer' | null) */
   verifiedIamRole: ManagedUserRole | null;
   /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null) */
   verifiedSucursal: SucursalCodigo | null;
   /** UUID de `public.regiones` asignado al usuario en BD (null para `super_admin` o usuario regional pendiente) */
   verifiedRegionId: string | null;
-  /** Catálogo dinámico de las 3 regiones reales (`public."Regiones"`: OCCIDENTE, CENTRO, ANDES) */
+  /** Catálogo dinámico de regiones autorizadas (`public."Regiones"`: OCCIDENTE, CENTRO, ANDES) */
   activeRegiones: ActiveRegionItem[];
-  /** Alcance regional oficial activo (`ALL` | `OCCIDENTE` | `CENTRO` | `ANDES` | null) */
-  activeRegionScope: AllowedRegionCode | 'ALL' | null;
-  /** Selecciona una región oficial (`ALL`, `OCCIDENTE`, `CENTRO` o `ANDES`), purga caché y recarga */
-  setActiveRegionScope: (region: AllowedRegionCode | 'ALL') => void;
+  /** Alcance regional oficial activo (`ALL` | `ASSIGNED` | `OCCIDENTE` | `CENTRO` | `ANDES` | null) */
+  activeRegionScope: AllowedRegionCode | 'ALL' | 'ASSIGNED' | null;
+  /** Selecciona una región oficial permitida (`ALL` solo Global, `ASSIGNED` multi-región, o una región autorizada), purga caché y recarga */
+  setActiveRegionScope: (region: AllowedRegionCode | 'ALL' | 'ASSIGNED') => void;
   /** Sucursal operativa compatible en sesión (traducida desde la región oficial) */
   activeSucursal: OperativeSucursal | null;
   /** Etiqueta corporativa legible de la región activa */
@@ -518,7 +524,9 @@ export const AppProvider: React.FC<{
     iamRole?: ManagedUserRole | null;
     sucursal?: SucursalCodigo | null;
     regionId?: string | null;
-    regionLabel?: 'Occidente' | 'Valencia' | null;
+    regionLabel?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null;
+    assignedRegions?: AllowedRegionCode[];
+    assignedRegionLabels?: string[];
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -549,6 +557,9 @@ export const AppProvider: React.FC<{
       ? 'ALL'
       : null
   );
+  const [selectedAssignedRegionScope, setSelectedAssignedRegionScope] = useState<
+    AllowedRegionCode | 'ASSIGNED'
+  >('ASSIGNED');
   const [isMasterCachePurged, setIsMasterCachePurged] = useState<boolean>(false);
 
   // Higiene automática de `localStorage`/`sessionStorage` legado (ZULIA / 5 sedes / cachés vacíos)
@@ -569,13 +580,59 @@ export const AppProvider: React.FC<{
     ? (verifiedProfile.rawAppRole || verifiedIamRole || verifiedProfile.appRole || null)
     : null;
 
+  const assignedRegionCodes: AllowedRegionCode[] = useMemo(() => {
+    if (!isRegionalRestricted) return [];
+    const list: AllowedRegionCode[] = [];
+    const pushCode = (raw: unknown) => {
+      const code = normalizeRegionName(raw);
+      if (code && !list.includes(code)) list.push(code);
+    };
+    if (Array.isArray(verifiedProfile?.assignedRegions)) {
+      for (const r of verifiedProfile!.assignedRegions!) pushCode(r);
+    }
+    if (list.length === 0 && verifiedRegionId) {
+      const hit = activeRegiones.find((r) => r.id === verifiedRegionId);
+      if (hit) pushCode(hit.codigo);
+    }
+    if (list.length === 0 && verifiedProfile?.regionLabel) {
+      pushCode(verifiedProfile.regionLabel);
+    }
+    if (list.length === 0 && verifiedSucursal) {
+      pushCode(verifiedSucursal);
+    }
+    return list;
+  }, [
+    isRegionalRestricted,
+    verifiedProfile?.assignedRegions,
+    verifiedRegionId,
+    activeRegiones,
+    verifiedProfile?.regionLabel,
+    verifiedSucursal,
+  ]);
+
+  const assignedRegions: string[] = useMemo(() => {
+    if (!isRegionalRestricted) return [];
+    return assignedRegionCodes.map((code) =>
+      code === 'CENTRO' ? 'Centro' : code === 'ANDES' ? 'Andes' : 'Occidente'
+    );
+  }, [isRegionalRestricted, assignedRegionCodes]);
+
+  const canSwitchAmongAssignedRegions = Boolean(
+    isRegionalRestricted && assignedRegionCodes.length >= 2
+  );
+
   const lockedRegionalSucursal: OperativeSucursal | null =
-    !canSwitchSucursal && verifiedSucursal && isOperativeSucursal(verifiedSucursal)
+    !canSwitchSucursal &&
+    !canSwitchAmongAssignedRegions &&
+    verifiedSucursal &&
+    isOperativeSucursal(verifiedSucursal)
       ? verifiedSucursal
       : null;
 
   const lockedRegionalOfficial: AllowedRegionCode | null = useMemo(() => {
     if (canSwitchSucursal) return null;
+    if (assignedRegionCodes.length === 1) return assignedRegionCodes[0]!;
+    if (assignedRegionCodes.length > 1) return null;
     if (verifiedRegionId) {
       const hit = activeRegiones.find((r) => r.id === verifiedRegionId);
       const norm = hit ? normalizeRegionName(hit.codigo) : null;
@@ -586,42 +643,50 @@ export const AppProvider: React.FC<{
       if (norm) return norm;
     }
     return normalizeRegionName(verifiedSucursal);
-  }, [canSwitchSucursal, verifiedRegionId, activeRegiones, verifiedProfile?.regionLabel, verifiedSucursal]);
+  }, [
+    canSwitchSucursal,
+    assignedRegionCodes,
+    verifiedRegionId,
+    activeRegiones,
+    verifiedProfile?.regionLabel,
+    verifiedSucursal,
+  ]);
 
-  const assignedRegion: 'Occidente' | 'Valencia' | null = useMemo(() => {
-    if (!isRegionalRestricted) return null;
-    if (verifiedProfile?.regionLabel === 'Occidente' || verifiedProfile?.regionLabel === 'Valencia') {
-      return verifiedProfile.regionLabel;
-    }
-    if (lockedRegionalOfficial === 'OCCIDENTE' || lockedRegionalSucursal === 'ZULIA') {
-      return 'Occidente';
-    }
-    if (
-      lockedRegionalOfficial === 'CENTRO' ||
-      lockedRegionalSucursal === 'VALENCIA' ||
-      lockedRegionalSucursal === 'CENTRO' ||
-      lockedRegionalSucursal === 'CAPITAL'
-    ) {
-      return 'Valencia';
-    }
-    return null;
-  }, [isRegionalRestricted, verifiedProfile?.regionLabel, lockedRegionalOfficial, lockedRegionalSucursal]);
+  const assignedRegion: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null = useMemo(() => {
+    if (!isRegionalRestricted || assignedRegionCodes.length !== 1) return null;
+    const onlyCode = assignedRegionCodes[0]!;
+    if (onlyCode === 'OCCIDENTE') return 'Occidente';
+    if (onlyCode === 'ANDES') return 'Andes';
+    return verifiedProfile?.regionLabel === 'Valencia' ? 'Valencia' : 'Centro';
+  }, [isRegionalRestricted, assignedRegionCodes, verifiedProfile?.regionLabel]);
 
   const scopedActiveRegiones: ActiveRegionItem[] = useMemo(() => {
-    if (!isRegionalRestricted || !lockedRegionalOfficial) return activeRegiones;
-    const matched = activeRegiones.filter(
-      (r) => normalizeRegionName(r.codigo) === lockedRegionalOfficial
-    );
+    if (!isRegionalRestricted || assignedRegionCodes.length === 0) return activeRegiones;
+    const matched = activeRegiones.filter((r) => {
+      const code = normalizeRegionName(r.codigo);
+      return Boolean(code && assignedRegionCodes.includes(code));
+    });
     return matched.length > 0 ? matched : activeRegiones;
-  }, [activeRegiones, isRegionalRestricted, lockedRegionalOfficial]);
+  }, [activeRegiones, isRegionalRestricted, assignedRegionCodes]);
 
-  const activeRegionScope: AllowedRegionCode | 'ALL' | null = canSwitchSucursal
+  const activeRegionScope: AllowedRegionCode | 'ALL' | 'ASSIGNED' | null = canSwitchSucursal
     ? selectedNationalRegionScope
-    : lockedRegionalOfficial;
+    : canSwitchAmongAssignedRegions
+      ? selectedAssignedRegionScope === 'ASSIGNED' ||
+        assignedRegionCodes.includes(selectedAssignedRegionScope)
+        ? selectedAssignedRegionScope
+        : 'ASSIGNED'
+      : lockedRegionalOfficial;
 
   const activeSucursal: OperativeSucursal | null = canSwitchSucursal
     ? selectedNationalSucursal
-    : lockedRegionalSucursal;
+    : canSwitchAmongAssignedRegions
+      ? activeRegionScope === 'CENTRO'
+        ? 'CENTRO'
+        : activeRegionScope === 'OCCIDENTE'
+          ? 'ZULIA'
+          : null
+      : lockedRegionalSucursal;
 
   const requiresSucursalSelection: boolean =
     canSwitchSucursal && activeRegionScope === null && activeSucursal === null;
@@ -629,6 +694,9 @@ export const AppProvider: React.FC<{
   const activeSucursalLabel: string = useMemo(() => {
     if (activeRegionScope === 'ALL') {
       return 'Todas las Regiones';
+    }
+    if (activeRegionScope === 'ASSIGNED') {
+      return assignedRegions.length > 0 ? assignedRegions.join(' y ') : 'Mis Regiones';
     }
     if (activeRegionScope) {
       return `Región ${activeRegionScope}`;
@@ -643,12 +711,14 @@ export const AppProvider: React.FC<{
       return matched?.label || `Región ${activeSucursal}`;
     }
     return requiresSucursalSelection ? 'Selección de Región Pendiente' : 'Todas las Regiones';
-  }, [activeRegionScope, activeSucursal, activeRegiones, requiresSucursalSelection]);
+  }, [activeRegionScope, assignedRegions, activeSucursal, activeRegiones, requiresSucursalSelection]);
 
   const activeSucursalRef = useRef<OperativeSucursal | null>(activeSucursal);
   activeSucursalRef.current = activeSucursal;
-  const assignedRegionRef = useRef<'Occidente' | 'Valencia' | null>(assignedRegion);
+  const assignedRegionRef = useRef<'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null>(assignedRegion);
   assignedRegionRef.current = assignedRegion;
+  const assignedRegionCodesRef = useRef<AllowedRegionCode[]>(assignedRegionCodes);
+  assignedRegionCodesRef.current = assignedRegionCodes;
   const requiresSucursalSelectionRef = useRef<boolean>(requiresSucursalSelection);
   requiresSucursalSelectionRef.current = requiresSucursalSelection;
 
@@ -960,17 +1030,23 @@ export const AppProvider: React.FC<{
   );
 
   // Fuente Única de Verdad de Maestros (`public."Clientes"`, vendedores, cadenas, zonas)
-  // Acotada automáticamente a las 3 regiones reales (`ALL`, `OCCIDENTE`, `CENTRO`, `ANDES`)
+  // Acotada automáticamente a las regiones permitidas (`ALL`, `ASSIGNED` -> `regions[]`, o región puntual)
   const filtrosClientesPorSede = useMemo(() => {
     if (activeRegionScope === 'ALL') return undefined;
+    if (activeRegionScope === 'ASSIGNED') {
+      return assignedRegionCodes.length > 0 ? { regions: assignedRegionCodes } : undefined;
+    }
     if (activeRegionScope) return { region: activeRegionScope };
     return activeSucursal ? { sucursal: activeSucursal } : undefined;
-  }, [activeRegionScope, activeSucursal]);
+  }, [activeRegionScope, assignedRegionCodes, activeSucursal]);
   const filtrosVendedoresPorSede = useMemo(() => {
     if (activeRegionScope === 'ALL') return undefined;
+    if (activeRegionScope === 'ASSIGNED') {
+      return assignedRegionCodes.length > 0 ? { regions: assignedRegionCodes } : undefined;
+    }
     if (activeRegionScope) return { region: activeRegionScope };
     return activeSucursal ? { sucursal: activeSucursal } : undefined;
-  }, [activeRegionScope, activeSucursal]);
+  }, [activeRegionScope, assignedRegionCodes, activeSucursal]);
 
   const rawMasterData = useMasterData({
     filtrosClientes: filtrosClientesPorSede,
@@ -984,7 +1060,12 @@ export const AppProvider: React.FC<{
   });
 
   const isRegionalUserWithoutRegion = Boolean(
-    verifiedProfile && !canSwitchSucursal && !lockedRegionalSucursal && !verifiedRegionId && !lockedRegionalOfficial
+    verifiedProfile &&
+      !canSwitchSucursal &&
+      assignedRegionCodes.length === 0 &&
+      !lockedRegionalSucursal &&
+      !verifiedRegionId &&
+      !lockedRegionalOfficial
   );
 
   const masterEntities = useMasterEntitiesSync({
@@ -1083,6 +1164,8 @@ export const AppProvider: React.FC<{
     try {
       const bundle = await fetchAllModule1FromSupabase(undefined, {
         assignedRegion: assignedRegionRef.current,
+        assignedRegions:
+          assignedRegionCodesRef.current.length > 0 ? assignedRegionCodesRef.current : null,
       });
       setModule1Bundle(bundle);
 
@@ -1670,29 +1753,62 @@ export const AppProvider: React.FC<{
       prevVerifiedUserIdRef.current = nextUserId;
       setSelectedNationalSucursal(null);
       setSelectedNationalRegionScope(canSwitchSucursal ? 'ALL' : null);
+      setSelectedAssignedRegionScope('ASSIGNED');
       setActiveClientSucursalHeader(canSwitchSucursal ? null : lockedRegionalSucursal);
       purgeRegionalStateCache();
     }
   }, [verifiedProfile?.userId, canSwitchSucursal, lockedRegionalSucursal, purgeRegionalStateCache]);
 
   const setActiveRegionScope = useCallback(
-    (nextRegion: AllowedRegionCode | 'ALL') => {
+    (nextRegion: AllowedRegionCode | 'ALL' | 'ASSIGNED') => {
       if (!canSwitchSucursal) {
+        // Usuario multi-región (ej. María -> ['CENTRO', 'ANDES']): solo puede elegir 'ASSIGNED' o una de sus regiones asignadas.
+        if (!canSwitchAmongAssignedRegions) {
+          return;
+        }
+        if (nextRegion === 'ALL') {
+          return;
+        }
+        if (nextRegion !== 'ASSIGNED' && !assignedRegionCodes.includes(nextRegion)) {
+          return;
+        }
+        const compatSucursal: OperativeSucursal | null =
+          nextRegion === 'CENTRO' ? 'CENTRO' : nextRegion === 'OCCIDENTE' ? 'ZULIA' : null;
+        setActiveClientSucursalHeader(compatSucursal);
+        activeSucursalRef.current = compatSucursal;
+        const isSameChoice = selectedAssignedRegionScope === nextRegion;
+        setSelectedAssignedRegionScope(nextRegion);
+
+        purgeRegionalStateCache();
+        void refreshSupabaseData();
+        void refreshFinancialData();
+        void refreshAuditLogs();
+        void refreshDiscrepancyAlerts();
+        if (isSameChoice) {
+          void rawMasterData.refrescar().finally(() => {
+            setIsMasterCachePurged(false);
+          });
+        }
+        void masterEntities.refresh(true);
+        void solicitudesContraloria.refreshSolicitudes();
+        void degustacionNotifications.reloadNotifications();
         return;
       }
+
+      const effectiveNext: AllowedRegionCode | 'ALL' = nextRegion === 'ASSIGNED' ? 'ALL' : nextRegion;
       const compatSucursal: OperativeSucursal | null =
-        nextRegion === 'OCCIDENTE'
+        effectiveNext === 'OCCIDENTE'
           ? 'ZULIA'
-          : nextRegion === 'CENTRO'
+          : effectiveNext === 'CENTRO'
             ? 'CENTRO'
             : null;
 
       setActiveClientSucursalHeader(compatSucursal);
       activeSucursalRef.current = compatSucursal;
       requiresSucursalSelectionRef.current = false;
-      const isSameRegion = selectedNationalRegionScope === nextRegion;
+      const isSameRegion = selectedNationalRegionScope === effectiveNext;
       setSelectedNationalSucursal(compatSucursal);
-      setSelectedNationalRegionScope(nextRegion);
+      setSelectedNationalRegionScope(effectiveNext);
 
       purgeRegionalStateCache();
 
@@ -1711,6 +1827,9 @@ export const AppProvider: React.FC<{
     },
     [
       canSwitchSucursal,
+      canSwitchAmongAssignedRegions,
+      assignedRegionCodes,
+      selectedAssignedRegionScope,
       selectedNationalRegionScope,
       purgeRegionalStateCache,
       refreshSupabaseData,
@@ -2968,7 +3087,10 @@ export const AppProvider: React.FC<{
         setCurrentRole,
         role,
         assignedRegion,
+        assignedRegions,
+        assignedRegionCodes,
         isRegionalRestricted,
+        canSwitchAmongAssignedRegions,
         verifiedIamRole,
         verifiedSucursal,
         verifiedRegionId,

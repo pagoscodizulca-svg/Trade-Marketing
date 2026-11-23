@@ -88,6 +88,8 @@ export interface MasterEntitiesSyncPanelQaOverride {
   userEmail?: string;
   sucursal: SucursalCodigo | null;
   regionId?: string | null;
+  assignedRegionCodes?: AllowedRegionCode[];
+  assignedRegions?: string[];
   regiones: RegionMaestra[];
   productos: ProductoMaestro[];
   supervisores: SupervisorMaestro[];
@@ -178,6 +180,17 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     qaOverride !== undefined ? (qaOverride.regionId ?? null) : (appCtx?.verifiedRegionId ?? null);
 
   const isSuperAdmin = isSuperAdminRole(iamRole);
+  const assignedRegionCodes: AllowedRegionCode[] = useMemo(() => {
+    if (qaOverride?.assignedRegionCodes) return qaOverride.assignedRegionCodes;
+    return qaOverride !== undefined ? [] : (appCtx?.assignedRegionCodes ?? []);
+  }, [qaOverride, appCtx?.assignedRegionCodes]);
+
+  const assignedRegions: string[] = useMemo(() => {
+    if (qaOverride?.assignedRegions) return qaOverride.assignedRegions;
+    return qaOverride !== undefined ? [] : (appCtx?.assignedRegions ?? []);
+  }, [qaOverride, appCtx?.assignedRegions]);
+
+  const isMultiRegionRestricted = !isSuperAdmin && assignedRegionCodes.length >= 2;
   const profileLike = { iamRole };
   const canEditProducts = canManageNationalProducts(profileLike);
   const canEditRegiones = canManageRegiones(profileLike);
@@ -209,7 +222,20 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
   const [scopeFilter, setScopeFilter] = useState<MasterRegionScopeFilter>(() => {
     if (qaOverride?.initialScope) return qaOverride.initialScope;
     if (isSuperAdmin) {
-      return appCtx?.activeRegionScope ?? 'ALL';
+      const ctxScope = appCtx?.activeRegionScope;
+      return ctxScope && ctxScope !== 'ASSIGNED' ? ctxScope : 'ALL';
+    }
+    if (isMultiRegionRestricted) {
+      const ctxScope = appCtx?.activeRegionScope;
+      if (
+        ctxScope &&
+        ctxScope !== 'ALL' &&
+        ctxScope !== 'ASSIGNED' &&
+        assignedRegionCodes.includes(ctxScope)
+      ) {
+        return ctxScope;
+      }
+      return 'ALL';
     }
     const official = normalizeRegionName(verifiedSucursal);
     return official ?? ((verifiedSucursal as SucursalMaestro) || 'OCCIDENTE');
@@ -221,12 +247,23 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
   const [assignDrafts, setAssignDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (qaOverride !== undefined || !isSuperAdmin) return;
-    if (appCtx?.activeRegionScope && scopeFilter !== 'UNASSIGNED') {
-      setScopeFilter(appCtx.activeRegionScope);
+    if (qaOverride !== undefined) return;
+    const ctxScope = appCtx?.activeRegionScope;
+    if (isSuperAdmin) {
+      if (ctxScope && scopeFilter !== 'UNASSIGNED') {
+        setScopeFilter(ctxScope === 'ASSIGNED' ? 'ALL' : ctxScope);
+      }
+      return;
+    }
+    if (isMultiRegionRestricted) {
+      if (ctxScope === 'ASSIGNED' || ctxScope === 'ALL' || !ctxScope) {
+        setScopeFilter('ALL');
+      } else if (assignedRegionCodes.includes(ctxScope)) {
+        setScopeFilter(ctxScope);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appCtx?.activeRegionScope, isSuperAdmin, qaOverride]);
+  }, [appCtx?.activeRegionScope, isSuperAdmin, isMultiRegionRestricted, assignedRegionCodes, qaOverride]);
 
   useEffect(() => {
     setTablePage(0);
@@ -277,8 +314,18 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     [regiones]
   );
 
+  const multiRegionDisplayName = useMemo(() => {
+    if (assignedRegions.length > 0) return assignedRegions.join(' y ');
+    return assignedRegionCodes
+      .map((c) => (c === 'CENTRO' ? 'Centro' : c === 'ANDES' ? 'Andes' : 'Occidente'))
+      .join(' y ');
+  }, [assignedRegions, assignedRegionCodes]);
+
   const lockedRegionalLabel = useMemo(() => {
-    if (appCtx?.assignedRegion) {
+    if (isMultiRegionRestricted) {
+      return `Regiones: ${multiRegionDisplayName}`;
+    }
+    if (qaOverride === undefined && appCtx?.assignedRegion) {
       return `Región: ${appCtx.assignedRegion}`;
     }
     if (verifiedRegionId && regionesById.has(verifiedRegionId)) {
@@ -292,7 +339,15 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
       return SUCURSAL_LABELS[verifiedSucursal];
     }
     return 'Región Asignada';
-  }, [appCtx?.assignedRegion, verifiedRegionId, verifiedSucursal, regionesById]);
+  }, [
+    isMultiRegionRestricted,
+    multiRegionDisplayName,
+    qaOverride,
+    appCtx?.assignedRegion,
+    verifiedRegionId,
+    verifiedSucursal,
+    regionesById,
+  ]);
 
   const quarantinedCounts = useMemo(() => {
     const cliQ = clientes.filter((c) => isRecordQuarantined(c)).length;
@@ -314,6 +369,17 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     // Regla fail-closed en defensa en profundidad: un usuario no-super_admin jamás ve filas sin región
     if (!isSuperAdmin) {
       if (isRecordQuarantined(row)) return false;
+      if (isMultiRegionRestricted) {
+        const code = resolveRegionCode(row, regionesById);
+        const rowOfficial = normalizeRegionName(code);
+        if (!rowOfficial || !assignedRegionCodes.includes(rowOfficial)) {
+          return false;
+        }
+        if (scopeFilter === 'ALL') return true;
+        if (scopeFilter === 'UNASSIGNED') return false;
+        const targetOfficial = normalizeRegionName(scopeFilter);
+        return Boolean(targetOfficial && rowOfficial === targetOfficial);
+      }
       if (verifiedRegionId && row.region_id) {
         return row.region_id === verifiedRegionId;
       }
@@ -406,6 +472,10 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     const base = isSuperAdmin
       ? regiones
       : regiones.filter((r) => {
+          if (isMultiRegionRestricted) {
+            const officialReg = normalizeRegionName(r.codigo);
+            return Boolean(officialReg && assignedRegionCodes.includes(officialReg));
+          }
           if (verifiedRegionId) return r.id === verifiedRegionId;
           if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
             const officialReg = normalizeRegionName(r.codigo);
@@ -419,7 +489,29 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
         });
     if (!q) return base;
     return base.filter((r) => matchesCommercialSearchText(`${r.codigo} ${r.nombre}`, q));
-  }, [isSuperAdmin, regiones, verifiedRegionId, verifiedSucursal, q]);
+  }, [isSuperAdmin, isMultiRegionRestricted, assignedRegionCodes, regiones, verifiedRegionId, verifiedSucursal, q]);
+
+  const authorizedRegionesForForms = useMemo(() => {
+    if (isSuperAdmin) return regiones;
+    if (isMultiRegionRestricted) {
+      return regiones.filter((r) => {
+        const officialReg = normalizeRegionName(r.codigo);
+        return Boolean(officialReg && assignedRegionCodes.includes(officialReg));
+      });
+    }
+    return regiones.filter((r) => {
+      if (verifiedRegionId) return r.id === verifiedRegionId;
+      if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
+        const officialReg = normalizeRegionName(r.codigo);
+        const officialVer = normalizeRegionName(verifiedSucursal);
+        return (
+          normalizeSucursalCodigo(r.codigo) === verifiedSucursal ||
+          Boolean(officialReg && officialVer && officialReg === officialVer)
+        );
+      }
+      return false;
+    });
+  }, [isSuperAdmin, isMultiRegionRestricted, assignedRegionCodes, regiones, verifiedRegionId, verifiedSucursal]);
 
   const pagedProductos = useMemo(
     () =>
@@ -441,13 +533,14 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
 
   // Supervisores compatibles con la región elegida en el modal de Promotora (evita cruce en UI)
   const sameRegionSupervisores = useMemo(() => {
-    const targetRegionId = isSuperAdmin ? promRegionId : verifiedRegionId;
+    const targetRegionId =
+      isSuperAdmin || isMultiRegionRestricted ? promRegionId : verifiedRegionId;
     return supervisores.filter((s) => {
       if (!s.activo) return false;
       if (!targetRegionId) return false;
       return s.region_id === targetRegionId;
     });
-  }, [supervisores, isSuperAdmin, promRegionId, verifiedRegionId]);
+  }, [supervisores, isSuperAdmin, isMultiRegionRestricted, promRegionId, verifiedRegionId]);
 
   const flashNotice = (kind: 'ok' | 'err', text: string) => {
     setNotice({ kind, text });
@@ -562,7 +655,14 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     e.preventDefault();
     setBusyKey('save_sup');
     try {
-      const targetRegion = regionesById.get(supRegionId);
+      const effectiveRegionId = isSuperAdmin
+        ? supRegionId || null
+        : isMultiRegionRestricted
+          ? authorizedRegionesForForms.some((r) => r.id === supRegionId)
+            ? supRegionId
+            : (authorizedRegionesForForms[0]?.id ?? verifiedRegionId)
+          : verifiedRegionId;
+      const targetRegion = effectiveRegionId ? regionesById.get(effectiveRegionId) : undefined;
       const sucursal = targetRegion
         ? (normalizeSucursalCodigo(targetRegion.codigo) as OperativeSucursal | null)
         : isOperativeSucursal(verifiedSucursal)
@@ -575,7 +675,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
         email: supEmail || null,
         telefono: supTelefono || null,
         zona: supZona || null,
-        region_id: isSuperAdmin ? supRegionId || null : verifiedRegionId,
+        region_id: effectiveRegionId,
         sucursal,
       });
       setSupModalOpen(false);
@@ -593,21 +693,34 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     setPromModalError(null);
     setBusyKey('save_prom');
     try {
-      const targetRegion = regionesById.get(isSuperAdmin ? promRegionId : (verifiedRegionId || ''));
+      const effectiveRegionId = isSuperAdmin
+        ? promRegionId || null
+        : isMultiRegionRestricted
+          ? authorizedRegionesForForms.some((r) => r.id === promRegionId)
+            ? promRegionId
+            : (authorizedRegionesForForms[0]?.id ?? verifiedRegionId)
+          : verifiedRegionId;
+      const targetRegion = effectiveRegionId ? regionesById.get(effectiveRegionId) : undefined;
       const sucursal = targetRegion
         ? (normalizeSucursalCodigo(targetRegion.codigo) as OperativeSucursal | null)
         : isOperativeSucursal(verifiedSucursal)
           ? verifiedSucursal
           : null;
-      const officialRegionLabel: 'Occidente' | 'Valencia' | undefined = !isSuperAdmin
-        ? (appCtx?.assignedRegion ?? (sucursal === 'VALENCIA' || sucursal === 'CENTRO' ? 'Valencia' : 'Occidente'))
-        : targetRegion
-          ? (normalizeRegionName(targetRegion.codigo) === 'CENTRO' ? 'Valencia' : 'Occidente')
-          : sucursal === 'VALENCIA' || sucursal === 'CENTRO'
-            ? 'Valencia'
-            : sucursal === 'ZULIA'
+      const targetOfficialCode = targetRegion ? normalizeRegionName(targetRegion.codigo) : null;
+      const officialRegionLabel: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | undefined =
+        targetOfficialCode === 'ANDES'
+          ? 'Andes'
+          : targetOfficialCode === 'CENTRO'
+            ? 'Centro'
+            : targetOfficialCode === 'OCCIDENTE'
               ? 'Occidente'
-              : undefined;
+              : !isSuperAdmin && appCtx?.assignedRegion
+                ? appCtx.assignedRegion
+                : sucursal === 'VALENCIA' || sucursal === 'CENTRO'
+                  ? 'Valencia'
+                  : sucursal === 'ZULIA'
+                    ? 'Occidente'
+                    : undefined;
       await guardarPromotoraMaestra({
         id: editingPromId,
         nombre_completo: promNombre,
@@ -617,7 +730,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
         direccion: promCiudad || null,
         categoria: promCategoria,
         region: officialRegionLabel,
-        region_id: isSuperAdmin ? promRegionId || null : verifiedRegionId,
+        region_id: effectiveRegionId,
         sucursal,
         supervisor_id: promSupervisorId || null,
       });
@@ -854,6 +967,51 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
               </button>
             )}
           </div>
+        ) : isMultiRegionRestricted ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <div
+              data-testid="master-locked-region-badge"
+              className="inline-flex items-center gap-2 text-xs font-bold text-white"
+            >
+              <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+              <span>{lockedRegionalLabel}</span>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#121215] border border-zinc-700 text-zinc-300">
+                Aislamiento RLS estricto
+              </span>
+            </div>
+            <select
+              data-testid="master-multiregion-scope-select"
+              aria-label="Filtrar entidades maestras entre mis regiones asignadas"
+              value={scopeFilter}
+              onChange={(e) => {
+                const next = e.target.value as MasterRegionScopeFilter;
+                if (next !== 'ALL') {
+                  const normNext = normalizeRegionName(next);
+                  if (!normNext || !assignedRegionCodes.includes(normNext)) return;
+                }
+                setScopeFilter(next);
+                if (qaOverride === undefined && appCtx?.setActiveRegionScope) {
+                  if (next === 'ALL') {
+                    appCtx.setActiveRegionScope('ASSIGNED');
+                  } else if (isAllowedRegionCode(next) && assignedRegionCodes.includes(next)) {
+                    appCtx.setActiveRegionScope(next);
+                  }
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-[#121215] border border-zinc-700 text-xs font-bold text-white focus:outline-none focus:border-red-500 cursor-pointer"
+            >
+              <option value="ALL">{multiRegionDisplayName} (Mis Regiones)</option>
+              {authorizedRegionesForForms.map((reg) => {
+                const code = normalizeRegionName(reg.codigo);
+                if (!code || !assignedRegionCodes.includes(code)) return null;
+                return (
+                  <option key={reg.id} value={code}>
+                    Región {reg.nombre}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
         ) : (
           <div
             data-testid="master-locked-region-badge"
@@ -971,7 +1129,11 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                 setSupEmail('');
                 setSupTelefono('');
                 setSupZona('');
-                setSupRegionId(verifiedRegionId || regiones[0]?.id || '');
+                setSupRegionId(
+                  isSuperAdmin
+                    ? verifiedRegionId || regiones[0]?.id || ''
+                    : authorizedRegionesForForms[0]?.id || verifiedRegionId || ''
+                );
                 setSupModalOpen(true);
               }}
               className="px-3 py-1.5 rounded-xl bg-[#DC2626] hover:bg-red-500 text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
@@ -991,7 +1153,11 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                 setPromTelefono('');
                 setPromCiudad('');
                 setPromCategoria('Fijas');
-                setPromRegionId(verifiedRegionId || regiones[0]?.id || '');
+                setPromRegionId(
+                  isSuperAdmin
+                    ? verifiedRegionId || regiones[0]?.id || ''
+                    : authorizedRegionesForForms[0]?.id || verifiedRegionId || ''
+                );
                 setPromSupervisorId('');
                 setPromModalOpen(true);
               }}
@@ -1717,15 +1883,16 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
               placeholder="Teléfono"
               className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
             />
-            {isSuperAdmin && (
+            {(isSuperAdmin || isMultiRegionRestricted) && (
               <select
                 required
+                data-testid="select-supervisor-region"
                 value={supRegionId}
                 onChange={(e) => setSupRegionId(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
               >
                 <option value="">Selecciona región obligatoria...</option>
-                {regiones.map((r) => (
+                {authorizedRegionesForForms.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.nombre}
                   </option>
@@ -1836,9 +2003,10 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                 className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
               />
             </div>
-            {isSuperAdmin && (
+            {(isSuperAdmin || isMultiRegionRestricted) && (
               <select
-                required={!editingPromId && regiones.length > 0}
+                required={!editingPromId && authorizedRegionesForForms.length > 0}
+                data-testid="select-promotora-region"
                 value={promRegionId}
                 onChange={(e) => {
                   setPromRegionId(e.target.value);
@@ -1847,7 +2015,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                 className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
               >
                 <option value="">Selecciona región...</option>
-                {regiones.map((r) => (
+                {authorizedRegionesForForms.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.nombre}
                   </option>

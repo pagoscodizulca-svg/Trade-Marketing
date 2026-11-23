@@ -41,6 +41,68 @@ export type OperativeSucursal = (typeof OPERATIVE_SUCURSALES)[number];
 
 export type ServerSucursalCodigo = OperativeSucursal | 'GLOBAL';
 
+export type ServerAllowedRegionCode = 'OCCIDENTE' | 'CENTRO' | 'ANDES';
+
+export function normalizeServerAllowedRegionToken(raw: unknown): ServerAllowedRegionCode | null {
+  const norm = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  if (!norm || norm === 'GLOBAL' || norm === 'TODAS' || norm === 'ALL') return null;
+  const clean = norm.replace(/^(REGION|REGIÓN|SUCURSAL|SEDE)\s+/i, '').trim();
+  if (
+    clean === 'OCCIDENTE' ||
+    clean === 'ZULIA' ||
+    clean === 'FALCON' ||
+    clean === 'TRUJILLO' ||
+    clean === 'MARACAIBO'
+  ) {
+    return 'OCCIDENTE';
+  }
+  if (
+    clean === 'CENTRO' ||
+    clean === 'VALENCIA' ||
+    clean === 'CARABOBO' ||
+    clean === 'ARAGUA' ||
+    clean === 'MARACAY' ||
+    clean === 'CAPITAL' ||
+    clean === 'CARACAS' ||
+    clean === 'DISTRITO CAPITAL'
+  ) {
+    return 'CENTRO';
+  }
+  if (clean === 'ANDES' || clean === 'TACHIRA' || clean === 'MERIDA' || clean === 'BARINAS') {
+    return 'ANDES';
+  }
+  return null;
+}
+
+export function normalizeServerAllowedRegionList(
+  rawList: unknown,
+  fallbackSingle?: unknown
+): ServerAllowedRegionCode[] {
+  const result: ServerAllowedRegionCode[] = [];
+  const pushToken = (val: unknown) => {
+    const token = normalizeServerAllowedRegionToken(val);
+    if (token && !result.includes(token)) {
+      result.push(token);
+    }
+  };
+
+  if (Array.isArray(rawList)) {
+    for (const item of rawList) pushToken(item);
+  } else if (typeof rawList === 'string' && rawList.trim()) {
+    for (const part of rawList.split(',')) pushToken(part);
+  }
+
+  if (result.length === 0 && fallbackSingle !== undefined && fallbackSingle !== null) {
+    pushToken(fallbackSingle);
+  }
+
+  return result;
+}
+
 export const CORPORATE_MANAGED_ROLES = new Set([
   'super_admin',
   'coordinacion',
@@ -211,10 +273,18 @@ function normalizeServerRoleAlias(rawRole: unknown): string {
 function resolveSafeActiveSucursalHeaderForActor(
   req: Request,
   isGlobalActor: boolean,
-  verifiedSucursal: ServerSucursalCodigo | null
+  verifiedSucursal: ServerSucursalCodigo | null,
+  allowedRegions?: readonly ServerAllowedRegionCode[] | null
 ): OperativeSucursal | null {
   if (isGlobalActor) {
     return normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req));
+  }
+  const requested = normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req));
+  if (requested && Array.isArray(allowedRegions) && allowedRegions.length > 0) {
+    const requestedRegion = normalizeServerAllowedRegionToken(requested);
+    if (requestedRegion && allowedRegions.includes(requestedRegion)) {
+      return requested;
+    }
   }
   return isOperativeServerSucursal(verifiedSucursal) ? verifiedSucursal : null;
 }
@@ -394,11 +464,13 @@ export async function resolveEffectiveServerAppRole(
   accessToken: string,
   jwtAppRole: string,
   jwtSucursal?: unknown,
-  userEmail?: unknown
+  userEmail?: unknown,
+  jwtRegions?: unknown
 ): Promise<{
   role: string;
   isActive: boolean;
   sucursal: ServerSucursalCodigo | null;
+  allowedRegions?: ServerAllowedRegionCode[] | null;
   staffId?: string | null;
 }> {
   const canonicalEmail = normalizeCanonicalEmail(userEmail);
@@ -468,7 +540,35 @@ export async function resolveEffectiveServerAppRole(
         staffId = promFallback.staffId;
       }
 
-      return { role: profileRole, isActive: true, sucursal, staffId };
+      const isStrictGlobalRole =
+        profileRole === 'super_admin' ||
+        profileRole === 'superadmin' ||
+        profileRole === 'admin' ||
+        profileRole === 'gerencia' ||
+        profileRole === 'gerente_admin';
+      const resolvedRegions = isStrictGlobalRole
+        ? null
+        : normalizeServerAllowedRegionList(
+            profileData.regiones_asignadas ?? jwtRegions,
+            profileData.region ?? sucursal ?? jwtSucursal
+          );
+      if (!sucursal && resolvedRegions && resolvedRegions.length > 0) {
+        sucursal =
+          resolvedRegions[0] === 'OCCIDENTE'
+            ? 'ZULIA'
+            : resolvedRegions[0] === 'CENTRO'
+              ? 'CENTRO'
+              : null;
+      }
+
+      return {
+        role: profileRole,
+        isActive: true,
+        sucursal,
+        allowedRegions:
+          resolvedRegions && resolvedRegions.length > 0 ? resolvedRegions : null,
+        staffId,
+      };
     }
   }
 
@@ -482,23 +582,45 @@ export async function resolveEffectiveServerAppRole(
   ) {
     const promFallback = await resolvePromotoraByCanonicalEmail(lookup, canonicalEmail);
     if (promFallback.explicitlyInactive) {
-      return { role: '', isActive: false, sucursal: null };
+      return { role: '', isActive: false, sucursal: null, allowedRegions: null };
     }
     if (promFallback.matched) {
+      const promSucursal =
+        promFallback.sucursal ?? sanitizeSucursalForServerRole('promotora', jwtSucursal);
+      const promRegions = normalizeServerAllowedRegionList(jwtRegions, promSucursal);
       return {
         role: 'promotora',
         isActive: true,
-        sucursal:
-          promFallback.sucursal ?? sanitizeSucursalForServerRole('promotora', jwtSucursal),
+        sucursal: promSucursal,
+        allowedRegions: promRegions.length > 0 ? promRegions : null,
         staffId: promFallback.staffId,
       };
     }
   }
 
+  const jwtSanitizedSucursal = sanitizeSucursalForServerRole(normalizedJwtRole, jwtSucursal);
+  const isStrictJwtGlobal =
+    normalizedJwtRole === 'super_admin' ||
+    normalizedJwtRole === 'superadmin' ||
+    normalizedJwtRole === 'admin' ||
+    normalizedJwtRole === 'gerencia' ||
+    normalizedJwtRole === 'gerente_admin';
+  const jwtAllowedRegions = isStrictJwtGlobal
+    ? null
+    : normalizeServerAllowedRegionList(jwtRegions, jwtSanitizedSucursal ?? jwtSucursal);
+
   return {
     role: normalizedJwtRole,
     isActive: true,
-    sucursal: sanitizeSucursalForServerRole(normalizedJwtRole, jwtSucursal),
+    sucursal:
+      jwtSanitizedSucursal ??
+      (jwtAllowedRegions && jwtAllowedRegions[0] === 'OCCIDENTE'
+        ? 'ZULIA'
+        : jwtAllowedRegions && jwtAllowedRegions[0] === 'CENTRO'
+          ? 'CENTRO'
+          : null),
+    allowedRegions:
+      jwtAllowedRegions && jwtAllowedRegions.length > 0 ? jwtAllowedRegions : null,
   };
 }
 
@@ -507,6 +629,8 @@ export interface AuthenticatedServerUser {
   email: string;
   appRole: string;
   sucursal?: ServerSucursalCodigo | null;
+  /** Lista normalizada de regiones permitidas (`['CENTRO', 'ANDES']`, `['OCCIDENTE']`, o `null` para Global) */
+  allowedRegions?: ServerAllowedRegionCode[] | null;
   activeSucursalHeader?: OperativeSucursal | null;
   staffId?: string | null;
   isSuperAdmin?: boolean;
@@ -751,7 +875,8 @@ export async function requireFdvOrTradeAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -779,10 +904,12 @@ export async function requireFdvOrTradeAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      allowedRegions: isGlobalActor ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isGlobalActor,
-        effective.sucursal
+        effective.sucursal,
+        effective.allowedRegions
       ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
@@ -855,7 +982,8 @@ export async function requireCadenaLogoViewerAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -883,10 +1011,12 @@ export async function requireCadenaLogoViewerAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      allowedRegions: isGlobalActor ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isGlobalActor,
-        effective.sucursal
+        effective.sucursal,
+        effective.allowedRegions
       ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
@@ -966,7 +1096,8 @@ export async function requireIncidenciaActorAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -994,10 +1125,12 @@ export async function requireIncidenciaActorAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      allowedRegions: isGlobalActor ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isGlobalActor,
-        effective.sucursal
+        effective.sucursal,
+        effective.allowedRegions
       ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       isReadOnlyViewer:
@@ -1071,7 +1204,8 @@ export async function requireTorreControlAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -1099,10 +1233,12 @@ export async function requireTorreControlAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      allowedRegions: isGlobalActor ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isGlobalActor,
-        effective.sucursal
+        effective.sucursal,
+        effective.allowedRegions
       ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
@@ -1185,7 +1321,8 @@ export async function requireMasterDataReaderAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -1212,10 +1349,12 @@ export async function requireMasterDataReaderAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
+      allowedRegions: isGlobalActor ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isGlobalActor,
-        effective.sucursal
+        effective.sucursal,
+        effective.allowedRegions
       ),
       isSuperAdmin,
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
@@ -1399,7 +1538,8 @@ export async function requireCoordinatorOrAdminAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -1418,10 +1558,12 @@ export async function requireCoordinatorOrAdminAuth(
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: resolvedSucursal,
+      allowedRegions: isSuperAdmin || resolvedSucursal === 'GLOBAL' ? null : (effective.allowedRegions ?? null),
       activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
         req,
         isSuperAdmin || resolvedSucursal === 'GLOBAL',
-        resolvedSucursal
+        resolvedSucursal,
+        effective.allowedRegions
       ),
       isSuperAdmin,
       isCoordinatorOrAdmin: true,
@@ -1495,7 +1637,8 @@ export async function requireAttendanceActorAuth(
       token,
       jwtAppRole,
       appMeta.sucursal ?? appMeta.region,
-      data.user.email
+      data.user.email,
+      appMeta.regions
     );
     const appRole = effective.role;
 
@@ -1515,10 +1658,12 @@ export async function requireAttendanceActorAuth(
         email: canonicalEmail,
         appRole,
         sucursal: resolvedSucursal,
+        allowedRegions: isSuperAdmin || resolvedSucursal === 'GLOBAL' ? null : (effective.allowedRegions ?? null),
         activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
           req,
           isSuperAdmin || resolvedSucursal === 'GLOBAL',
-          resolvedSucursal
+          resolvedSucursal,
+          effective.allowedRegions
         ),
         staffId:
           typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id)
