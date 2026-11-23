@@ -32,6 +32,7 @@ import { hasAssignedRegionalScope } from '../../utils/permissions';
 import { purgeAllSessionCaches } from '../../services/sessionCacheHygiene';
 import { clearMasterCatalogCaches } from '../../services/masterCatalogSyncService';
 import { clearMasterDataCaches } from '../../services/masterDataSyncService';
+import { clearBcvRateCache } from '../../services/bcvRateService';
 import { UnassignedRegionGate } from './UnassignedRegionGate';
 
 interface TradeAuthGateProps {
@@ -161,6 +162,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
       if (event === 'SIGNED_OUT' || !session) {
         clearMasterDataCaches();
         clearMasterCatalogCaches();
+        clearBcvRateCache();
         void purgeAllSessionCaches({
           reason: event === 'SIGNED_OUT' ? 'sign_out' : 'token_expired',
           preserveAuthSession: false,
@@ -173,6 +175,7 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
       if (event === 'SIGNED_IN') {
         clearMasterDataCaches();
         clearMasterCatalogCaches();
+        clearBcvRateCache();
       }
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(session);

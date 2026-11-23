@@ -57,6 +57,9 @@ import { defaultShiftLinksHandlers } from './src/server/shiftLinksHandler';
 import { defaultTastingAlertDispatcher } from './src/server/tastingAlertDispatcher';
 import { defaultPromotorasHandlers } from './src/server/promotorasHandler';
 import { defaultMasterDataErpHandlers } from './src/server/masterDataErpHandler';
+import { defaultBcvRateHandlers } from './src/server/bcvRateHandler';
+import { defaultPriceOcrHandlers } from './src/server/priceOcrHandler';
+import { defaultPriceAlertsHandlers } from './src/server/priceAlertsHandler';
 import {
   createGracefulShutdownController,
   registerProcessShutdownHandlers,
@@ -689,6 +692,91 @@ export function registerMasterDataErpRoutes(
 }
 
 registerMasterDataErpRoutes(app);
+
+// ============================================================================
+// 1.N. COMPARATIVA DE PRECIOS AVANZADA: TASA BCV OFICIAL, OCR IA (GEMINI) Y ALERTAS > X%
+// ============================================================================
+const bcvRateReadLimiter = createRateLimiter({
+  name: 'bcv-rate-read',
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+const bcvRateManualWriteLimiter = createRateLimiter({
+  name: 'bcv-rate-manual-write',
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 15,
+});
+
+const priceOcrPerUserRateLimiter = createRateLimiter({
+  name: 'price-tag-ocr-user',
+  windowMs: 10 * 60 * 1000,
+  maxRequests: 20,
+});
+
+const priceAlertsRateLimiter = createRateLimiter({
+  name: 'price-alerts-api',
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+export interface PriceIntelligenceRouteDeps {
+  bcvReadLimiter: express.RequestHandler;
+  bcvWriteLimiter: express.RequestHandler;
+  ocrRateLimiter: express.RequestHandler;
+  alertsRateLimiter: express.RequestHandler;
+  actorAuth: express.RequestHandler;
+  coordOrAdminAuth: express.RequestHandler;
+  superAdminAuth: express.RequestHandler;
+  getBcvHandler: express.RequestHandler;
+  setManualBcvHandler: express.RequestHandler;
+  ocrHandler: express.RequestHandler;
+  listAlertsHandler: express.RequestHandler;
+  updateAlertHandler: express.RequestHandler;
+  upsertConfigHandler: express.RequestHandler;
+}
+
+export function registerPriceIntelligenceRoutes(
+  targetApp: express.Express,
+  deps: PriceIntelligenceRouteDeps = {
+    bcvReadLimiter: bcvRateReadLimiter,
+    bcvWriteLimiter: bcvRateManualWriteLimiter,
+    ocrRateLimiter: priceOcrPerUserRateLimiter,
+    alertsRateLimiter: priceAlertsRateLimiter,
+    actorAuth: requireAttendanceActorAuth,
+    coordOrAdminAuth: requireCoordinatorOrAdminAuth,
+    superAdminAuth: requireSuperAdminAuth,
+    getBcvHandler: defaultBcvRateHandlers.handleGetBcvRate,
+    setManualBcvHandler: defaultBcvRateHandlers.handleSetManualBcvRate,
+    ocrHandler: defaultPriceOcrHandlers.handleOcrPriceTag,
+    listAlertsHandler: defaultPriceAlertsHandlers.handleListPriceAlerts,
+    updateAlertHandler: defaultPriceAlertsHandlers.handleUpdatePriceAlertStatus,
+    upsertConfigHandler: defaultPriceAlertsHandlers.handleUpsertPriceAlertConfig,
+  }
+): void {
+  // Tasa BCV oficial cacheada + respaldo + contingencia manual (solo Admin Global)
+  targetApp.get('/api/tasa-bcv', deps.bcvReadLimiter, deps.actorAuth, deps.getBcvHandler);
+  targetApp.post('/api/tasa-bcv/manual', deps.bcvWriteLimiter, deps.superAdminAuth, deps.setManualBcvHandler);
+
+  // Lectura OCR IA de hablador de precio (JWT -> rate limit estricto por usuario -> binario máx 5MB)
+  targetApp.post(
+    ['/api/precios/ocr-hablador', '/api/ocr-hablador-precio'],
+    deps.actorAuth,
+    deps.ocrRateLimiter,
+    express.raw({
+      type: ['image/jpeg', 'image/png', 'image/webp', 'application/octet-stream', '*/*'],
+      limit: '5.5mb',
+    }),
+    deps.ocrHandler
+  );
+
+  // Alertas automáticas de caída de precio (> X%) y configuración de umbrales por región
+  targetApp.get('/api/precios/alertas', deps.alertsRateLimiter, deps.coordOrAdminAuth, deps.listAlertsHandler);
+  targetApp.patch('/api/precios/alertas/:id', deps.alertsRateLimiter, deps.coordOrAdminAuth, deps.updateAlertHandler);
+  targetApp.put('/api/precios/alertas/config', deps.alertsRateLimiter, deps.coordOrAdminAuth, deps.upsertConfigHandler);
+}
+
+registerPriceIntelligenceRoutes(app);
 
 // ============================================================================
 // 2. API 404 + MANEJO DE ERRORES

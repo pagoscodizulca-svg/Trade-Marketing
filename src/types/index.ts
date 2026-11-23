@@ -296,6 +296,9 @@ export interface CompetitorItem {
   priceUsd: number;
   priceBs: number | null;
   diffPercent: number;
+  originalPrice?: number;
+  currency?: 'USD' | 'VES';
+  gapUsd?: number;
 }
 
 export interface PriceComparisonThreeBrands {
@@ -303,7 +306,9 @@ export interface PriceComparisonThreeBrands {
   date: string;
   dateSlash?: string;
   storeName: string;
+  cadena?: string;
   zone: string;
+  region?: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | string;
   promotora: string;
   origin?: string;
   category: string;
@@ -311,14 +316,23 @@ export interface PriceComparisonThreeBrands {
   codizulcaSku?: string;
   ownPriceUsd: number;
   ownPriceBs: number | null;
+  ownOriginalPrice?: number;
+  ownCurrency?: 'USD' | 'VES';
   bcvRate?: number;
+  bcvRateDate?: string;
   competitorBrand?: string;
   competitorProduct?: string;
   competitorPriceUsd?: number;
   competitorPriceBs?: number | null;
+  competitorOriginalPrice?: number;
+  competitorCurrency?: 'USD' | 'VES';
+  brechaUsd?: number;
   gapPercent?: number;
   competitorsList?: CompetitorItem[];
   observations?: string;
+  photoStoragePath?: string | null;
+  ocrAsistido?: boolean;
+  ocrConfianza?: 'alta' | 'media' | 'baja' | null;
   competitor1: CompetitorItem;
   competitor2: CompetitorItem;
   competitor3: CompetitorItem;
@@ -326,6 +340,56 @@ export interface PriceComparisonThreeBrands {
   averageCompetitorPriceBs: number | null;
   overallDiffPercent: number;
   status: string;
+}
+
+export interface BcvRateSnapshot {
+  fecha: string;
+  tasaUsdVes: number;
+  fuente: 'BCV_OFICIAL' | 'MANUAL_ADMIN' | 'RESPALDO';
+  fetchedAt: string;
+  isFallback: boolean;
+  fromCache?: boolean;
+}
+
+export interface PriceOcrDetectionResult {
+  marca_detectada: string | null;
+  producto_detectado: string | null;
+  presentacion_detectada: string | null;
+  monto_detectado: number | null;
+  moneda_detectada: 'USD' | 'VES' | null;
+  confianza: 'alta' | 'media' | 'baja';
+  notas_lectura: string | null;
+}
+
+export interface PriceDropAlertRecord {
+  id: string;
+  price_id: string;
+  previous_price_id: string | null;
+  region: string;
+  cadena: string | null;
+  zona: string | null;
+  store: string;
+  producto_propio: string;
+  marca_competidor: string;
+  precio_anterior_usd: number;
+  precio_actual_usd: number;
+  caida_porcentaje: number;
+  umbral_aplicado: number;
+  severidad: 'baja' | 'media' | 'alta' | 'critica';
+  estado: 'pendiente' | 'revisada' | 'descartada';
+  notas_revision: string | null;
+  revisada_por: string | null;
+  revisada_at: string | null;
+  created_at: string;
+}
+
+export interface PriceAlertConfigRecord {
+  id?: string;
+  region: string;
+  umbral_caida_porcentaje: number;
+  ventana_dias: number;
+  activo: boolean;
+  updated_at?: string;
 }
 
 // =============================================================================

@@ -184,6 +184,9 @@ export interface RawSupabasePrice {
   id: string;
   date: string;
   store: string;
+  cadena?: string | null;
+  zona?: string | null;
+  region?: string | null;
   ourProduct: string;
   ourPrice: number | string | null;
   competitor1Brand?: string | null;
@@ -194,9 +197,24 @@ export interface RawSupabasePrice {
   competitor3Price?: number | string | null;
   competitorBrand?: string | null;
   competitorPrice?: number | string | null;
+  bcv_rate?: number | string | null;
+  moneda_propia?: 'USD' | 'VES' | string | null;
+  moneda_competencia?: 'USD' | 'VES' | string | null;
+  tasa_bcv_aplicada?: number | string | null;
+  tasa_bcv_fecha?: string | null;
+  precio_propio_usd?: number | string | null;
+  precio_competencia_usd?: number | string | null;
+  brecha_usd?: number | string | null;
+  brecha_porcentaje?: number | string | null;
+  competitors_meta?: unknown;
+  photo_storage_path?: string | null;
+  ocr_asistido?: boolean | null;
+  ocr_confianza?: 'alta' | 'media' | 'baja' | string | null;
   comments?: string | null;
   creatorId?: string | null;
   promoter?: string | null;
+  promotora_id?: string | null;
+  auth_user_id?: string | null;
   created_at?: string;
 }
 
@@ -2305,45 +2323,140 @@ export async function fetchAllModule1FromSupabase(
     .sort((a, b) => toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at));
 
   const priceComparisons: PriceComparisonThreeBrands[] = cleanRawPrices.map((p) => {
-    const rate = liveBcvRate;
-    const ownUsd = Number(p.ourPrice) || 0;
-    const ownBs = rate !== null ? Number((ownUsd * rate).toFixed(2)) : null;
+    // Inmutabilidad histórica: priorizar siempre la tasa snapshot guardada al momento de captura
+    const snapshotRateRaw = Number(p.tasa_bcv_aplicada ?? p.bcv_rate ?? 0);
+    const rate =
+      Number.isFinite(snapshotRateRaw) && snapshotRateRaw > 10 ? snapshotRateRaw : liveBcvRate;
+    const ownCurrency: 'USD' | 'VES' =
+      String(p.moneda_propia || 'USD').trim().toUpperCase() === 'VES' ? 'VES' : 'USD';
+    const ownOriginalPrice = Number(p.ourPrice) || 0;
+    const storedOwnUsd = Number(p.precio_propio_usd ?? 0);
+    const ownUsd =
+      Number.isFinite(storedOwnUsd) && storedOwnUsd > 0
+        ? Number(storedOwnUsd.toFixed(4))
+        : ownCurrency === 'VES' && rate && rate > 0
+          ? Number((ownOriginalPrice / rate).toFixed(4))
+          : ownOriginalPrice;
+    const ownBs =
+      ownCurrency === 'VES'
+        ? Number(ownOriginalPrice.toFixed(2))
+        : rate !== null
+          ? Number((ownUsd * rate).toFixed(2))
+          : null;
+
     const activeMember = resolveActiveMember(p.promoter, p.creatorId);
     const promoterName = activeMember ? activeMember.name : resolvePromoterNameFromRaw(p.promoter, p.creatorId, activeStaffByKey);
-    const promoterZone = activeMember?.address || resolvePromoterZone(promoterName, staffMembers);
+    const promoterZone =
+      String(p.zona || '').trim() ||
+      activeMember?.address ||
+      resolvePromoterZone(promoterName, staffMembers);
+    const resolvedRegion = String(p.region || activeMember?.region || 'Occidente').trim();
 
-    const rawPairs: Array<{ brand: any; price: any }> = [
-      { brand: p.competitor1Brand, price: p.competitor1Price },
-      { brand: p.competitor2Brand, price: p.competitor2Price },
-      { brand: p.competitor3Brand, price: p.competitor3Price },
-    ];
-    if (
-      rawPairs.every((pair) => !pair.brand && (pair.price === null || pair.price === undefined || pair.price === '')) &&
-      (p.competitorBrand || p.competitorPrice)
-    ) {
-      rawPairs.push({ brand: p.competitorBrand, price: p.competitorPrice });
-    }
+    const metaList = Array.isArray(p.competitors_meta)
+      ? (p.competitors_meta as Array<Record<string, unknown>>)
+      : [];
 
-    const validComps = rawPairs
-      .filter(
-        (pair) =>
-          (pair.brand && String(pair.brand).trim() !== '') ||
-          (pair.price !== null && pair.price !== undefined && Number(pair.price) > 0)
-      )
-      .map((pair) => {
-        const brand = String(pair.brand || 'Competidor').trim();
-        const priceUsd = Number(pair.price) || 0;
-        const priceBs = rate !== null ? Number((priceUsd * rate).toFixed(2)) : null;
-        const diffPercent =
-          ownUsd > 0 && priceUsd > 0 ? Number((((ownUsd - priceUsd) / priceUsd) * 100).toFixed(1)) : 0;
-        return {
-          brand,
-          product: 'Producto Competidor',
-          priceUsd,
-          priceBs,
-          diffPercent,
-        };
-      });
+    const validComps =
+      metaList.length > 0
+        ? metaList
+            .filter(
+              (m) =>
+                String(m.brand || '').trim() !== '' &&
+                (Number(m.priceUsd ?? 0) > 0 || Number(m.originalPrice ?? 0) > 0)
+            )
+            .map((m) => {
+              const brand = String(m.brand || 'Competidor').trim();
+              const currency: 'USD' | 'VES' =
+                String(m.currency || 'USD').trim().toUpperCase() === 'VES' ? 'VES' : 'USD';
+              const originalPrice = Number(m.originalPrice ?? m.priceUsd ?? 0) || 0;
+              const priceUsd =
+                Number(m.priceUsd ?? 0) > 0
+                  ? Number(Number(m.priceUsd).toFixed(4))
+                  : currency === 'VES' && rate && rate > 0
+                    ? Number((originalPrice / rate).toFixed(4))
+                    : originalPrice;
+              const priceBs =
+                m.priceBs !== null && m.priceBs !== undefined && Number.isFinite(Number(m.priceBs))
+                  ? Number(Number(m.priceBs).toFixed(2))
+                  : currency === 'VES'
+                    ? Number(originalPrice.toFixed(2))
+                    : rate !== null
+                      ? Number((priceUsd * rate).toFixed(2))
+                      : null;
+              const gapUsd =
+                ownUsd > 0 && priceUsd > 0 ? Number((ownUsd - priceUsd).toFixed(4)) : 0;
+              const diffPercent =
+                ownUsd > 0 && priceUsd > 0
+                  ? Number((((ownUsd - priceUsd) / priceUsd) * 100).toFixed(2))
+                  : 0;
+              return {
+                brand,
+                product: 'Producto Competidor',
+                priceUsd,
+                priceBs,
+                diffPercent,
+                originalPrice,
+                currency,
+                gapUsd,
+              };
+            })
+        : (() => {
+            const compCurrency: 'USD' | 'VES' =
+              String(p.moneda_competencia || 'USD').trim().toUpperCase() === 'VES' ? 'VES' : 'USD';
+            const rawPairs: Array<{ brand: any; price: any; idx: number }> = [
+              { brand: p.competitor1Brand, price: p.competitor1Price, idx: 0 },
+              { brand: p.competitor2Brand, price: p.competitor2Price, idx: 1 },
+              { brand: p.competitor3Brand, price: p.competitor3Price, idx: 2 },
+            ];
+            if (
+              rawPairs.every(
+                (pair) =>
+                  !pair.brand && (pair.price === null || pair.price === undefined || pair.price === '')
+              ) &&
+              (p.competitorBrand || p.competitorPrice)
+            ) {
+              rawPairs.push({ brand: p.competitorBrand, price: p.competitorPrice, idx: 0 });
+            }
+            return rawPairs
+              .filter(
+                (pair) =>
+                  (pair.brand && String(pair.brand).trim() !== '') ||
+                  (pair.price !== null && pair.price !== undefined && Number(pair.price) > 0)
+              )
+              .map((pair) => {
+                const brand = String(pair.brand || 'Competidor').trim();
+                const originalPrice = Number(pair.price) || 0;
+                const storedPrimaryUsd = pair.idx === 0 ? Number(p.precio_competencia_usd ?? 0) : 0;
+                const priceUsd =
+                  Number.isFinite(storedPrimaryUsd) && storedPrimaryUsd > 0
+                    ? Number(storedPrimaryUsd.toFixed(4))
+                    : compCurrency === 'VES' && rate && rate > 0
+                      ? Number((originalPrice / rate).toFixed(4))
+                      : originalPrice;
+                const priceBs =
+                  compCurrency === 'VES'
+                    ? Number(originalPrice.toFixed(2))
+                    : rate !== null
+                      ? Number((priceUsd * rate).toFixed(2))
+                      : null;
+                const gapUsd =
+                  ownUsd > 0 && priceUsd > 0 ? Number((ownUsd - priceUsd).toFixed(4)) : 0;
+                const diffPercent =
+                  ownUsd > 0 && priceUsd > 0
+                    ? Number((((ownUsd - priceUsd) / priceUsd) * 100).toFixed(2))
+                    : 0;
+                return {
+                  brand,
+                  product: 'Producto Competidor',
+                  priceUsd,
+                  priceBs,
+                  diffPercent,
+                  originalPrice,
+                  currency: compCurrency,
+                  gapUsd,
+                };
+              });
+          })();
 
     const firstComp = validComps[0] || {
       brand: '—',
@@ -2351,6 +2464,9 @@ export async function fetchAllModule1FromSupabase(
       priceUsd: 0,
       priceBs: rate !== null ? 0 : null,
       diffPercent: 0,
+      originalPrice: 0,
+      currency: 'USD' as const,
+      gapUsd: 0,
     };
 
     const secondComp = validComps[1] || {
@@ -2359,6 +2475,9 @@ export async function fetchAllModule1FromSupabase(
       priceUsd: 0,
       priceBs: rate !== null ? 0 : null,
       diffPercent: 0,
+      originalPrice: 0,
+      currency: 'USD' as const,
+      gapUsd: 0,
     };
 
     const thirdComp = validComps[2] || {
@@ -2367,12 +2486,26 @@ export async function fetchAllModule1FromSupabase(
       priceUsd: 0,
       priceBs: rate !== null ? 0 : null,
       diffPercent: 0,
+      originalPrice: 0,
+      currency: 'USD' as const,
+      gapUsd: 0,
     };
 
+    const brechaUsd =
+      p.brecha_usd !== null && p.brecha_usd !== undefined && Number.isFinite(Number(p.brecha_usd))
+        ? Number(Number(p.brecha_usd).toFixed(4))
+        : ownUsd > 0 && firstComp.priceUsd > 0
+          ? Number((ownUsd - firstComp.priceUsd).toFixed(4))
+          : 0;
+
     const gapPercent =
-      ownUsd > 0 && firstComp.priceUsd > 0
-        ? Number((((ownUsd - firstComp.priceUsd) / firstComp.priceUsd) * 100).toFixed(1))
-        : 0;
+      p.brecha_porcentaje !== null &&
+      p.brecha_porcentaje !== undefined &&
+      Number.isFinite(Number(p.brecha_porcentaje))
+        ? Number(Number(p.brecha_porcentaje).toFixed(2))
+        : ownUsd > 0 && firstComp.priceUsd > 0
+          ? Number((((ownUsd - firstComp.priceUsd) / firstComp.priceUsd) * 100).toFixed(2))
+          : 0;
 
     const activeCompPrices = validComps.map((c) => c.priceUsd).filter((v) => v > 0);
     const avgCompUsd =
@@ -2393,7 +2526,9 @@ export async function fetchAllModule1FromSupabase(
       date: formatDateYmd(dateIso),
       dateSlash: formatDateFromField(dateIso),
       storeName: String(p.store || 'Punto de Venta').trim(),
+      cadena: p.cadena ? String(p.cadena).trim() : undefined,
       zone: promoterZone,
+      region: resolvedRegion,
       promotora: promoterName,
       origin: promoterName,
       category: inferCategory(p.ourProduct || ''),
@@ -2401,14 +2536,26 @@ export async function fetchAllModule1FromSupabase(
       codizulcaSku: '',
       ownPriceUsd: ownUsd,
       ownPriceBs: ownBs,
+      ownOriginalPrice,
+      ownCurrency,
       bcvRate: rate ?? undefined,
+      bcvRateDate: p.tasa_bcv_fecha ? String(p.tasa_bcv_fecha).slice(0, 10) : formatDateYmd(dateIso),
       competitorBrand: firstComp.brand,
       competitorProduct: firstComp.product,
       competitorPriceUsd: firstComp.priceUsd,
       competitorPriceBs: firstComp.priceBs,
+      competitorOriginalPrice: firstComp.originalPrice,
+      competitorCurrency: firstComp.currency,
+      brechaUsd,
       gapPercent,
       competitorsList: validComps,
       observations: cleanObs,
+      photoStoragePath: p.photo_storage_path ? String(p.photo_storage_path).trim() : null,
+      ocrAsistido: Boolean(p.ocr_asistido),
+      ocrConfianza:
+        p.ocr_confianza === 'alta' || p.ocr_confianza === 'media' || p.ocr_confianza === 'baja'
+          ? p.ocr_confianza
+          : null,
       competitor1: firstComp,
       competitor2: secondComp,
       competitor3: thirdComp,

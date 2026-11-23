@@ -19,6 +19,10 @@ import {
 } from './masterCatalogSyncService';
 import { obtenerClientesMaestros } from './masterDataSyncService';
 import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+import {
+  normalizePriceSurveyBimonetary,
+  type PriceCurrency,
+} from '../utils/bimonetaryPriceMath';
 
 export const PORTAL_ACTIVE_STORE_STORAGE_KEY = 'codizulca_portal_active_store_v2';
 
@@ -43,6 +47,7 @@ export interface PortalClientOption {
   codigo: string;
   nombre: string;
   zona: string;
+  cadena?: string;
   region: 'Occidente' | 'Valencia';
 }
 
@@ -295,6 +300,7 @@ export async function fetchPortalClientsCatalog(
           codigo: String(c.codigo_cliente || '').trim(),
           nombre: String(c.nombre_comercial || c.razon_social || '').trim(),
           zona: String(c.zona_catalogo?.nombre || c.zona || c.ciudad || reg).trim(),
+          cadena: String(c.cadena?.nombre || c.canal || '').trim() || undefined,
           region: reg,
         };
       });
@@ -1065,25 +1071,55 @@ export async function createPortalConsumerSurvey(params: {
 }
 
 /**
- * Registra un monitoreo comparativo de precios en `public.prices` con foto opcional en Storage.
+ * Registra un monitoreo comparativo de precios bimonetario en `public.prices` con foto opcional en Storage.
+ * Preserva intactos los montos originales (`ourPrice` / `competitor*Price`) junto con el snapshot inmutable
+ * de la tasa BCV del día y los montos normalizados en USD (`precio_propio_usd`, `precio_competencia_usd`, `competitors_meta`).
  */
 export async function createPortalPriceSurvey(params: {
   context: PortalPromotoraContext;
   store: string;
+  cadena?: string;
+  zona?: string;
   ourProduct: string;
+  /** Retrocompatible: monto propio (en USD o en `ownCurrency` si se especifica). */
   ourPriceUsd: number;
+  ownCurrency?: PriceCurrency;
+  ownOriginalPrice?: number;
   bcvRate: number;
-  competitors: Array<{ name: string; priceUsd: number }>;
+  bcvRateDate?: string;
+  competitors: Array<{
+    name: string;
+    priceUsd?: number;
+    originalPrice?: number;
+    currency?: PriceCurrency;
+  }>;
   photoFile?: File | Blob | null;
   observations?: string;
+  ocrAsistido?: boolean;
+  ocrConfianza?: 'alta' | 'media' | 'baja' | null;
 }): Promise<{ id: string }> {
   const cleanStore = String(params.store || '').trim();
   const cleanProduct = String(params.ourProduct || '').trim();
+  const ownCurrency: PriceCurrency = params.ownCurrency ?? 'USD';
+  const ownRawPrice =
+    params.ownOriginalPrice !== undefined ? Number(params.ownOriginalPrice) : Number(params.ourPriceUsd);
+
   if (!cleanStore) throw new Error('Selecciona el Punto de Venta (PDV).');
   if (!cleanProduct) throw new Error('Selecciona el producto evaluado.');
-  if (!Number.isFinite(params.ourPriceUsd) || params.ourPriceUsd <= 0) {
+  if (!Number.isFinite(ownRawPrice) || ownRawPrice <= 0) {
     throw new Error('Ingresa un precio de góndola propio mayor a cero.');
   }
+
+  const normalized = normalizePriceSurveyBimonetary({
+    ownPrice: ownRawPrice,
+    ownCurrency,
+    bcvRate: params.bcvRate,
+    competitors: params.competitors.map((c) => ({
+      name: c.name,
+      price: c.originalPrice !== undefined ? Number(c.originalPrice) : Number(c.priceUsd ?? 0),
+      currency: c.currency ?? 'USD',
+    })),
+  });
 
   const client = getSupabaseClient();
   let uploadedPhotoPath: string | null = null;
@@ -1110,32 +1146,66 @@ export async function createPortalPriceSurvey(params: {
   }
 
   try {
-    const validComps = params.competitors.filter((c) => c.name.trim().length > 0 && c.priceUsd > 0);
-    const { data, error } = await client
-      .from('prices')
-      .insert({
-        date: new Date().toISOString(),
-        store: cleanStore,
-        ourProduct: cleanProduct,
-        ourPrice: Number(params.ourPriceUsd.toFixed(2)),
-        competitor1Brand: validComps[0]?.name.trim() || null,
+    const validComps = normalized.competitorsMeta;
+    const todayYmd = params.bcvRateDate || getCaracasTodayYmd();
+    const basePayload = {
+      date: new Date().toISOString(),
+      store: cleanStore,
+      ourProduct: cleanProduct,
+      // Conservamos monto original exacto en ourPrice / competitor*Price para trazabilidad contable
+      ourPrice: Number(normalized.ownOriginalPrice.toFixed(2)),
+      competitor1Brand: validComps[0]?.brand || null,
+      competitor1Price: validComps[0] ? Number(validComps[0].originalPrice.toFixed(2)) : null,
+      competitor2Brand: validComps[1]?.brand || null,
+      competitor2Price: validComps[1] ? Number(validComps[1].originalPrice.toFixed(2)) : null,
+      competitor3Brand: validComps[2]?.brand || null,
+      competitor3Price: validComps[2] ? Number(validComps[2].originalPrice.toFixed(2)) : null,
+      competitorBrand: validComps[0]?.brand || null,
+      competitorPrice: validComps[0] ? Number(validComps[0].originalPrice.toFixed(2)) : null,
+      bcv_rate: normalized.bcvRateApplied ? Number(normalized.bcvRateApplied.toFixed(4)) : null,
+      photo_storage_path: uploadedPhotoPath,
+      comments: String(params.observations || '').trim().slice(0, 500),
+      creatorId: params.context.correo || params.context.nombre,
+      promoter: params.context.nombre,
+      promotora_id: params.context.promotoraId,
+      auth_user_id: params.context.authUserId,
+      region: params.context.region,
+    };
+
+    const extendedPayload = {
+      ...basePayload,
+      cadena: params.cadena ? String(params.cadena).trim().slice(0, 120) : null,
+      zona: params.zona ? String(params.zona).trim().slice(0, 120) : params.context.direccion || null,
+      moneda_propia: normalized.ownCurrency,
+      moneda_competencia: normalized.primaryCompetitorCurrency,
+      tasa_bcv_aplicada: normalized.bcvRateApplied,
+      tasa_bcv_fecha: todayYmd,
+      precio_propio_usd: normalized.ownPriceUsd,
+      precio_competencia_usd:
+        normalized.primaryCompetitorPriceUsd > 0 ? normalized.primaryCompetitorPriceUsd : null,
+      brecha_usd: validComps.length > 0 ? normalized.brechaUsd : null,
+      brecha_porcentaje: validComps.length > 0 ? normalized.brechaPorcentaje : null,
+      competitors_meta: validComps,
+      ocr_asistido: Boolean(params.ocrAsistido),
+      ocr_confianza: params.ocrAsistido ? (params.ocrConfianza ?? 'media') : null,
+    };
+
+    let { data, error } = await client.from('prices').insert(extendedPayload).select('id');
+
+    // Retrocompatibilidad segura si el entorno aún no ejecutó la migración aditiva de columnas bimonetarias
+    if (error && (error.code === 'PGRST204' || error.code === '42703' || /column .* does not exist/i.test(error.message))) {
+      const legacyPayload = {
+        ...basePayload,
+        ourPrice: Number(normalized.ownPriceUsd.toFixed(2)),
         competitor1Price: validComps[0] ? Number(validComps[0].priceUsd.toFixed(2)) : null,
-        competitor2Brand: validComps[1]?.name.trim() || null,
         competitor2Price: validComps[1] ? Number(validComps[1].priceUsd.toFixed(2)) : null,
-        competitor3Brand: validComps[2]?.name.trim() || null,
         competitor3Price: validComps[2] ? Number(validComps[2].priceUsd.toFixed(2)) : null,
-        competitorBrand: validComps[0]?.name.trim() || null,
         competitorPrice: validComps[0] ? Number(validComps[0].priceUsd.toFixed(2)) : null,
-        bcv_rate: Number(params.bcvRate.toFixed(2)),
-        photo_storage_path: uploadedPhotoPath,
-        comments: String(params.observations || '').trim().slice(0, 500),
-        creatorId: params.context.correo || params.context.nombre,
-        promoter: params.context.nombre,
-        promotora_id: params.context.promotoraId,
-        auth_user_id: params.context.authUserId,
-        region: params.context.region,
-      })
-      .select('id');
+      };
+      const retry = await client.from('prices').insert(legacyPayload).select('id');
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) {
       throw new Error(`No se pudo guardar el monitoreo de precios (${error.message}).`);

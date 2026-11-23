@@ -64,6 +64,7 @@ import {
   Metric360SwitcherItem,
 } from '../common/Metric360DashboardModal';
 import { AttendanceEvidenceSubTab } from './AttendanceEvidenceSubTab';
+import { PriceComparisonReportSubTab } from './PriceComparisonReportSubTab';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import { buildDailyPromotoraAttendanceViewModels } from '../../services/attendanceEvidencesService';
 import {
@@ -2194,7 +2195,7 @@ export const FieldPromotoraView: React.FC = () => {
   // SUBMÓDULO 2: INFORMES DE CAMPO (CARGADOS EXACTAMENTE DESDE SUPABASE)
   // Pestañas: Inventario y Degustación (inventory) | Asistencia en PDV (checkins agrupados)
   // ----------------------------------------------------
-  type ReportSubTab = 'inventario' | 'asistencia';
+  type ReportSubTab = 'inventario' | 'asistencia' | 'comparativa';
   type FieldRegionBucket = 'Occidente' | 'Centro' | 'Andes';
   type FieldRegionFilter = 'TODAS' | 'ASSIGNED' | FieldRegionBucket;
 
@@ -2567,6 +2568,24 @@ export const FieldPromotoraView: React.FC = () => {
         `${i.finalStock}`,
         i.promotora,
       ]);
+    } else if (activeReportTab === 'comparativa') {
+      title = singleLockedRegionDisplay
+        ? `Comparativa Bimonetaria de Precios (BCV) — Región ${singleLockedRegionDisplay}`
+        : isMultiRegionScope
+          ? `Comparativa Bimonetaria de Precios (BCV) — Regiones ${assignedRegionsDisplayLabel}`
+          : 'Comparativa Bimonetaria de Precios en Anaquel (BCV · Supabase)';
+      head = [['PDV & FECHA', 'PRODUCTO PROPIO', 'PROPIO (USD)', 'COMPETIDOR (USD)', 'BRECHA %', 'BCV APLICADA', 'PROMOTORA']];
+      body = priceComparisons.slice(0, 300).map((pc) => [
+        `${pc.storeName}\n${pc.date}`,
+        pc.ownProduct,
+        `$${pc.ownPriceUsd.toFixed(2)} (${pc.ownCurrency ?? 'USD'})`,
+        pc.competitorPriceUsd && pc.competitorPriceUsd > 0
+          ? `${pc.competitorBrand || 'Comp.'}: $${pc.competitorPriceUsd.toFixed(2)}`
+          : '—',
+        `${Number(pc.gapPercent ?? 0).toFixed(1)}%`,
+        pc.bcvRate ? `${pc.bcvRate.toFixed(2)} Bs` : '—',
+        pc.promotora,
+      ]);
     } else {
       title = 'Registro de Evidencias de Asistencia Condicional por Perfil (Supabase)';
       head = [
@@ -2603,7 +2622,12 @@ export const FieldPromotoraView: React.FC = () => {
       });
     }
 
-    exportPromotoraReportsPdf(activeReportTab, title, head, body, {
+    exportPromotoraReportsPdf(
+      activeReportTab === 'comparativa' ? 'precios' : activeReportTab,
+      title,
+      head,
+      body,
+      {
       totalVisits: visitsHistory.length,
       geoverifiedPercent: 100,
       totalSamples: totalReportsMuestras,
@@ -5383,6 +5407,27 @@ export const FieldPromotoraView: React.FC = () => {
                   {attendanceRecords.length}
                 </span>
               </button>
+
+              <button
+                type="button"
+                data-testid="informe-tab-comparativa"
+                onClick={() => setActiveReportTab('comparativa')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                  activeReportTab === 'comparativa'
+                    ? 'bg-red-600 text-white shadow-md shadow-red-950/60 border border-red-500'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-900 border border-transparent'
+                }`}
+              >
+                <Scale className="w-4 h-4" />
+                <span>Comparativa de Precio</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                    activeReportTab === 'comparativa' ? 'bg-black/40 text-white' : 'bg-zinc-900 text-zinc-500'
+                  }`}
+                >
+                  {priceComparisons.length}
+                </span>
+              </button>
             </div>
 
             <div className="shrink-0">
@@ -6022,6 +6067,21 @@ export const FieldPromotoraView: React.FC = () => {
               onSearchQueryChange={setReportSearchQuery}
               onRefreshData={refreshSupabaseData}
               onNotifyToast={showToast}
+            />
+          )}
+
+          {/* ========================================================================= */}
+          {/* TAB 5: COMPARATIVA DE PRECIO (BCV BIMONETARIO + HISTÓRICOS + ALERTAS > X%) */}
+          {/* ========================================================================= */}
+          {activeReportTab === 'comparativa' && (
+            <PriceComparisonReportSubTab
+              priceComparisons={priceComparisons}
+              isStrictAdmin={isStrictAdmin}
+              isRegionalRestricted={isRegionalRestricted}
+              assignedRegionCodes={assignedRegionCodes}
+              assignedRegions={assignedRegions}
+              canSwitchAmongAssignedRegions={canSwitchAmongAssignedRegions}
+              onNotify={showToast}
             />
           )}
         </div>

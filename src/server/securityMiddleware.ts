@@ -42,7 +42,7 @@ export function buildCorsMiddleware(options: {
     origin(origin, cb) {
       cb(null, isOriginAllowed(origin, options.allowedOrigins, options.isProduction));
     },
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
       'Authorization',
       'Content-Type',
