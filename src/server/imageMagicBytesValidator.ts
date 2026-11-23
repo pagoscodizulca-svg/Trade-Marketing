@@ -43,6 +43,8 @@ const UUID_STRICT_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const YMD_STRICT_REGEX = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const VALID_SLOTS_SET = new Set<string>(ALL_SLOTS_FOTO_ASISTENCIA);
+const SAFE_STORAGE_PATH_REGEX =
+  /^asistencia\/\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(JORNADA_INGRESO|JORNADA_SALIDA|MANANA_INGRESO|MANANA_SALIDA|TARDE_INGRESO|TARDE_SALIDA)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-\d{10,16})?\.(jpg|png|webp)$/;
 
 /**
  * Inspecciona los *magic bytes* reales del binario recibido en servidor:
@@ -162,9 +164,35 @@ export function verifyAttendanceImageMagicBytes(
 }
 
 /**
- * Construye una ruta determinística en servidor ignorando por completo cualquier nombre
- * de archivo suministrado por el cliente (inmunidad total frente a Path Traversal):
- * `asistencia/{yyyy-mm-dd}/{promotora_id}/{slot_foto}_{uuid}.{ext}`
+ * Valida estrictamente que una clave de Storage generada o leída para borrar/firmar
+ * sea completamente inmune a Path Traversal (`..`, `\`, `\0`, `//`) y respete la estructura
+ * canónica inmutable del bucket privado.
+ */
+export function assertSafeAttendanceStoragePath(storagePath: string): string {
+  const clean = String(storagePath || '').trim();
+  if (
+    !clean ||
+    clean.includes('..') ||
+    clean.includes('\\') ||
+    clean.includes('\0') ||
+    clean.includes('//') ||
+    clean.startsWith('/') ||
+    !SAFE_STORAGE_PATH_REGEX.test(clean)
+  ) {
+    throw new AttendanceFileSecurityError(
+      400,
+      'INVALID_PATH_COMPONENTS',
+      'Ruta de Storage inválida o bloqueada por protección anti-path-traversal.'
+    );
+  }
+  return clean;
+}
+
+/**
+ * Construye una ruta determinística, única e inmutable en servidor ignorando por completo cualquier
+ * nombre de archivo suministrado por el cliente (inmunidad total frente a Path Traversal):
+ * - Con `timestampMs`: `asistencia/{yyyy-mm-dd}/{promotora_id}/{slot_foto}_{uuid}-{timestampMs}.{ext}`
+ * - Sin `timestampMs`: `asistencia/{yyyy-mm-dd}/{promotora_id}/{slot_foto}_{uuid}.{ext}`
  */
 export function buildDeterministicAttendanceStoragePath(params: {
   fechaJornada: string;
@@ -172,6 +200,7 @@ export function buildDeterministicAttendanceStoragePath(params: {
   slotFoto: SlotFotoAsistencia;
   extension: 'jpg' | 'png' | 'webp';
   fileUuid?: string;
+  timestampMs?: number;
 }): string {
   const cleanDate = String(params.fechaJornada || '').trim();
   const cleanPromotoraId = String(params.promotoraId || '')
@@ -179,6 +208,19 @@ export function buildDeterministicAttendanceStoragePath(params: {
     .toLowerCase();
   const cleanSlot = String(params.slotFoto || '').trim();
   const generatedUuid = (params.fileUuid || crypto.randomUUID()).trim().toLowerCase();
+
+  let timestampSuffix = '';
+  if (params.timestampMs !== undefined) {
+    const safeTs = Math.trunc(params.timestampMs);
+    if (!Number.isFinite(safeTs) || safeTs < 1_000_000_000 || safeTs > 9_999_999_999_999_999) {
+      throw new AttendanceFileSecurityError(
+        400,
+        'INVALID_PATH_COMPONENTS',
+        'Marca temporal inválida para generar la ruta segura en Storage.'
+      );
+    }
+    timestampSuffix = `-${safeTs}`;
+  }
 
   if (
     !YMD_STRICT_REGEX.test(cleanDate) ||
@@ -194,5 +236,7 @@ export function buildDeterministicAttendanceStoragePath(params: {
     );
   }
 
-  return `asistencia/${cleanDate}/${cleanPromotoraId}/${cleanSlot}_${generatedUuid}.${params.extension}`;
+  return assertSafeAttendanceStoragePath(
+    `asistencia/${cleanDate}/${cleanPromotoraId}/${cleanSlot}_${generatedUuid}${timestampSuffix}.${params.extension}`
+  );
 }

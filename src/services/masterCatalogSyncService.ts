@@ -39,6 +39,13 @@ import {
   normalizarTelefonoMaestro,
 } from './masterDataSyncService';
 import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
+import {
+  PromotoraCategoriaFilterSchema,
+  PromotoraCategoriaStrictSchema,
+  classifyPromotoraCategoriaOficial,
+  formatPromotoraRoleForCategory,
+  type PromotoraCategoriaOficial,
+} from '../utils/regionalSyncClassifier';
 
 const CATALOG_CACHE_TTL_MS = 90_000;
 
@@ -152,6 +159,18 @@ export function normalizeProductoMasterRow(raw: Record<string, unknown>): Produc
   };
 }
 
+function isMissingColumnDbError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  const msg = String(err.message ?? '').toLowerCase();
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    msg.includes('does not exist') ||
+    msg.includes('could not find the')
+  );
+}
+
 export function normalizeSupervisorMasterRow(raw: Record<string, unknown>): SupervisorMaestro {
   const nombre =
     limpiarCeldaTexto(raw.nombre ?? raw.nombre_completo ?? raw.full_name ?? '') || 'Sin nombre';
@@ -163,7 +182,7 @@ export function normalizeSupervisorMasterRow(raw: Record<string, unknown>): Supe
     email: emailRaw || null,
     telefono: asNullableString(raw.telefono),
     zona: asNullableString(raw.zona),
-    sucursal: asSucursalOrNull(raw.sucursal),
+    sucursal: asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede),
     region_id: asNullableString(raw.region_id),
     activo: raw.activo !== false,
     metadata: asObject(raw.metadata),
@@ -174,19 +193,28 @@ export function normalizeSupervisorMasterRow(raw: Record<string, unknown>): Supe
 
 export function normalizePromotoraMasterRow(raw: Record<string, unknown>): PromotoraMaestra {
   const nombre =
-    limpiarCeldaTexto(raw.nombre_completo ?? raw.nombre ?? raw.full_name ?? '') || 'Sin nombre';
+    limpiarCeldaTexto(raw.nombre_completo ?? raw.nombre ?? raw.full_name ?? raw.name ?? '') ||
+    'Sin nombre';
   const emailRaw = limpiarCeldaTexto(raw.email ?? raw.correo ?? '').toLowerCase();
+  const categoria = classifyPromotoraCategoriaOficial(raw);
   return {
     id: String(raw.id ?? ''),
     nombre_completo: nombre,
     email: emailRaw || null,
-    telefono: asNullableString(raw.telefono),
+    telefono: asNullableString(raw.telefono ?? raw.phone),
     ciudad: asNullableString(raw.ciudad),
     estado: asNullableString(raw.estado),
-    direccion: asNullableString(raw.direccion),
-    sucursal: asSucursalOrNull(raw.sucursal),
+    direccion: asNullableString(raw.direccion ?? raw.address),
+    sucursal: asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede),
     region_id: asNullableString(raw.region_id),
     supervisor_id: asNullableString(raw.supervisor_id),
+    categoria,
+    tipo:
+      asNullableString(
+        raw.tipo ?? raw.tipo_promotora ?? raw.modalidad ?? raw.categoria ?? raw.perfil
+      ) ?? formatPromotoraRoleForCategory(categoria),
+    rol: asNullableString(raw.rol ?? raw.role ?? raw.cargo),
+    metadata: asObject(raw.metadata),
     activo: raw.activo !== false,
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? ''),
@@ -498,12 +526,23 @@ export async function reasignarRegionSupervisor(
 // =============================================================================
 
 export async function obtenerPromotorasMaestras(
-  options: { soloActivas?: boolean; forzarRefresco?: boolean; client?: SupabaseClient | null } = {}
+  options: {
+    soloActivas?: boolean;
+    categoria?: PromotoraCategoriaOficial | 'TODAS';
+    regionId?: string;
+    forzarRefresco?: boolean;
+    client?: SupabaseClient | null;
+  } = {}
 ): Promise<PromotoraMaestra[]> {
+  const parsedCategoria =
+    options.categoria !== undefined
+      ? PromotoraCategoriaFilterSchema.parse(options.categoria)
+      : 'TODAS';
+
   const client = resolveClient(options.client);
   if (!client) return [];
 
-  const cacheKey = `${getScopeKey()}:${options.soloActivas ? '1' : '0'}`;
+  const cacheKey = `${getScopeKey()}:${options.soloActivas ? '1' : '0'}:${parsedCategoria}:${options.regionId ?? ''}`;
   if (!options.forzarRefresco) {
     const cached = readTimedCache(promotorasCache, cacheKey);
     if (cached) return cached;
@@ -513,13 +552,38 @@ export async function obtenerPromotorasMaestras(
   if (options.soloActivas) {
     query = query.eq('activo', true);
   }
+  if (options.regionId) {
+    query = query.eq('region_id', options.regionId);
+  }
+  if (parsedCategoria !== 'TODAS') {
+    query = query.eq('categoria', parsedCategoria);
+  }
 
-  const { data, error } = await query;
+  let { data, error } = await query;
+  if (error && isMissingColumnDbError(error)) {
+    let fallbackQuery = client.from('promotoras').select('*');
+    if (options.soloActivas) {
+      fallbackQuery = fallbackQuery.eq('activo', true);
+    }
+    if (options.regionId) {
+      fallbackQuery = fallbackQuery.eq('region_id', options.regionId);
+    }
+    const fallbackRes = await fallbackQuery;
+    data = fallbackRes.data;
+    error = fallbackRes.error;
+  }
   if (error) {
     throw new Error(error.message || 'No se pudieron consultar las promotoras en Supabase.');
   }
 
-  const rows = ((data as Record<string, unknown>[] | null) ?? []).map(normalizePromotoraMasterRow);
+  let rows = ((data as Record<string, unknown>[] | null) ?? [])
+    .map(normalizePromotoraMasterRow)
+    .sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'));
+
+  if (parsedCategoria !== 'TODAS') {
+    rows = rows.filter((r) => r.categoria === parsedCategoria);
+  }
+
   writeTimedCache(promotorasCache, cacheKey, rows);
   return rows;
 }
@@ -536,8 +600,13 @@ export async function guardarPromotoraMaestra(
     throw new Error('El nombre completo de la promotora es obligatorio.');
   }
 
+  const validatedCategoria: PromotoraCategoriaOficial =
+    input.categoria !== undefined
+      ? PromotoraCategoriaStrictSchema.parse(input.categoria)
+      : 'Fijas';
+
   const emailClean = limpiarCeldaTexto(input.email).toLowerCase() || null;
-  const payload: Record<string, unknown> = {
+  const basePayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     email: emailClean,
     telefono: normalizarTelefonoMaestro(input.telefono),
@@ -550,16 +619,33 @@ export async function guardarPromotoraMaestra(
     ...(input.sucursal ? { sucursal: input.sucursal } : {}),
   };
 
-  const result = input.id
-    ? await client.from('promotoras').update(payload).eq('id', input.id).select('*').single()
-    : await client.from('promotoras').insert(payload).select('*').single();
+  const executeWrite = async (payload: Record<string, unknown>) =>
+    input.id
+      ? await client.from('promotoras').update(payload).eq('id', input.id).select('*').single()
+      : await client.from('promotoras').insert(payload).select('*').single();
+
+  const categoryPayloadAttempts: Record<string, unknown>[] = [
+    { ...basePayload, categoria: validatedCategoria },
+    {
+      ...basePayload,
+      tipo: input.tipo ?? formatPromotoraRoleForCategory(validatedCategoria),
+    },
+    { ...basePayload, metadata: { categoria: validatedCategoria } },
+    basePayload,
+  ];
+
+  let result = await executeWrite(categoryPayloadAttempts[0]!);
+  for (let i = 1; i < categoryPayloadAttempts.length && result.error && isMissingColumnDbError(result.error); i++) {
+    result = await executeWrite(categoryPayloadAttempts[i]!);
+  }
 
   if (result.error || !result.data) {
     throw new Error(result.error?.message || 'No se pudo guardar la promotora.');
   }
 
   invalidateMasterCatalogCaches();
-  return normalizePromotoraMasterRow(result.data as Record<string, unknown>);
+  const normalized = normalizePromotoraMasterRow(result.data as Record<string, unknown>);
+  return { ...normalized, categoria: validatedCategoria };
 }
 
 export async function cambiarEstadoPromotoraMaestra(

@@ -54,6 +54,13 @@ import {
 } from './src/server/weeklyTastingCronHandler';
 import { defaultShiftLinksHandlers } from './src/server/shiftLinksHandler';
 import { defaultTastingAlertDispatcher } from './src/server/tastingAlertDispatcher';
+import { defaultPromotorasHandlers } from './src/server/promotorasHandler';
+import {
+  createGracefulShutdownController,
+  registerProcessShutdownHandlers,
+  validateServerEnvConfig,
+  type ClosableHttpServer,
+} from './src/server/gracefulShutdown';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -61,7 +68,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Si el servidor corre compilado (`dist-server/server.js`), la raíz del proyecto es el directorio padre
 const PROJECT_ROOT =
   path.basename(__dirname) === 'dist-server' ? path.resolve(__dirname, '..') : __dirname;
-const app = express();
+export const app = express();
 app.disable('x-powered-by');
 // Detrás de un proxy (Render, nginx, Docker) `req.ip` debe reflejar al cliente real para el limitador
 const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '', 10);
@@ -73,14 +80,6 @@ const parsedPort = parseInt(process.env.PORT ?? '', 10);
 const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
 const CHOFER_PORT = 5174;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-
-// Resiliencia ante errores transitorios de sockets/promesas para evitar caída del servidor
-process.on('uncaughtException', (err) => {
-  serverLogger.error('uncaught_exception', { err });
-});
-process.on('unhandledRejection', (reason) => {
-  serverLogger.error('unhandled_rejection', { reason });
-});
 
 function getLanIpv4(): string | null {
   const nets = os.networkInterfaces();
@@ -115,6 +114,9 @@ function isPortListening(port: number, host = '127.0.0.1'): Promise<boolean> {
 }
 
 let choferChild: ChildProcess | null = null;
+let choferRespawnTimer: ReturnType<typeof setTimeout> | null = null;
+let activeHttpServer: ClosableHttpServer | null = null;
+let activeViteServer: { close: () => Promise<void> } | null = null;
 let shuttingDown = false;
 
 async function ensureChoferPwaServer() {
@@ -142,11 +144,13 @@ async function ensureChoferPwaServer() {
       choferChild = null;
       if (!shuttingDown && code !== 0) {
         console.warn(`⚠️ RutaDegustación (:5174) finalizó (código ${code}). Reintentando en 1.5s...`);
-        setTimeout(() => {
+        choferRespawnTimer = setTimeout(() => {
+          choferRespawnTimer = null;
           void isPortListening(CHOFER_PORT).then((up) => {
             if (!up && !shuttingDown) spawnChofer();
           });
         }, 1500);
+        choferRespawnTimer.unref?.();
       }
     });
   };
@@ -154,23 +158,32 @@ async function ensureChoferPwaServer() {
   spawnChofer();
 }
 
-function cleanupChildren() {
+function cleanupChildrenSync() {
   shuttingDown = true;
+  if (choferRespawnTimer) {
+    clearTimeout(choferRespawnTimer);
+    choferRespawnTimer = null;
+  }
   if (choferChild && !choferChild.killed) {
     choferChild.kill();
     choferChild = null;
   }
 }
 
-process.on('SIGINT', () => {
-  cleanupChildren();
-  process.exit(0);
+async function cleanupServerResources(): Promise<void> {
+  cleanupChildrenSync();
+  if (activeViteServer) {
+    const vite = activeViteServer;
+    activeViteServer = null;
+    await vite.close();
+  }
+}
+
+const shutdownController = createGracefulShutdownController({
+  getServer: () => activeHttpServer,
+  cleanup: cleanupServerResources,
+  logger: serverLogger,
 });
-process.on('SIGTERM', () => {
-  cleanupChildren();
-  process.exit(0);
-});
-process.on('exit', cleanupChildren);
 
 // Cabeceras de seguridad (helmet + CSP en producción), CORS por origen y trazas JSON (P-04 / M-05)
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
@@ -289,34 +302,59 @@ app.post(
 
 // ============================================================================
 // 1.E. EVIDENCIAS FOTOGRÁFICAS CONDICIONALES DE ASISTENCIA (STORAGE PRIVADO + ZOD + MAGIC BYTES)
+//      El Rate Limiter corre ESTRICTAMENTE ANTES de `requireAttendanceActorAuth` para
+//      cortar ráfagas / fuerza bruta con 429 sin disparar validaciones costosas de Auth/BD.
 // ============================================================================
 const attendanceUploadRateLimiter = createRateLimiter({
+  name: 'attendance-upload',
   windowMs: 5 * 60 * 1000,
   maxRequests: 40,
 });
 
 const attendanceSignedUrlRateLimiter = createRateLimiter({
+  name: 'attendance-signed-urls',
   windowMs: 60 * 1000,
   maxRequests: 60,
 });
 
-app.post(
-  '/api/asistencia/evidencias',
-  requireAttendanceActorAuth,
-  attendanceUploadRateLimiter,
-  express.raw({
-    type: ['image/webp', 'image/jpeg', 'image/png', 'application/octet-stream', '*/*'],
-    limit: '6mb',
-  }),
-  handleUploadAttendanceEvidence
-);
+export interface AttendanceEvidenceRouteDeps {
+  uploadRateLimiter: express.RequestHandler;
+  signedUrlRateLimiter: express.RequestHandler;
+  authMiddleware: express.RequestHandler;
+  uploadHandler: express.RequestHandler;
+  signedUrlsHandler: express.RequestHandler;
+}
 
-app.post(
-  '/api/asistencia/evidencias/signed-urls',
-  requireAttendanceActorAuth,
-  attendanceSignedUrlRateLimiter,
-  handleBatchAttendanceSignedUrls
-);
+export function registerAttendanceEvidenceRoutes(
+  targetApp: express.Express,
+  deps: AttendanceEvidenceRouteDeps = {
+    uploadRateLimiter: attendanceUploadRateLimiter,
+    signedUrlRateLimiter: attendanceSignedUrlRateLimiter,
+    authMiddleware: requireAttendanceActorAuth,
+    uploadHandler: handleUploadAttendanceEvidence,
+    signedUrlsHandler: handleBatchAttendanceSignedUrls,
+  }
+): void {
+  targetApp.post(
+    '/api/asistencia/evidencias',
+    deps.uploadRateLimiter,
+    deps.authMiddleware,
+    express.raw({
+      type: ['image/webp', 'image/jpeg', 'image/png', 'application/octet-stream', '*/*'],
+      limit: '6mb',
+    }),
+    deps.uploadHandler
+  );
+
+  targetApp.post(
+    '/api/asistencia/evidencias/signed-urls',
+    deps.signedUrlRateLimiter,
+    deps.authMiddleware,
+    deps.signedUrlsHandler
+  );
+}
+
+registerAttendanceEvidenceRoutes(app);
 
 // ============================================================================
 // 1.F. INGESTA AUTENTICADA DE SOLICITUDES FDV (ZERO-ANON + ZOD + IDEMPOTENCIA ATÓMICA)
@@ -542,6 +580,40 @@ app.get(
 );
 
 // ============================================================================
+// 1.L. GESTIÓN Y FILTRADO REGIONAL DE PROMOTORAS (Fijas / Eventuales / Merchandising)
+// ============================================================================
+const promotorasRateLimiter = createRateLimiter({
+  name: 'promotoras-crud',
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+export interface PromotorasRouteDeps {
+  rateLimiter: express.RequestHandler;
+  authMiddleware: express.RequestHandler;
+  listHandler: express.RequestHandler;
+  createHandler: express.RequestHandler;
+  updateHandler: express.RequestHandler;
+}
+
+export function registerPromotorasRoutes(
+  targetApp: express.Express,
+  deps: PromotorasRouteDeps = {
+    rateLimiter: promotorasRateLimiter,
+    authMiddleware: requireCoordinatorOrAdminAuth,
+    listHandler: defaultPromotorasHandlers.handleListPromotoras,
+    createHandler: defaultPromotorasHandlers.handleCreatePromotora,
+    updateHandler: defaultPromotorasHandlers.handleUpdatePromotora,
+  }
+): void {
+  targetApp.get('/api/promotoras', deps.rateLimiter, deps.authMiddleware, deps.listHandler);
+  targetApp.post('/api/promotoras', deps.rateLimiter, deps.authMiddleware, deps.createHandler);
+  targetApp.patch('/api/promotoras/:id', deps.rateLimiter, deps.authMiddleware, deps.updateHandler);
+}
+
+registerPromotorasRoutes(app);
+
+// ============================================================================
 // 2. API 404 + MANEJO DE ERRORES
 // ============================================================================
 app.use('/api', (_req: Request, res: Response) => {
@@ -594,7 +666,19 @@ function serveSpa(mountPath: string, distPath: string, label: string): void {
   });
 }
 
-async function startServer() {
+export async function startServer() {
+  const envCheck = validateServerEnvConfig(process.env, {
+    isProduction: IS_PRODUCTION,
+    logger: serverLogger,
+  });
+  if (!envCheck.ok) {
+    process.exit(1);
+    return;
+  }
+
+  registerProcessShutdownHandlers(shutdownController);
+  process.on('exit', cleanupChildrenSync);
+
   if (IS_PRODUCTION) {
     const distPath = path.join(PROJECT_ROOT, 'dist');
     if (!fs.existsSync(path.join(distPath, 'index.html'))) {
@@ -602,6 +686,7 @@ async function startServer() {
         hint: 'Ejecuta "npm run build" antes de iniciar en producción.',
       });
       process.exit(1);
+      return;
     }
     // La PWA de logística se publica bajo `/logistica` (build con base `/logistica/`)
     serveSpa('/logistica', path.join(PROJECT_ROOT, 'ruta-degustacion', 'dist'), 'logistica');
@@ -612,6 +697,7 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa',
     });
+    activeViteServer = vite;
     app.use(vite.middlewares);
   }
 
@@ -626,6 +712,7 @@ async function startServer() {
     });
     void ensureChoferPwaServer();
   });
+  activeHttpServer = server;
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
@@ -637,7 +724,19 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  serverLogger.error('server_start_failed', { err });
-  process.exit(1);
-});
+function isExecutedAsEntryPoint(): boolean {
+  const argvEntry = process.argv[1];
+  if (!argvEntry) return false;
+  const resolvedArgv = path.resolve(argvEntry);
+  const resolvedSelf = path.resolve(fileURLToPath(import.meta.url));
+  return process.platform === 'win32'
+    ? resolvedArgv.toLowerCase() === resolvedSelf.toLowerCase()
+    : resolvedArgv === resolvedSelf;
+}
+
+if (isExecutedAsEntryPoint()) {
+  startServer().catch((err) => {
+    serverLogger.error('server_start_failed', { err });
+    process.exit(1);
+  });
+}

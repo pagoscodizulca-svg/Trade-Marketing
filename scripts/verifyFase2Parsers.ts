@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import dotenv from 'dotenv';
-import * as XLSX from 'xlsx';
+import { buildLegacyOleXlsStubBuffer, buildXlsxFixtureBuffer } from './lib/excelFixtureBuilder';
 import {
   extractTabularDegustacionFile,
   MAX_UPLOAD_FILE_BYTES,
@@ -153,17 +153,13 @@ async function main() {
     ['DIA', 'TURNO', 'CLIENTE', 'RUTA', 'MORTADELA', 'ESPALDA', 'VENDEDOR', 'PROMOTORA'],
     ['16/11/2026', 'TARDE', 'FAMILIA CENTER, C.A.', 'NORTE', 2, 1.5, 'LUIS FDV', sampleRealPromotora.name],
   ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(sheetMatrix);
-  XLSX.utils.book_append_sheet(wb, ws, 'Cronograma');
+  const xlsxBuffer = await buildXlsxFixtureBuffer([{ name: 'Cronograma', rows: sheetMatrix }]);
+  const xlsStubBuffer = buildLegacyOleXlsStubBuffer();
 
-  const xlsxUint8 = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-  const xlsUint8 = XLSX.write(wb, { type: 'buffer', bookType: 'biff8' }) as Buffer;
-
-  const xlsxParsed = await extractTabularDegustacionFile(toArrayBuffer(xlsxUint8), 'xlsx');
+  const xlsxParsed = await extractTabularDegustacionFile(xlsxBuffer, 'xlsx');
   // S-01/P-03: el binario legado .xls (BIFF8) se rechaza por seguridad al retirar SheetJS del runtime
   await assert.rejects(
-    extractTabularDegustacionFile(toArrayBuffer(xlsUint8), 'xls'),
+    extractTabularDegustacionFile(xlsStubBuffer, 'xls'),
     /\.xls\) ya no es compatible/
   );
 

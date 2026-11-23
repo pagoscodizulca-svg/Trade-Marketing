@@ -159,6 +159,10 @@ export interface AsistenciaEvidenciaDbRow {
   capturado_en_servidor: string;
   cargado_por_uid: string | null;
   cargado_por_rol: 'promotora' | 'coordinadora' | 'admin';
+  /** Versión de bloqueo optimista anti-TOCTOU (inicia en 1). */
+  version?: number;
+  /** Marca temporal de última actualización confirmada en servidor. */
+  updated_at?: string;
 }
 
 export interface AttendanceSlotEvidenceItem {
@@ -308,6 +312,7 @@ export const UploadAttendanceEvidenceMetadataSchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional().nullable(),
   gpsAccuracy: z.coerce.number().min(0).max(100000).optional().nullable(),
   sucursal: z.string().trim().max(64).optional(),
+  expectedVersion: z.coerce.number().int().min(1).max(1_000_000).optional().nullable(),
 });
 
 export type UploadAttendanceEvidenceMetadata = z.infer<

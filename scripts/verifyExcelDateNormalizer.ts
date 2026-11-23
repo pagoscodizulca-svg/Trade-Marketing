@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
-import * as XLSX from 'xlsx';
+import { buildXlsxFixtureBuffer } from './lib/excelFixtureBuilder';
 import {
   EMPTY_NORMALIZED_DATE,
   MAX_DATE_INPUT_LENGTH,
@@ -373,18 +373,20 @@ async function runExcelDateVerification() {
   // ---------------------------------------------------------------------------
   // 6. Prueba de extremo a extremo con archivo binario Excel (.xlsx) heterogéneo
   // ---------------------------------------------------------------------------
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet([
-    ['FECHA', 'TURNO', 'CLIENTE', 'PRODUCTO', 'KILOS', 'VENDEDOR', 'PROMOTORA'],
-    ['5 de marzo de 2026', 'MAÑANA', 'FIORELLA NORTE', 'MORTADELA', 3, 'CARLOS', ''],
-    [46337.54, 'TARDE', 'ENNE FUERZAS ARMADAS', 'ESPALDA', 2.5, 'LUIS', ''],
-    ['05/sep./26', 'MAÑANA', 'DE CANDIDO EXPRESS', 'CHORIZO', 2, 'ANA', ''],
-    ['25/11/2026', 'TARDE', 'HIPER LIDER', 'MORTADELA', 4, 'PEDRO', ''],
-    ['2026-11-15T00:00:00.000Z', 'MAÑANA', 'FAMILIA CENTER', 'ARROZ VENCAMPO', 5, 'JOSE', ''],
-    ['SIN FECHA', 'TARDE', 'TIENDA PENDIENTE', 'MORTADELA', 2, 'MARCOS', ''],
+  const xlsxBuf = await buildXlsxFixtureBuffer([
+    {
+      name: 'Planificacion',
+      rows: [
+        ['FECHA', 'TURNO', 'CLIENTE', 'PRODUCTO', 'KILOS', 'VENDEDOR', 'PROMOTORA'],
+        ['5 de marzo de 2026', 'MAÑANA', 'FIORELLA NORTE', 'MORTADELA', 3, 'CARLOS', ''],
+        [46337.54, 'TARDE', 'ENNE FUERZAS ARMADAS', 'ESPALDA', 2.5, 'LUIS', ''],
+        ['05/sep./26', 'MAÑANA', 'DE CANDIDO EXPRESS', 'CHORIZO', 2, 'ANA', ''],
+        ['25/11/2026', 'TARDE', 'HIPER LIDER', 'MORTADELA', 4, 'PEDRO', ''],
+        ['2026-11-15T00:00:00.000Z', 'MAÑANA', 'FAMILIA CENTER', 'ARROZ VENCAMPO', 5, 'JOSE', ''],
+        ['SIN FECHA', 'TARDE', 'TIENDA PENDIENTE', 'MORTADELA', 2, 'MARCOS', ''],
+      ],
+    },
   ]);
-  XLSX.utils.book_append_sheet(wb, ws, 'Planificacion');
-  const xlsxBuf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
 
   const parsedXlsx = await extractTabularDegustacionFile(xlsxBuf, 'xlsx', {
     fileName: 'Lote_Mixto_2026.xlsx',

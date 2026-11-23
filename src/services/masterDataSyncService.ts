@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import type { Store } from '../types';
 import type {
+  AllowedRegionCode,
   CadenaComercial,
   CadenaComercialInput,
   Cliente,
@@ -16,9 +17,14 @@ import type {
   Json,
   LoteSincronizacion,
   MasterDataDatabase,
+  RegionalActorProfile,
+  RegionalClientSyncReport,
+  RegionalClientSyncSummary,
+  RegionalSyncBatchError,
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
   SucursalMaestro,
+  SupabaseRegionCatalogRow,
   Vendedor,
   VendedorCrudInput,
   VendedorSincronizacionInput,
@@ -32,8 +38,23 @@ import {
 } from './supabaseClient';
 import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
 import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
+import {
+  LRUCache,
+  resolvePositiveIntConfig,
+  type LRUCacheMetrics,
+} from '../utils/lruCache';
+import {
+  ALLOWED_REGIONS,
+  REGIONAL_PRIORITY_RANK,
+  REGIONAL_SYNC_PRIORITY_QUEUE,
+  isAllowedRegionCode,
+  mapAllowedRegionToLegacySucursal,
+  normalizeAllowedRegionStrict,
+  sortAllowedRegionsByPriority,
+} from '../utils/regionalSyncClassifier';
 
 export type {
+  AllowedRegionCode,
   CadenaComercial,
   CadenaComercialInput,
   Cliente,
@@ -46,16 +67,24 @@ export type {
   FiltrosConsultaClientes,
   FiltrosConsultaVendedores,
   LoteSincronizacion,
+  LRUCacheMetrics,
   MasterDataDatabase,
+  RegionalActorProfile,
+  RegionalClientSyncReport,
+  RegionalClientSyncSummary,
+  RegionalSyncBatchError,
   ResultadoSincronizacion,
   ResumenRpcSincronizacion,
   SucursalMaestro,
+  SupabaseRegionCatalogRow,
   Vendedor,
   VendedorCrudInput,
   VendedorSincronizacionInput,
   ZonaComercial,
   ZonaComercialInput,
-} from '../types/masterData';
+};
+
+export { ALLOWED_REGIONS, REGIONAL_SYNC_PRIORITY_QUEUE };
 
 /** Tamaño óptimo de lote para Supabase Plan Gratuito (entre 300 y 500 registros por RPC). */
 export const MASTER_SYNC_CHUNK_SIZE = 400;
@@ -63,7 +92,48 @@ export const MASTER_SYNC_CHUNK_SIZE = 400;
 /** Tamaño máximo por página en lecturas PostgREST para superar el tope por defecto de 1,000 filas. */
 export const POSTGREST_READ_PAGE_SIZE = 1000;
 
-const CACHE_TTL_MS = 2 * 60 * 1000;
+export const DEFAULT_MASTER_DATA_CACHE_MAX_ITEMS = 2000;
+export const DEFAULT_MASTER_DATA_CACHE_TTL_MS = 5 * 60 * 1000; // 300000 ms (5 min)
+export const DEFAULT_MASTER_DATA_SYNC_BATCH_SIZE = 400;
+
+export function resolveMasterDataCacheMaxItems(
+  envOverride?: Record<string, string | undefined>
+): number {
+  return resolvePositiveIntConfig({
+    nodeEnvKey: 'MASTER_DATA_CACHE_MAX_ITEMS',
+    viteEnvKey: 'VITE_MASTER_DATA_CACHE_MAX_ITEMS',
+    fallback: DEFAULT_MASTER_DATA_CACHE_MAX_ITEMS,
+    min: 10,
+    max: 50_000,
+    envOverride,
+  });
+}
+
+export function resolveMasterDataCacheTtlMs(
+  envOverride?: Record<string, string | undefined>
+): number {
+  return resolvePositiveIntConfig({
+    nodeEnvKey: 'MASTER_DATA_CACHE_TTL_MS',
+    viteEnvKey: 'VITE_MASTER_DATA_CACHE_TTL_MS',
+    fallback: DEFAULT_MASTER_DATA_CACHE_TTL_MS,
+    min: 1_000,
+    max: 3_600_000,
+    envOverride,
+  });
+}
+
+export function resolveMasterDataSyncBatchSize(
+  envOverride?: Record<string, string | undefined>
+): number {
+  return resolvePositiveIntConfig({
+    nodeEnvKey: 'MASTER_DATA_SYNC_BATCH_SIZE',
+    viteEnvKey: 'VITE_MASTER_DATA_SYNC_BATCH_SIZE',
+    fallback: DEFAULT_MASTER_DATA_SYNC_BATCH_SIZE,
+    min: 1,
+    max: 1000,
+    envOverride,
+  });
+}
 
 const VALORES_NULOS_TABULARES = new Set([
   '',
@@ -1161,36 +1231,133 @@ export async function sincronizarColeccionesMaestrasTrade(
 }
 
 // =============================================================================
-// 5. CAPA DE CONSULTA PAGINADA, CACHÉ LOCAL E INTEGRACIÓN CON TODA LA APP
+// 5. CAPA DE CONSULTA PAGINADA, CACHÉ LRU ACOTADA Y BÚSQUEDA SEGURA (", C.A.")
 // =============================================================================
 
-interface EntradaCache<T> {
-  expiraEn: number;
-  datos: T;
+const initialCacheMaxItems = resolveMasterDataCacheMaxItems();
+const initialCacheTtlMs = resolveMasterDataCacheTtlMs();
+
+const cacheVendedores = new LRUCache<string, Vendedor[]>({
+  maxItems: initialCacheMaxItems,
+  ttlMs: initialCacheTtlMs,
+});
+const cacheClientes = new LRUCache<string, ClienteConVendedor[]>({
+  maxItems: initialCacheMaxItems,
+  ttlMs: initialCacheTtlMs,
+});
+const cacheCadenas = new LRUCache<string, CadenaComercial[]>({
+  maxItems: Math.min(initialCacheMaxItems, 500),
+  ttlMs: initialCacheTtlMs,
+});
+const cacheZonas = new LRUCache<string, ZonaComercial[]>({
+  maxItems: Math.min(initialCacheMaxItems, 500),
+  ttlMs: initialCacheTtlMs,
+});
+const cacheRegionesOficiales = new LRUCache<
+  string,
+  Map<AllowedRegionCode, SupabaseRegionCatalogRow>
+>({
+  maxItems: 16,
+  ttlMs: initialCacheTtlMs,
+});
+const suscriptoresLocales = new Set<() => void>();
+
+export interface MasterDataCacheMetricsSnapshot {
+  clientes: LRUCacheMetrics;
+  vendedores: LRUCacheMetrics;
+  cadenas: LRUCacheMetrics;
+  zonas: LRUCacheMetrics;
+  regiones: LRUCacheMetrics;
+  total: {
+    size: number;
+    hits: number;
+    misses: number;
+    evictions: number;
+  };
 }
 
-const cacheVendedores = new Map<string, EntradaCache<Vendedor[]>>();
-const cacheClientes = new Map<string, EntradaCache<ClienteConVendedor[]>>();
-const cacheCadenas = new Map<string, EntradaCache<CadenaComercial[]>>();
-const cacheZonas = new Map<string, EntradaCache<ZonaComercial[]>>();
-const suscriptoresLocales = new Set<() => void>();
+export function getMasterDataCacheMetrics(): MasterDataCacheMetricsSnapshot {
+  const clientes = cacheClientes.getMetrics();
+  const vendedores = cacheVendedores.getMetrics();
+  const cadenas = cacheCadenas.getMetrics();
+  const zonas = cacheZonas.getMetrics();
+  const regiones = cacheRegionesOficiales.getMetrics();
+  return {
+    clientes,
+    vendedores,
+    cadenas,
+    zonas,
+    regiones,
+    total: {
+      size: clientes.size + vendedores.size + cadenas.size + zonas.size + regiones.size,
+      hits: clientes.hits + vendedores.hits + cadenas.hits + zonas.hits + regiones.hits,
+      misses: clientes.misses + vendedores.misses + cadenas.misses + zonas.misses + regiones.misses,
+      evictions:
+        clientes.evictions +
+        vendedores.evictions +
+        cadenas.evictions +
+        zonas.evictions +
+        regiones.evictions,
+    },
+  };
+}
+
+export function configureMasterDataCaches(options: {
+  maxItems?: number;
+  ttlMs?: number;
+}): void {
+  cacheClientes.reconfigure(options);
+  cacheVendedores.reconfigure(options);
+  cacheCadenas.reconfigure({
+    ...(options.maxItems !== undefined ? { maxItems: Math.min(options.maxItems, 500) } : {}),
+    ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
+  });
+  cacheZonas.reconfigure({
+    ...(options.maxItems !== undefined ? { maxItems: Math.min(options.maxItems, 500) } : {}),
+    ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
+  });
+  if (options.ttlMs !== undefined) {
+    cacheRegionesOficiales.reconfigure({ ttlMs: options.ttlMs });
+  }
+}
 
 export function clearMasterDataCaches(): void {
   cacheVendedores.clear();
   cacheClientes.clear();
   cacheCadenas.clear();
   cacheZonas.clear();
+  cacheRegionesOficiales.clear();
 }
 
 registerSupabaseSessionResetCallback(clearMasterDataCaches);
 registerMemoryCachePurgeCallback(clearMasterDataCaches);
 
-function buildScopedMasterCacheKey(params: Record<string, unknown>): string {
-  return `${getActiveClientSucursalHeader() || 'GLOBAL'}::${JSON.stringify(params)}`;
+function buildScopedMasterCacheKey(
+  params: Record<string, unknown>,
+  explicitScope?: string | null
+): string {
+  const scope = (explicitScope || getActiveClientSucursalHeader() || 'GLOBAL').trim().toUpperCase();
+  return `${scope}::${JSON.stringify(params)}`;
 }
 
-export function invalidarCacheMaestros(): void {
-  clearMasterDataCaches();
+/**
+ * Invalida toda la caché de maestros o únicamente las entradas asociadas a una región específica
+ * (además de vistas `GLOBAL::` afectadas para mantener consistencia en perfiles administrativos).
+ */
+export function invalidarCacheMaestros(regionScope?: string): void {
+  const cleanScope = regionScope?.trim().toUpperCase();
+  if (!cleanScope || cleanScope === 'GLOBAL' || cleanScope === 'ALL') {
+    clearMasterDataCaches();
+  } else {
+    const matchesScope = (key: string) =>
+      key.startsWith(`${cleanScope}::`) ||
+      key.startsWith('GLOBAL::') ||
+      key.includes(`"region":"${cleanScope}"`);
+    cacheVendedores.deleteWhere(matchesScope);
+    cacheClientes.deleteWhere(matchesScope);
+    cacheCadenas.deleteWhere(matchesScope);
+    cacheZonas.deleteWhere(matchesScope);
+  }
   for (const listener of suscriptoresLocales) {
     try {
       listener();
@@ -1207,8 +1374,195 @@ export function suscribirInvalidacionCacheMaestros(listener: () => void): () => 
   };
 }
 
-function sanitizarTerminoIlike(busqueda: string): string {
-  return busqueda.replace(/[%_(),]/g, ' ').trim();
+/**
+ * Detecta y neutraliza intentos de inyección de cláusulas PostgREST (ej. `,activo.eq.false`,
+ * `,id.neq.0`, `,razon_social.ilike.%x%`) preservando intactas comas comerciales legítimas
+ * como `", C.A."`, `", S.A."` o `", S.R.L."`.
+ */
+const POSTGREST_INJECTION_CLAUSE_REGEX =
+  /,\s*[a-z_][a-z0-9_]*\.(?:not\.)?(?:eq|neq|gt|gte|lt|lte|like|ilike|is|in|cs|cd|ov|fts|plfts|phfts|wfts|match|imatch)\.[^,]*/gi;
+
+const STANDALONE_POSTGREST_OP_REGEX =
+  /\b[a-z_][a-z0-9_]*\.(?:not\.)?(?:eq|neq|gt|gte|lt|lte|like|ilike|is|in|cs|cd|ov)\.[a-z0-9_%-]*\b/gi;
+
+const VENEZUELAN_CORP_SUFFIX_REGEX =
+  /^(.*?)(?:,\s*|\s+)(C\.?\s*A\.?|S\.?\s*A\.?|S\.?\s*R\.?\s*L\.?)$/i;
+
+/**
+ * Sanitiza un término de búsqueda comercial para PostgREST conservando comas y puntos
+ * legítimos de razones sociales venezolanas (`", C.A."`, `", S.A."`) mientras neutraliza
+ * paréntesis, comillas no balanceadas, operadores inyectados y comodines LIKE.
+ */
+export function sanitizarTerminoBusquedaComercial(busqueda: string, maxLen = 120): string {
+  const withoutControl = String(busqueda ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(POSTGREST_INJECTION_CLAUSE_REGEX, ' ')
+    .replace(STANDALONE_POSTGREST_OP_REGEX, ' ')
+    // Bloquear ruptura de delimitadores PostgREST `"..."` y grupos `(...)`
+    .replace(/[()"';*\\]/g, ' ')
+    .replace(/\s+,/g, ',')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+
+  if (!withoutControl) return '';
+  // Escapar comodines SQL LIKE (`%`, `_`)
+  return withoutControl.replace(/([%_])/g, '\\$1');
+}
+
+function formatPostgrestIlikeOperand(escapedPattern: string): string {
+  // En la gramática de PostgREST `.or(...)`, cualquier operando con `,` o `.`
+  // debe ir encerrado en comillas dobles `"..."` para tratarse como texto literal.
+  if (/[,.]/.test(escapedPattern)) {
+    return `"${escapedPattern}"`;
+  }
+  return escapedPattern;
+}
+
+function buildCommercialPatternVariants(sanitizedTerm: string): string[] {
+  const variants = new Set<string>([`%${sanitizedTerm}%`]);
+  const suffixMatch = VENEZUELAN_CORP_SUFFIX_REGEX.exec(sanitizedTerm);
+  if (suffixMatch) {
+    const stem = suffixMatch[1]!.trim();
+    const rawSuffix = suffixMatch[2]!.replace(/[.\s]+/g, '').toUpperCase();
+    const flexibleSuffix = rawSuffix.split('').join('%');
+    if (stem) {
+      // Permite que `"DISTRIBUIDORA Z CA"` encuentre `"DISTRIBUIDORA Z, C.A."` y viceversa
+      variants.add(`%${stem}%${flexibleSuffix}%`);
+    } else if (rawSuffix) {
+      variants.add(`%${flexibleSuffix}%`);
+    }
+  }
+  return Array.from(variants);
+}
+
+export function construirFiltroOrBusquedaClientes(busqueda: string): string {
+  const safeTerm = sanitizarTerminoBusquedaComercial(busqueda);
+  if (!safeTerm) return '';
+
+  const patterns = buildCommercialPatternVariants(safeTerm);
+  const primaryOperand = formatPostgrestIlikeOperand(patterns[0]!);
+  const clauses: string[] = [
+    `codigo_cliente.ilike.${primaryOperand}`,
+    `razon_social.ilike.${primaryOperand}`,
+    `nombre_comercial.ilike.${primaryOperand}`,
+    `rif.ilike.${primaryOperand}`,
+  ];
+
+  for (let i = 1; i < patterns.length; i++) {
+    const altOperand = formatPostgrestIlikeOperand(patterns[i]!);
+    clauses.push(`razon_social.ilike.${altOperand}`);
+    clauses.push(`nombre_comercial.ilike.${altOperand}`);
+  }
+
+  return clauses.join(',');
+}
+
+export function construirFiltroOrBusquedaGenerica(
+  busqueda: string,
+  columnas: readonly string[]
+): string {
+  const safeTerm = sanitizarTerminoBusquedaComercial(busqueda);
+  if (!safeTerm || columnas.length === 0) return '';
+  const operand = formatPostgrestIlikeOperand(`%${safeTerm}%`);
+  return columnas.map((col) => `${col}.ilike.${operand}`).join(',');
+}
+
+/**
+ * Comparador local tolerante a comas, puntos y tildes para razones sociales venezolanas
+ * (`"DISTRIBUIDORA Z, C.A."`, `"DISTRIBUIDORA Z CA"`, `", C.A."`).
+ */
+export function coincideBusquedaComercialNormalizada(
+  textoObjetivo: string | null | undefined,
+  busqueda: string | null | undefined
+): boolean {
+  const rawQuery = String(busqueda ?? '').trim();
+  if (!rawQuery) return true;
+  const target = String(textoObjetivo ?? '');
+  if (!target) return false;
+
+  const lowerTarget = target.toLowerCase();
+  const lowerQuery = rawQuery.toLowerCase();
+  if (lowerTarget.includes(lowerQuery)) return true;
+
+  const compact = (s: string) =>
+    s
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9Ñ]+/g, '');
+
+  const compactQuery = compact(rawQuery);
+  if (compactQuery.length < 2) return false;
+  return compact(target).includes(compactQuery);
+}
+
+function normalizeReturnedMasterSucursal(raw: Record<string, unknown>): SucursalMaestro | null {
+  return (
+    normalizarSucursalMaestro(raw.sucursal) ??
+    normalizarSucursalMaestro(raw.region_codigo) ??
+    normalizarSucursalMaestro(raw.region) ??
+    normalizarSucursalMaestro(raw.sede) ??
+    null
+  );
+}
+
+function normalizeReturnedClienteRow(raw: Record<string, unknown>): ClienteConVendedor {
+  const row = raw as unknown as ClienteConVendedor;
+  const sucursalNorm = normalizeReturnedMasterSucursal(raw);
+  return {
+    ...row,
+    codigo_cliente: String(raw.codigo_cliente ?? raw.codigo ?? raw.id ?? '').trim(),
+    razon_social:
+      limpiarCeldaTexto(raw.razon_social ?? raw.nombre_comercial ?? raw.nombre ?? '') || 'Sin nombre',
+    nombre_comercial: limpiarCeldaTexto(raw.nombre_comercial ?? raw.nombre ?? '') || row.nombre_comercial || null,
+    sucursal: sucursalNorm,
+    region_id: raw.region_id ? String(raw.region_id).trim() : null,
+    activo: raw.activo !== false,
+  };
+}
+
+function normalizeReturnedVendedorRow(raw: Record<string, unknown>): Vendedor {
+  const row = raw as unknown as Vendedor;
+  return {
+    ...row,
+    sucursal: normalizeReturnedMasterSucursal(raw),
+    region_id: raw.region_id ? String(raw.region_id).trim() : null,
+    activo: raw.activo !== false,
+  };
+}
+
+function normalizeReturnedCadenaRow(raw: Record<string, unknown>): CadenaComercial {
+  const row = raw as unknown as CadenaComercial;
+  return {
+    ...row,
+    sucursal: normalizeReturnedMasterSucursal(raw),
+    region_id: raw.region_id ? String(raw.region_id).trim() : null,
+    activo: raw.activo !== false,
+  };
+}
+
+function normalizeReturnedZonaRow(raw: Record<string, unknown>): ZonaComercial {
+  const row = raw as unknown as ZonaComercial;
+  return {
+    ...row,
+    sucursal: normalizeReturnedMasterSucursal(raw),
+    region_id: raw.region_id ? String(raw.region_id).trim() : null,
+    activo: raw.activo !== false,
+  };
+}
+
+function isPostgrestSchemaMismatchError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  const msg = String(err.message ?? '').toLowerCase();
+  return (
+    code === 'PGRST200' ||
+    code === 'PGRST204' ||
+    code === '42703' ||
+    msg.includes('could not find a relationship') ||
+    msg.includes('does not exist')
+  );
 }
 
 /**
@@ -1228,8 +1582,8 @@ export async function obtenerVendedoresMaestros(
 
   if (!filtros.forzarRefresco) {
     const enCache = cacheVendedores.get(claveCache);
-    if (enCache && enCache.expiraEn > Date.now()) {
-      return enCache.datos;
+    if (enCache !== undefined) {
+      return enCache;
     }
   }
 
@@ -1254,9 +1608,12 @@ export async function obtenerVendedoresMaestros(
       query = query.ilike('supervisor', filtros.supervisor.trim());
     }
     if (filtros.busqueda?.trim()) {
-      const term = sanitizarTerminoIlike(filtros.busqueda);
-      if (term) {
-        query = query.or(`codigo_vendedor.ilike.%${term}%,nombre_completo.ilike.%${term}%`);
+      const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
+        'codigo_vendedor',
+        'nombre_completo',
+      ]);
+      if (orFilter) {
+        query = query.or(orFilter);
       }
     }
 
@@ -1265,7 +1622,9 @@ export async function obtenerVendedoresMaestros(
       throw new Error(`Error consultando vendedores maestros: ${error.message}`);
     }
 
-    const pagina = (data ?? []) as unknown as Vendedor[];
+    const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
+      normalizeReturnedVendedorRow
+    );
     acumulado.push(...pagina);
     if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
       break;
@@ -1273,10 +1632,7 @@ export async function obtenerVendedoresMaestros(
     desde += POSTGREST_READ_PAGE_SIZE;
   }
 
-  cacheVendedores.set(claveCache, {
-    expiraEn: Date.now() + CACHE_TTL_MS,
-    datos: acumulado,
-  });
+  cacheVendedores.set(claveCache, acumulado);
   return acumulado;
 }
 
@@ -1290,72 +1646,94 @@ export async function obtenerClientesMaestros(
 ): Promise<ClienteConVendedor[]> {
   const soloActivos = filtros.soloActivos !== false;
   const incluirVendedor = filtros.incluirVendedor !== false;
-  const claveCache = buildScopedMasterCacheKey({
-    soloActivos,
-    incluirVendedor,
-    zona: filtros.zona?.trim().toUpperCase() || '',
-    ruta: filtros.ruta?.trim().toUpperCase() || '',
-    vendedorId: filtros.vendedorId?.trim() || '',
-    codigoVendedor: filtros.codigoVendedor?.trim().toUpperCase() || '',
-    canal: filtros.canal?.trim().toUpperCase() || '',
-    busqueda: filtros.busqueda?.trim().toUpperCase() || '',
-  });
+  const claveCache = buildScopedMasterCacheKey(
+    {
+      soloActivos,
+      incluirVendedor,
+      zona: filtros.zona?.trim().toUpperCase() || '',
+      ruta: filtros.ruta?.trim().toUpperCase() || '',
+      vendedorId: filtros.vendedorId?.trim() || '',
+      codigoVendedor: filtros.codigoVendedor?.trim().toUpperCase() || '',
+      canal: filtros.canal?.trim().toUpperCase() || '',
+      region: filtros.region || '',
+      regionId: filtros.regionId?.trim() || '',
+      busqueda: filtros.busqueda?.trim().toUpperCase() || '',
+    },
+    filtros.region ?? null
+  );
 
   if (!filtros.forzarRefresco) {
     const enCache = cacheClientes.get(claveCache);
-    if (enCache && enCache.expiraEn > Date.now()) {
-      return enCache.datos;
+    if (enCache !== undefined) {
+      return enCache;
     }
   }
 
   const client = supabaseClient ?? getMasterDataSupabaseClient();
-  const selectExpr = incluirVendedor
-    ? '*, vendedor:vendedores(id, codigo_vendedor, nombre_completo, zona, supervisor, activo)'
-    : '*';
+  let useJoinVendedor = incluirVendedor;
+  let useOrderByRazon = true;
 
   const acumulado: ClienteConVendedor[] = [];
   let desde = 0;
 
   while (true) {
-    let query = client
-      .from('clientes')
-      .select(selectExpr)
-      .order('razon_social', { ascending: true })
-      .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
-
-    if (soloActivos) {
-      query = query.eq('activo', true);
-    }
-    if (filtros.zona?.trim()) {
-      query = query.ilike('zona', filtros.zona.trim());
-    }
-    if (filtros.ruta?.trim()) {
-      query = query.ilike('ruta', filtros.ruta.trim());
-    }
-    if (filtros.vendedorId?.trim()) {
-      query = query.eq('vendedor_id', filtros.vendedorId.trim());
-    }
-    if (filtros.codigoVendedor?.trim()) {
-      query = query.eq('codigo_vendedor', normalizarCodigoMaestro(filtros.codigoVendedor));
-    }
-    if (filtros.canal?.trim()) {
-      query = query.ilike('canal', filtros.canal.trim());
-    }
-    if (filtros.busqueda?.trim()) {
-      const term = sanitizarTerminoIlike(filtros.busqueda);
-      if (term) {
-        query = query.or(
-          `codigo_cliente.ilike.%${term}%,razon_social.ilike.%${term}%,nombre_comercial.ilike.%${term}%,rif.ilike.%${term}%`
-        );
+    const runPage = async (withJoin: boolean, withOrder: boolean) => {
+      const selectExpr = withJoin
+        ? '*, vendedor:vendedores(id, codigo_vendedor, nombre_completo, zona, supervisor, activo)'
+        : '*';
+      let query = client.from('clientes').select(selectExpr);
+      if (withOrder) {
+        query = query.order('razon_social', { ascending: true });
       }
-    }
+      query = query.range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
 
-    const { data, error } = await query;
+      if (soloActivos) {
+        query = query.eq('activo', true);
+      }
+      if (filtros.regionId?.trim()) {
+        query = query.eq('region_id', filtros.regionId.trim());
+      }
+      if (filtros.zona?.trim()) {
+        query = query.ilike('zona', filtros.zona.trim());
+      }
+      if (filtros.ruta?.trim()) {
+        query = query.ilike('ruta', filtros.ruta.trim());
+      }
+      if (filtros.vendedorId?.trim()) {
+        query = query.eq('vendedor_id', filtros.vendedorId.trim());
+      }
+      if (filtros.codigoVendedor?.trim()) {
+        query = query.eq('codigo_vendedor', normalizarCodigoMaestro(filtros.codigoVendedor));
+      }
+      if (filtros.canal?.trim()) {
+        query = query.ilike('canal', filtros.canal.trim());
+      }
+      if (filtros.busqueda?.trim()) {
+        const orFilter = construirFiltroOrBusquedaClientes(filtros.busqueda);
+        if (orFilter) {
+          query = query.or(orFilter);
+        }
+      }
+
+      return query;
+    };
+
+    let { data, error } = await runPage(useJoinVendedor, useOrderByRazon);
+    if (error && useJoinVendedor && isPostgrestSchemaMismatchError(error)) {
+      useJoinVendedor = false;
+      ({ data, error } = await runPage(false, useOrderByRazon));
+    }
+    if (error && useOrderByRazon && isPostgrestSchemaMismatchError(error)) {
+      useOrderByRazon = false;
+      ({ data, error } = await runPage(useJoinVendedor, false));
+    }
     if (error) {
       throw new Error(`Error consultando clientes maestros: ${error.message}`);
     }
 
-    const pagina = (data ?? []) as unknown as ClienteConVendedor[];
+    const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
+      normalizeReturnedClienteRow
+    );
     acumulado.push(...pagina);
     if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
       break;
@@ -1363,10 +1741,7 @@ export async function obtenerClientesMaestros(
     desde += POSTGREST_READ_PAGE_SIZE;
   }
 
-  cacheClientes.set(claveCache, {
-    expiraEn: Date.now() + CACHE_TTL_MS,
-    datos: acumulado,
-  });
+  cacheClientes.set(claveCache, acumulado);
   return acumulado;
 }
 
@@ -1432,6 +1807,7 @@ export const CadenaComercialCrudSchema = z.object({
     .default('Supermercado')
     .transform((v) => limpiarCeldaTexto(v) || 'Supermercado'),
   sucursal: SucursalMaestroCrudSchema,
+  region_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   activo: z.boolean().optional().default(true),
 });
 
@@ -1460,6 +1836,7 @@ export const ZonaComercialCrudSchema = z.object({
     .optional()
     .transform((v) => limpiarCeldaTexto(v) || null),
   sucursal: SucursalMaestroCrudSchema,
+  region_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   activo: z.boolean().optional().default(true),
 });
 
@@ -1468,6 +1845,7 @@ export const ClienteCrudSchema = ClienteSincronizacionSchema.extend({
   vendedor_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   cadena_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   zona_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
+  region_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   radio_geocerca_m: z.coerce
     .number()
     .int()
@@ -1482,6 +1860,7 @@ export const ClienteCrudSchema = ClienteSincronizacionSchema.extend({
 export const VendedorCrudSchema = VendedorSincronizacionSchema.extend({
   id: z.string().regex(UUID_V4_REGEX).optional(),
   sucursal: SucursalMaestroCrudSchema,
+  region_id: z.string().regex(UUID_V4_REGEX).nullable().optional(),
   activo: z.boolean().optional().default(true),
 });
 
@@ -1502,7 +1881,7 @@ export async function obtenerCadenasComerciales(
   });
   if (!filtros.forzarRefresco) {
     const cached = cacheCadenas.get(claveCache);
-    if (cached && cached.expiraEn > Date.now()) return cached.datos;
+    if (cached !== undefined) return cached;
   }
 
   const client = supabaseClient ?? getMasterDataSupabaseClient();
@@ -1513,16 +1892,16 @@ export async function obtenerCadenasComerciales(
 
   if (soloActivos) query = query.eq('activo', true);
   if (filtros.busqueda?.trim()) {
-    const term = sanitizarTerminoIlike(filtros.busqueda);
-    if (term) query = query.or(`codigo.ilike.%${term}%,nombre.ilike.%${term}%`);
+    const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, ['codigo', 'nombre']);
+    if (orFilter) query = query.or(orFilter);
   }
 
   const { data, error } = await query;
   if (error) {
     throw new Error(`Error consultando cadenas comerciales: ${error.message}`);
   }
-  const rows = (data ?? []) as unknown as CadenaComercial[];
-  cacheCadenas.set(claveCache, { expiraEn: Date.now() + CACHE_TTL_MS, datos: rows });
+  const rows = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedCadenaRow);
+  cacheCadenas.set(claveCache, rows);
   return rows;
 }
 
@@ -1538,6 +1917,7 @@ export async function guardarCadenaComercial(
     tipo_canal: parsed.tipo_canal,
     activo: parsed.activo,
     ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+    ...(parsed.region_id ? { region_id: parsed.region_id } : {}),
   };
 
   const res = parsed.id
@@ -1587,7 +1967,7 @@ export async function obtenerZonasComerciales(
   });
   if (!filtros.forzarRefresco) {
     const cached = cacheZonas.get(claveCache);
-    if (cached && cached.expiraEn > Date.now()) return cached.datos;
+    if (cached !== undefined) return cached;
   }
 
   const client = supabaseClient ?? getMasterDataSupabaseClient();
@@ -1595,16 +1975,20 @@ export async function obtenerZonasComerciales(
 
   if (soloActivos) query = query.eq('activo', true);
   if (filtros.busqueda?.trim()) {
-    const term = sanitizarTerminoIlike(filtros.busqueda);
-    if (term) query = query.or(`codigo.ilike.%${term}%,nombre.ilike.%${term}%,ciudad.ilike.%${term}%`);
+    const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
+      'codigo',
+      'nombre',
+      'ciudad',
+    ]);
+    if (orFilter) query = query.or(orFilter);
   }
 
   const { data, error } = await query;
   if (error) {
     throw new Error(`Error consultando zonas: ${error.message}`);
   }
-  const rows = (data ?? []) as unknown as ZonaComercial[];
-  cacheZonas.set(claveCache, { expiraEn: Date.now() + CACHE_TTL_MS, datos: rows });
+  const rows = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedZonaRow);
+  cacheZonas.set(claveCache, rows);
   return rows;
 }
 
@@ -1621,6 +2005,7 @@ export async function guardarZonaComercial(
     estado: parsed.estado,
     activo: parsed.activo,
     ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+    ...(parsed.region_id ? { region_id: parsed.region_id } : {}),
   };
 
   const res = parsed.id
@@ -1687,6 +2072,7 @@ export async function guardarClienteMaestro(
     codigo_vendedor: parsed.codigo_vendedor ?? null,
     activo: parsed.activo,
     ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+    ...(parsed.region_id ? { region_id: parsed.region_id } : {}),
   };
 
   const res = parsed.id
@@ -1736,6 +2122,7 @@ export async function guardarVendedorMaestro(
     supervisor: parsed.supervisor ?? null,
     activo: parsed.activo,
     ...(parsed.sucursal ? { sucursal: parsed.sucursal } : {}),
+    ...(parsed.region_id ? { region_id: parsed.region_id } : {}),
   };
 
   const res = parsed.id
@@ -1814,4 +2201,401 @@ export function mapearClienteMaestroAStore(
       inferirSucursalDesdeTerritorio(cliente) ??
       null,
   };
+}
+
+// =============================================================================
+// 6. SINCRONIZACIÓN REGIONAL IDEMPOTENTE POR PERFILES (SOLO 3 REGIONES REALES:
+//    "Regiones" -> OCCIDENTE [P1, regi_saba=TRUE], CENTRO [P2], ANDES [P3])
+// =============================================================================
+
+const GLOBAL_REGIONAL_ADMIN_ROLES = new Set([
+  'super_admin',
+  'superadmin',
+  'admin',
+  'gerencia',
+  'gerente_admin',
+]);
+
+export class RegionalAuthorizationError extends Error {
+  public readonly statusCode = 403;
+  public readonly code = 'FORBIDDEN_REGION_ACCESS';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'RegionalAuthorizationError';
+  }
+}
+
+export function isGlobalRegionalSyncRole(actor: RegionalActorProfile): boolean {
+  if (actor.isGlobalAdmin) return true;
+  const cleanRole = String(actor.role ?? '').trim().toLowerCase();
+  return GLOBAL_REGIONAL_ADMIN_ROLES.has(cleanRole);
+}
+
+/**
+ * Valida la autorización del perfil regional antes de cualquier lectura o sincronización:
+ *  - Perfiles con rol administrador/gerencia global pueden consultar/sincronizar una o varias
+ *    regiones del catálogo oficial (`OCCIDENTE`, `CENTRO`, `ANDES`) siempre ordenadas por prioridad.
+ *  - Perfiles restringidos a una región SOLO pueden operar sobre su `assignedRegion` asignada.
+ */
+export function assertRegionalProfileAccess(
+  actor: RegionalActorProfile,
+  requestedRegions?: readonly AllowedRegionCode[]
+): AllowedRegionCode[] {
+  const isGlobal = isGlobalRegionalSyncRole(actor);
+  const cleanRequested = (requestedRegions ?? []).filter((r): r is AllowedRegionCode =>
+    isAllowedRegionCode(r)
+  );
+
+  if (!isGlobal) {
+    const assigned = normalizeAllowedRegionStrict(actor.assignedRegion);
+    if (!assigned) {
+      throw new RegionalAuthorizationError(
+        'Perfil regional sin región oficial asignada (OCCIDENTE, CENTRO o ANDES). Acceso denegado.'
+      );
+    }
+
+    if (cleanRequested.length === 0) {
+      return [assigned];
+    }
+
+    const unauthorized = cleanRequested.filter((r) => r !== assigned);
+    if (unauthorized.length > 0 || new Set(cleanRequested).size > 1) {
+      throw new RegionalAuthorizationError(
+        `Acceso denegado: el perfil regional de ${assigned} no tiene autorización para operar sobre ${unauthorized.join(', ')}.`
+      );
+    }
+
+    return [assigned];
+  }
+
+  if (cleanRequested.length === 0) {
+    return [...REGIONAL_SYNC_PRIORITY_QUEUE];
+  }
+
+  return sortAllowedRegionsByPriority(cleanRequested);
+}
+
+/**
+ * Resuelve dinámicamente el catálogo oficial `regi_desd -> id_regi` (y flag `regi_saba`)
+ * desde la tabla `"Regiones"` en Supabase sin hardcodear UUIDs.
+ * Almacena el resultado en caché LRU acotada con TTL.
+ */
+export async function obtenerCatalogoRegionesOficiales(
+  supabaseClient?: SupabaseClient<MasterDataDatabase>,
+  options: { forzarRefresco?: boolean; cacheScopeKey?: string } = {}
+): Promise<Map<AllowedRegionCode, SupabaseRegionCatalogRow>> {
+  const cacheKey = options.cacheScopeKey || 'SUPABASE_REGIONES_OFICIALES';
+  if (!options.forzarRefresco) {
+    const cached = cacheRegionesOficiales.get(cacheKey);
+    if (cached !== undefined) {
+      return new Map(cached);
+    }
+  }
+
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const { data, error } = await client
+    .from('Regiones')
+    .select('id_regi, created_at, regi_desd, regi_saba');
+
+  if (error) {
+    throw new Error(`No se pudo resolver la tabla "Regiones" en Supabase: ${error.message}`);
+  }
+
+  const resolvedEntries: SupabaseRegionCatalogRow[] = [];
+  for (const rawRow of (data ?? []) as Array<Record<string, unknown>>) {
+    const code = normalizeAllowedRegionStrict(rawRow.regi_desd);
+    const idRegi = String(rawRow.id_regi ?? '').trim();
+    if (!code || !idRegi) continue;
+    resolvedEntries.push({
+      id_regi: idRegi,
+      created_at: String(rawRow.created_at ?? ''),
+      regi_desd: code,
+      regi_saba: Boolean(rawRow.regi_saba),
+      priority: REGIONAL_PRIORITY_RANK[code],
+    });
+  }
+
+  resolvedEntries.sort((a, b) => a.priority - b.priority);
+
+  const catalogMap = new Map<AllowedRegionCode, SupabaseRegionCatalogRow>();
+  for (const entry of resolvedEntries) {
+    if (!catalogMap.has(entry.regi_desd)) {
+      catalogMap.set(entry.regi_desd, entry);
+    }
+  }
+
+  cacheRegionesOficiales.set(cacheKey, catalogMap);
+  return new Map(catalogMap);
+}
+
+/**
+ * Sincroniza de forma idempotente (por lotes con `upsert`) los clientes por perfil regional
+ * respetando exclusivamente las 3 regiones reales de `"Regiones"` en orden estricto de prioridad:
+ *   1. `OCCIDENTE` (`regi_saba = TRUE`)
+ *   2. `CENTRO` (`regi_saba = FALSE`)
+ *   3. `ANDES` (`regi_saba = FALSE`)
+ *
+ * - Controla errores parciales por lote sin abortar el resto de lotes/regiones.
+ * - Valida autorización por perfil regional antes de escribir en Supabase.
+ * - Invalida selectivamente la caché de cada región al concluir su sincronización.
+ */
+export async function sincronizarClientesPorPerfilRegional(
+  params: {
+    actorProfile: RegionalActorProfile;
+    clientesPorRegion: Partial<Record<string, ClienteSincronizacionInput[]>>;
+    regionesObjetivo?: string[];
+    batchSize?: number;
+    forzarRefrescoCatalogo?: boolean;
+    onRegionStart?: (region: AllowedRegionCode, meta: SupabaseRegionCatalogRow) => void;
+  },
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<RegionalClientSyncReport> {
+  const startedAllMs = Date.now();
+  const regionesOmitidasNoPermitidas: string[] = [];
+  const validRegionsSet = new Set<AllowedRegionCode>();
+
+  const candidateKeys =
+    params.regionesObjetivo && params.regionesObjetivo.length > 0
+      ? params.regionesObjetivo
+      : Object.keys(params.clientesPorRegion);
+
+  for (const rawRegionKey of candidateKeys) {
+    const strictCode = normalizeAllowedRegionStrict(rawRegionKey);
+    if (!strictCode) {
+      regionesOmitidasNoPermitidas.push(rawRegionKey);
+      continue;
+    }
+    validRegionsSet.add(strictCode);
+  }
+
+  // También registrar claves inválidas presentes en `clientesPorRegion` si se filtró por `regionesObjetivo`
+  for (const rawKey of Object.keys(params.clientesPorRegion)) {
+    if (!normalizeAllowedRegionStrict(rawKey) && !regionesOmitidasNoPermitidas.includes(rawKey)) {
+      regionesOmitidasNoPermitidas.push(rawKey);
+    }
+  }
+
+  // Autorización estricta por perfil y ordenamiento de prioridad `OCCIDENTE -> CENTRO -> ANDES`
+  const orderedAuthorizedRegions = assertRegionalProfileAccess(
+    params.actorProfile,
+    Array.from(validRegionsSet)
+  );
+
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+  const catalogoRegiones = await obtenerCatalogoRegionesOficiales(client, {
+    forzarRefresco: params.forzarRefrescoCatalogo,
+  });
+
+  const effectiveBatchSize =
+    params.batchSize && Number.isFinite(params.batchSize) && params.batchSize >= 1
+      ? Math.min(1000, Math.trunc(params.batchSize))
+      : resolveMasterDataSyncBatchSize();
+
+  const resumenPorRegion: RegionalClientSyncSummary[] = [];
+
+  for (const regionCode of orderedAuthorizedRegions) {
+    const regionStartMs = Date.now();
+    const regionMeta = catalogoRegiones.get(regionCode);
+
+    // Extraer lista de clientes de la región (soportando claves con distinta capitalización)
+    const rawList: ClienteSincronizacionInput[] = [];
+    for (const [k, list] of Object.entries(params.clientesPorRegion)) {
+      if (normalizeAllowedRegionStrict(k) === regionCode && Array.isArray(list)) {
+        rawList.push(...list);
+      }
+    }
+
+    if (!regionMeta) {
+      resumenPorRegion.push({
+        region: regionCode,
+        regionId: '',
+        priority: REGIONAL_PRIORITY_RANK[regionCode],
+        regiSaba: regionCode === 'OCCIDENTE',
+        procesados: 0,
+        insertadosOActualizados: 0,
+        omitidos: rawList.length,
+        errores: [
+          {
+            lote: 0,
+            motivo: `La región ${regionCode} no existe en la tabla "Regiones" de Supabase.`,
+          },
+        ],
+        duracionMs: Date.now() - regionStartMs,
+        lotesEjecutados: 0,
+      });
+      continue;
+    }
+
+    params.onRegionStart?.(regionCode, regionMeta);
+
+    // Deduplicación idempotente por `codigo_cliente` normalizado dentro de la región
+    const dedupMap = new Map<string, Record<string, unknown>>();
+    let omitidos = 0;
+    const syncIso = new Date().toISOString();
+    const legacySucursal = mapAllowedRegionToLegacySucursal(regionCode);
+
+    for (const item of rawList) {
+      const codigo = normalizarCodigoMaestro(item.codigo_cliente);
+      const razon = limpiarCeldaTexto(item.razon_social);
+      if (!codigo || !razon) {
+        omitidos += 1;
+        continue;
+      }
+
+      if (dedupMap.has(codigo)) {
+        omitidos += 1;
+      }
+
+      dedupMap.set(codigo, {
+        codigo_cliente: codigo,
+        rif: normalizarRifFiscal(item.rif),
+        razon_social: razon,
+        nombre_comercial: limpiarCeldaTexto(item.nombre_comercial) || null,
+        canal: limpiarCeldaTexto(item.canal) || null,
+        segmento: limpiarCeldaTexto(item.segmento) || null,
+        zona: limpiarCeldaTexto(item.zona) || null,
+        ruta: limpiarCeldaTexto(item.ruta) || null,
+        direccion: limpiarCeldaTexto(item.direccion) || null,
+        ciudad: limpiarCeldaTexto(item.ciudad) || null,
+        estado: limpiarCeldaTexto(item.estado) || null,
+        telefono: normalizarTelefonoMaestro(item.telefono),
+        latitud: normalizarCoordenada(item.latitud, -90, 90),
+        longitud: normalizarCoordenada(item.longitud, -180, 180),
+        codigo_vendedor: item.codigo_vendedor
+          ? normalizarCodigoMaestro(item.codigo_vendedor)
+          : null,
+        region_id: regionMeta.id_regi,
+        ...(legacySucursal ? { sucursal: legacySucursal } : {}),
+        activo: true,
+        ultima_sincronizacion: syncIso,
+        metadata: {
+          ...(item.metadata ?? {}),
+          regi_desd: regionMeta.regi_desd,
+          regi_saba: regionMeta.regi_saba,
+        } as unknown as Json,
+      });
+    }
+
+    const dedupRecords = Array.from(dedupMap.values());
+    const lotes = dividirEnLotes(dedupRecords, effectiveBatchSize);
+    const errores: RegionalSyncBatchError[] = [];
+    let insertadosOActualizados = 0;
+
+    for (let i = 0; i < lotes.length; i++) {
+      const lote = lotes[i]!;
+      try {
+        const { error } = await client
+          .from('clientes')
+          .upsert(lote as unknown as MasterDataDatabase['public']['Tables']['clientes']['Insert'][], {
+            onConflict: 'codigo_cliente',
+          });
+
+        if (error) {
+          errores.push({
+            lote: i + 1,
+            motivo: error.message,
+            codigosAfectados: lote.map((r) => String(r.codigo_cliente ?? '')),
+          });
+        } else {
+          insertadosOActualizados += lote.length;
+        }
+      } catch (err) {
+        errores.push({
+          lote: i + 1,
+          motivo: err instanceof Error ? err.message : String(err),
+          codigosAfectados: lote.map((r) => String(r.codigo_cliente ?? '')),
+        });
+      }
+    }
+
+    // Invalidación dirigida de caché para esta región al finalizar su sincronización
+    invalidarCacheMaestros(regionCode);
+
+    resumenPorRegion.push({
+      region: regionCode,
+      regionId: regionMeta.id_regi,
+      priority: regionMeta.priority,
+      regiSaba: regionMeta.regi_saba,
+      procesados: dedupRecords.length,
+      insertadosOActualizados,
+      omitidos,
+      errores,
+      duracionMs: Date.now() - regionStartMs,
+      lotesEjecutados: lotes.length,
+    });
+  }
+
+  return {
+    ordenPrioridadEjecutado: orderedAuthorizedRegions,
+    regionesOmitidasNoPermitidas,
+    resumenPorRegion,
+    totales: {
+      procesados: resumenPorRegion.reduce((acc, r) => acc + r.procesados, 0),
+      insertadosOActualizados: resumenPorRegion.reduce(
+        (acc, r) => acc + r.insertadosOActualizados,
+        0
+      ),
+      omitidos: resumenPorRegion.reduce((acc, r) => acc + r.omitidos, 0),
+      errores: resumenPorRegion.reduce((acc, r) => acc + r.errores.length, 0),
+      duracionMs: Date.now() - startedAllMs,
+    },
+  };
+}
+
+/**
+ * Consulta clientes aplicando estrictamente la autorización por perfil regional,
+ * resolviendo `id_regi` dinámicamente desde `"Regiones"` y reutilizando la caché LRU
+ * acotada + búsqueda segura de razones sociales `", C.A."`.
+ */
+export async function obtenerClientesPorPerfilRegional(
+  actorProfile: RegionalActorProfile,
+  filtros: FiltrosConsultaClientes = {},
+  supabaseClient?: SupabaseClient<MasterDataDatabase>
+): Promise<ClienteConVendedor[]> {
+  const requestedList = filtros.region ? [filtros.region] : [];
+  const allowed = assertRegionalProfileAccess(actorProfile, requestedList);
+  const client = supabaseClient ?? getMasterDataSupabaseClient();
+
+  if (allowed.length === 1) {
+    const targetRegion = allowed[0]!;
+    const catalog = await obtenerCatalogoRegionesOficiales(client);
+    const meta = catalog.get(targetRegion);
+    if (!meta) {
+      throw new Error(`No se encontró la región ${targetRegion} en la tabla "Regiones".`);
+    }
+    return obtenerClientesMaestros(
+      {
+        ...filtros,
+        region: targetRegion,
+        regionId: meta.id_regi,
+      },
+      client
+    );
+  }
+
+  // Perfil administrador global solicitando todas las regiones en orden de prioridad
+  const catalog = await obtenerCatalogoRegionesOficiales(client);
+  const combined: ClienteConVendedor[] = [];
+  const seenIds = new Set<string>();
+
+  for (const regionCode of allowed) {
+    const meta = catalog.get(regionCode);
+    if (!meta) continue;
+    const rows = await obtenerClientesMaestros(
+      {
+        ...filtros,
+        region: regionCode,
+        regionId: meta.id_regi,
+      },
+      client
+    );
+    for (const row of rows) {
+      if (!seenIds.has(row.id)) {
+        seenIds.add(row.id);
+        combined.push(row);
+      }
+    }
+  }
+  return combined;
 }

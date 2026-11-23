@@ -44,6 +44,54 @@ import {
   fetchCheckinPhotosBatch,
   type StaffMemberRecord,
 } from '../../services/supabaseModule1';
+import { normalizeSearchText } from '../../utils/textSearch';
+
+export { normalizeSearchText };
+
+/**
+ * Filtra tarjetas diarias de evidencias de asistencia de forma pura, segura ante `null`/`undefined`
+ * y completamente insensible a acentos/diacríticos (NFD) y mayúsculas.
+ */
+export function filterAttendanceViewModels(
+  items: readonly DailyPromotoraAttendanceViewModel[],
+  options: {
+    searchQuery?: string | null;
+    profileFilter?: 'TODOS' | PerfilAsistencia;
+    cardLimit?: number;
+  } = {}
+): DailyPromotoraAttendanceViewModel[] {
+  const cleanQ = normalizeSearchText(options.searchQuery);
+  const profileFilter = options.profileFilter ?? 'TODOS';
+
+  const filtered = items.filter((item) => {
+    if (!item) return false;
+    if (profileFilter !== 'TODOS' && item.perfilAplicado !== profileFilter) {
+      return false;
+    }
+    if (!cleanQ) return true;
+
+    const evidencePdvs = Object.values(item.evidencesBySlot ?? {}).some((ev) =>
+      normalizeSearchText(ev?.pdvNombre).includes(cleanQ)
+    );
+
+    return (
+      normalizeSearchText(item.promotoraNombre).includes(cleanQ) ||
+      normalizeSearchText(item.pdvNombre).includes(cleanQ) ||
+      normalizeSearchText(item.zona).includes(cleanQ) ||
+      normalizeSearchText(item.fechaJornada).includes(cleanQ) ||
+      normalizeSearchText(item.fechaSlash).includes(cleanQ) ||
+      normalizeSearchText(item.fechaLongEs).includes(cleanQ) ||
+      normalizeSearchText(item.perfilAplicado).includes(cleanQ) ||
+      normalizeSearchText(item.compliance?.statusLabel).includes(cleanQ) ||
+      evidencePdvs
+    );
+  });
+
+  if (typeof options.cardLimit === 'number' && Number.isFinite(options.cardLimit)) {
+    return filtered.slice(0, Math.max(0, Math.trunc(options.cardLimit)));
+  }
+  return filtered;
+}
 
 export interface AttendanceVisualBlockSpec {
   blockKey: 'JORNADA_UNICA' | 'MANANA' | 'TARDE';
@@ -251,23 +299,11 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   }, [allViewModels]);
 
   const filteredViewModels = useMemo(() => {
-    const cleanQ = searchQuery.trim().toLowerCase();
-    return allViewModels
-      .filter((item) => {
-        if (profileFilter !== 'TODOS' && item.perfilAplicado !== profileFilter) {
-          return false;
-        }
-        if (!cleanQ) return true;
-        return (
-          item.promotoraNombre.toLowerCase().includes(cleanQ) ||
-          item.pdvNombre.toLowerCase().includes(cleanQ) ||
-          item.zona.toLowerCase().includes(cleanQ) ||
-          item.fechaJornada.includes(cleanQ) ||
-          item.fechaSlash.includes(cleanQ) ||
-          item.perfilAplicado.toLowerCase().includes(cleanQ)
-        );
-      })
-      .slice(0, cardLimit);
+    return filterAttendanceViewModels(allViewModels, {
+      searchQuery,
+      profileFilter,
+      cardLimit,
+    });
   }, [allViewModels, profileFilter, searchQuery, cardLimit]);
 
   const groupedByDay = useMemo(() => {

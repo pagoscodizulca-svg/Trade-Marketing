@@ -51,6 +51,7 @@ export interface CadenaComercialInput {
   nombre: string;
   tipo_canal?: string;
   sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
   activo?: boolean;
 }
 
@@ -61,6 +62,7 @@ export interface ZonaComercial {
   ciudad: string | null;
   estado: string | null;
   sucursal: SucursalMaestro | null;
+  region_id?: string | null;
   activo: boolean;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -74,6 +76,7 @@ export interface ZonaComercialInput {
   ciudad?: string | null;
   estado?: string | null;
   sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
   activo?: boolean;
 }
 
@@ -87,6 +90,7 @@ export interface Vendedor {
   zona: string | null;
   supervisor: string | null;
   sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
   activo: boolean;
   metadata: Record<string, unknown>;
   ultima_sincronizacion: string | null;
@@ -103,6 +107,7 @@ export interface VendedorSincronizacionInput {
   zona?: string | null;
   supervisor?: string | null;
   sucursal?: SucursalMaestro | null;
+  region_id?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -252,6 +257,59 @@ export interface SupervisorMaestroInput {
   activo?: boolean;
 }
 
+export type PromotoraCategoria = 'fija' | 'eventual' | 'merchandising';
+export type PromotoraCategoriaOficial = 'Fijas' | 'Eventuales' | 'Merchandising';
+
+export type AllowedRegionCode = 'OCCIDENTE' | 'CENTRO' | 'ANDES';
+
+/** Registro exacto de la tabla `"Regiones"` en Supabase (`apaxdgxtaoeyswlfblgi`). */
+export interface SupabaseRegionCatalogRow {
+  id_regi: string;
+  created_at: string;
+  regi_desd: AllowedRegionCode;
+  regi_saba: boolean;
+  priority: 1 | 2 | 3;
+}
+
+export interface RegionalActorProfile {
+  userId?: string | null;
+  role: string;
+  assignedRegion: AllowedRegionCode | null;
+  isGlobalAdmin?: boolean;
+}
+
+export interface RegionalSyncBatchError {
+  lote: number;
+  motivo: string;
+  codigosAfectados?: string[];
+}
+
+export interface RegionalClientSyncSummary {
+  region: AllowedRegionCode;
+  regionId: string;
+  priority: 1 | 2 | 3;
+  regiSaba: boolean;
+  procesados: number;
+  insertadosOActualizados: number;
+  omitidos: number;
+  errores: RegionalSyncBatchError[];
+  duracionMs: number;
+  lotesEjecutados: number;
+}
+
+export interface RegionalClientSyncReport {
+  ordenPrioridadEjecutado: AllowedRegionCode[];
+  regionesOmitidasNoPermitidas: string[];
+  resumenPorRegion: RegionalClientSyncSummary[];
+  totales: {
+    procesados: number;
+    insertadosOActualizados: number;
+    omitidos: number;
+    errores: number;
+    duracionMs: number;
+  };
+}
+
 export interface PromotoraMaestra {
   id: string;
   nombre_completo: string;
@@ -263,6 +321,10 @@ export interface PromotoraMaestra {
   sucursal: SucursalMaestro | null;
   region_id: string | null;
   supervisor_id: string | null;
+  categoria?: PromotoraCategoriaOficial | PromotoraCategoria;
+  tipo?: string | null;
+  rol?: string | null;
+  metadata?: Record<string, unknown>;
   activo: boolean;
   created_at: string;
   updated_at: string;
@@ -279,6 +341,8 @@ export interface PromotoraMaestraInput {
   sucursal?: SucursalMaestro | null;
   region_id?: string | null;
   supervisor_id?: string | null;
+  categoria?: PromotoraCategoriaOficial | PromotoraCategoria;
+  tipo?: string | null;
   activo?: boolean;
 }
 
@@ -351,6 +415,8 @@ export interface FiltrosConsultaClientes {
   vendedorId?: string;
   codigoVendedor?: string;
   canal?: string;
+  region?: AllowedRegionCode;
+  regionId?: string;
   busqueda?: string;
   incluirVendedor?: boolean;
   forzarRefresco?: boolean;
@@ -366,6 +432,27 @@ export type MasterDataDatabase = {
   };
   public: {
     Tables: {
+      Regiones: {
+        Row: {
+          id_regi: string;
+          created_at: string;
+          regi_desd: string;
+          regi_saba: boolean;
+        };
+        Insert: {
+          id_regi?: string;
+          created_at?: string;
+          regi_desd: string;
+          regi_saba?: boolean;
+        };
+        Update: {
+          id_regi?: string;
+          created_at?: string;
+          regi_desd?: string;
+          regi_saba?: boolean;
+        };
+        Relationships: [];
+      };
       cadenas_comerciales: {
         Row: {
           activo: boolean;
@@ -374,6 +461,7 @@ export type MasterDataDatabase = {
           id: string;
           metadata: Json;
           nombre: string;
+          region_id?: string | null;
           sucursal: string | null;
           tipo_canal: string;
           updated_at: string;
@@ -385,6 +473,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre: string;
+          region_id?: string | null;
           sucursal?: string | null;
           tipo_canal?: string;
           updated_at?: string;
@@ -396,6 +485,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre?: string;
+          region_id?: string | null;
           sucursal?: string | null;
           tipo_canal?: string;
           updated_at?: string;
@@ -412,6 +502,7 @@ export type MasterDataDatabase = {
           id: string;
           metadata: Json;
           nombre: string;
+          region_id?: string | null;
           sucursal: string | null;
           updated_at: string;
         };
@@ -424,6 +515,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre: string;
+          region_id?: string | null;
           sucursal?: string | null;
           updated_at?: string;
         };
@@ -436,6 +528,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre?: string;
+          region_id?: string | null;
           sucursal?: string | null;
           updated_at?: string;
         };
@@ -459,6 +552,7 @@ export type MasterDataDatabase = {
           nombre_comercial: string | null;
           radio_geocerca_m: number;
           razon_social: string;
+          region_id?: string | null;
           rif: string | null;
           ruta: string | null;
           segmento: string | null;
@@ -487,6 +581,7 @@ export type MasterDataDatabase = {
           nombre_comercial?: string | null;
           radio_geocerca_m?: number;
           razon_social: string;
+          region_id?: string | null;
           rif?: string | null;
           ruta?: string | null;
           segmento?: string | null;
@@ -515,6 +610,7 @@ export type MasterDataDatabase = {
           nombre_comercial?: string | null;
           radio_geocerca_m?: number;
           razon_social?: string;
+          region_id?: string | null;
           rif?: string | null;
           ruta?: string | null;
           segmento?: string | null;
@@ -599,6 +695,7 @@ export type MasterDataDatabase = {
           id: string;
           metadata: Json;
           nombre_completo: string;
+          region_id?: string | null;
           sucursal: string | null;
           supervisor: string | null;
           telefono: string | null;
@@ -615,6 +712,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre_completo: string;
+          region_id?: string | null;
           sucursal?: string | null;
           supervisor?: string | null;
           telefono?: string | null;
@@ -631,6 +729,7 @@ export type MasterDataDatabase = {
           id?: string;
           metadata?: Json;
           nombre_completo?: string;
+          region_id?: string | null;
           sucursal?: string | null;
           supervisor?: string | null;
           telefono?: string | null;

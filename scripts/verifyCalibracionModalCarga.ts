@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import * as XLSX from 'xlsx';
+import { buildXlsxFixtureBuffer } from './lib/excelFixtureBuilder';
 import {
   extractTabularDegustacionFile,
   inferInitialBasePeriod,
@@ -333,15 +333,12 @@ async function runVerification() {
   // ---------------------------------------------------------------------------
   // 5. Prueba de extremo a extremo con libro `.xlsx` binario real (seriales + fórmulas maliciosas)
   // ---------------------------------------------------------------------------
-  const wb = XLSX.utils.book_new();
   const wsData = [
     ['FECHA', 'HORARIO', 'CLIENTE', 'PRODUCTO', 'KILOS', 'VENDEDOR', 'PROMOTORA'],
     ['JUEVES 08', '09:00 A 13:00', '=FIORELLA HIPERMARKET NORTE', 'MORTADELA', 2.5, 'CARLOS', 'SCARLETH'],
     [serialNov08, 'PM', 'ENNE FUERZAS ARMADAS', 'CHORIZO', 3, '+PEDRO', ''],
   ];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  XLSX.utils.book_append_sheet(wb, ws, 'OCTUBRE');
-  const xlsxOut = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  const xlsxOut = await buildXlsxFixtureBuffer([{ name: 'OCTUBRE', rows: wsData }]);
 
   const extractedBook = await extractTabularDegustacionFile(xlsxOut, 'xlsx', {
     fileName: 'Cronograma_Octubre_2026.xlsx',

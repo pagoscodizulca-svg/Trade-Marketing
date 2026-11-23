@@ -55,6 +55,147 @@ export function escapeIlikePattern(cleanToken: string): string {
   return cleanToken.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
+const WILDCARD_ALL_FILTER_TOKENS = new Set(['', 'TODOS', 'TODAS', 'ALL']);
+
+export function isWildcardAllFilter(value?: string | null): boolean {
+  return WILDCARD_ALL_FILTER_TOKENS.has(String(value ?? '').trim().toUpperCase());
+}
+
+/**
+ * Sanitiza estrictamente texto libre de usuario antes de interpolarlo en filtros
+ * `.or()` / `.ilike()` de PostgREST:
+ *   1. Limpia caracteres de control y recorta longitud máxima.
+ *   2. Neutraliza delimitadores reservados de la gramática de PostgREST
+ *      (`,`, `(`, `)`, `.`, `"`, `*`, `;`) impidiendo inyección de cláusulas lógicas.
+ *   3. Escapa comodines SQL LIKE (`\`, `%`, `_`) mediante `escapeIlikePattern`.
+ */
+export function sanitizePostgrestOrToken(raw: unknown, maxLen = 120): string {
+  const cleaned = sanitizeFilterToken(raw, maxLen)
+    .replace(/[(),."*;]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return escapeIlikePattern(cleaned);
+}
+
+interface PostgrestFilterableQuery<T> {
+  ilike(column: string, pattern: string): T;
+  or(filters: string): T;
+}
+
+/**
+ * Aplica de forma consistente y segura todos los filtros de Historial
+ * (`productFilter`, `sellerFilter`, `promotoraFilter`, `statusFilter`,
+ * `shiftFilter` y `searchQuery` sobre `comments`, `store` y `product`)
+ * tanto en la consulta indexada por `fecha_evento` como en el fallback por `date`.
+ */
+function applyHistorialServerFilters<T extends PostgrestFilterableQuery<T>>(
+  initialQuery: T,
+  params: ValidatedHistorialFilterParams,
+  options: { supportsMotivoArchivo: boolean }
+): T {
+  let query = initialQuery;
+
+  if (!isWildcardAllFilter(params.productFilter)) {
+    query = query.ilike('product', `%${escapeIlikePattern(params.productFilter!)}%`);
+  }
+
+  if (!isWildcardAllFilter(params.sellerFilter)) {
+    query = query.ilike('comments', `%${escapeIlikePattern(params.sellerFilter!)}%`);
+  }
+
+  if (!isWildcardAllFilter(params.promotoraFilter)) {
+    if (params.promotoraFilter === 'POR_ASIGNAR') {
+      query = query.ilike('comments', '%POR ASIGNAR%');
+    } else {
+      query = query.ilike('comments', `%${escapeIlikePattern(params.promotoraFilter!)}%`);
+    }
+  }
+
+  if (!isWildcardAllFilter(params.statusFilter)) {
+    switch (params.statusFilter) {
+      case 'NO_AUTORIZADA':
+      case 'RECHAZADA':
+      case 'CANCELADA':
+        query = query.or(
+          options.supportsMotivoArchivo
+            ? 'comments.ilike.%NO_AUTORIZADA%,comments.ilike.%RECHAZADA%,comments.ilike.%CANCELADA%,motivo_archivo.eq.NO_AUTORIZADA'
+            : 'comments.ilike.%NO_AUTORIZADA%,comments.ilike.%RECHAZADA%,comments.ilike.%CANCELADA%'
+        );
+        break;
+      case 'PENDIENTE':
+      case 'SOLICITADA':
+      case 'PENDIENTE_APROBACION':
+        query = query.or('comments.ilike.%PENDIENTE%,comments.ilike.%SOLICITADA%');
+        break;
+      case 'PROGRAMADO':
+      case 'PROGRAMADA':
+      case 'APROBADA':
+      case 'APROBADO':
+      case 'AUTORIZADA':
+      case 'AUTORIZADO':
+      case 'CONFIRMADA':
+        query = query.or(
+          'comments.ilike.%PROGRAMAD%,comments.ilike.%APROBAD%,comments.ilike.%AUTORIZAD%,comments.ilike.%CONFIRMADA%'
+        );
+        break;
+      case 'EN_CURSO':
+        query = query.ilike('comments', '%EN_CURSO%');
+        break;
+      case 'COMPLETADO':
+      case 'COMPLETADA':
+      case 'REALIZADA':
+      case 'EJECUTADA':
+        query = query.or(
+          'comments.ilike.%COMPLETAD%,comments.ilike.%REALIZAD%,comments.ilike.%EJECUTAD%'
+        );
+        break;
+      default: {
+        const safeStatus = sanitizePostgrestOrToken(params.statusFilter, 40);
+        if (safeStatus) {
+          query = query.ilike('comments', `%${safeStatus}%`);
+        }
+        break;
+      }
+    }
+  }
+
+  if (!isWildcardAllFilter(params.shiftFilter)) {
+    switch (params.shiftFilter) {
+      case 'MAÑANA':
+      case 'MANANA':
+        query = query.or(
+          'comments.ilike.%MAÑANA%,comments.ilike.%MANANA%,comments.ilike.%COMPLETO%'
+        );
+        break;
+      case 'TARDE':
+        query = query.ilike('comments', '%TARDE%');
+        break;
+      case 'COMPLETO':
+        query = query.ilike('comments', '%COMPLETO%');
+        break;
+      default: {
+        const safeShift = sanitizePostgrestOrToken(params.shiftFilter, 30);
+        if (safeShift) {
+          query = query.ilike('comments', `%${safeShift}%`);
+        }
+        break;
+      }
+    }
+  }
+
+  if (params.searchQuery) {
+    const safeSearch = sanitizePostgrestOrToken(params.searchQuery, 120);
+    if (safeSearch) {
+      query = query.or(
+        `comments.ilike.%${safeSearch}%,store.ilike.%${safeSearch}%,product.ilike.%${safeSearch}%`
+      );
+    }
+  }
+
+  return query;
+}
+
 const OptionalIsoDateSchema = z
   .string()
   .trim()
@@ -314,22 +455,7 @@ export async function queryServerPaginatedHistorialSurveys(
     if (dateWindow.effectiveLteYmd) {
       query = query.lte('fecha_evento', dateWindow.effectiveLteYmd);
     }
-    if (params.productFilter && params.productFilter !== 'TODOS') {
-      query = query.ilike('product', `%${escapeIlikePattern(params.productFilter)}%`);
-    }
-    if (params.sellerFilter && params.sellerFilter !== 'TODOS') {
-      query = query.ilike('comments', `%${escapeIlikePattern(params.sellerFilter)}%`);
-    }
-    if (params.promotoraFilter && params.promotoraFilter !== 'TODAS') {
-      if (params.promotoraFilter === 'POR_ASIGNAR') {
-        query = query.ilike('comments', '%POR ASIGNAR%');
-      } else {
-        query = query.ilike('comments', `%${escapeIlikePattern(params.promotoraFilter)}%`);
-      }
-    }
-    if (params.searchQuery) {
-      query = query.ilike('comments', `%${escapeIlikePattern(params.searchQuery)}%`);
-    }
+    query = applyHistorialServerFilters(query, params, { supportsMotivoArchivo: true });
 
     const { data, count, error } = await query
       .order('fecha_evento', { ascending: false })
@@ -375,25 +501,9 @@ export async function queryServerPaginatedHistorialSurveys(
   if (dateWindow.effectiveLteYmd) {
     fallbackQuery = fallbackQuery.lte('date', dateWindow.effectiveLteYmd);
   }
-  if (params.productFilter && params.productFilter !== 'TODOS') {
-    fallbackQuery = fallbackQuery.ilike('product', `%${escapeIlikePattern(params.productFilter)}%`);
-  }
-  if (params.sellerFilter && params.sellerFilter !== 'TODOS') {
-    fallbackQuery = fallbackQuery.ilike('comments', `%${escapeIlikePattern(params.sellerFilter)}%`);
-  }
-  if (params.promotoraFilter && params.promotoraFilter !== 'TODAS') {
-    if (params.promotoraFilter === 'POR_ASIGNAR') {
-      fallbackQuery = fallbackQuery.ilike('comments', '%POR ASIGNAR%');
-    } else {
-      fallbackQuery = fallbackQuery.ilike(
-        'comments',
-        `%${escapeIlikePattern(params.promotoraFilter)}%`
-      );
-    }
-  }
-  if (params.searchQuery) {
-    fallbackQuery = fallbackQuery.ilike('comments', `%${escapeIlikePattern(params.searchQuery)}%`);
-  }
+  fallbackQuery = applyHistorialServerFilters(fallbackQuery, params, {
+    supportsMotivoArchivo: false,
+  });
 
   const { data: fbData, count: fbCount, error: fbError } = await fallbackQuery
     .order('date', { ascending: false })

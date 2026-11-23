@@ -193,6 +193,28 @@ function sendJson(
   res.end(payload);
 }
 
+function splitPostgrestOrClauses(inner: string): string[] {
+  const clauses: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === '"' && inner[i - 1] !== '\\') {
+      inQuotes = !inQuotes;
+      current += ch;
+      continue;
+    }
+    if (ch === ',' && !inQuotes) {
+      if (current.trim()) clauses.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) clauses.push(current.trim());
+  return clauses;
+}
+
 function matchPostgrestRow(row: Record<string, any>, searchParams: URLSearchParams): boolean {
   for (const [key, rawExpr] of searchParams.entries()) {
     if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset' || key === 'on_conflict') {
@@ -200,14 +222,17 @@ function matchPostgrestRow(row: Record<string, any>, searchParams: URLSearchPara
     }
     if (key === 'or') {
       const inner = rawExpr.replace(/^\(/, '').replace(/\)$/, '');
-      const clauses = inner.split(',');
+      const clauses = splitPostgrestOrClauses(inner);
       const anyMatch = clauses.some((clause) => {
         const firstDot = clause.indexOf('.');
         const secondDot = clause.indexOf('.', firstDot + 1);
         if (firstDot < 0 || secondDot < 0) return false;
         const col = clause.slice(0, firstDot);
         const op = clause.slice(firstDot + 1, secondDot);
-        const val = clause.slice(secondDot + 1);
+        let val = clause.slice(secondDot + 1);
+        if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) {
+          val = val.slice(1, -1);
+        }
         return evaluateColumnOp(row[col], op, val);
       });
       if (!anyMatch) return false;
@@ -618,6 +643,92 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
 
     tables.asistencias_jornada = [];
     tables.asistencia_evidencias = [];
+    tables.Regiones = [
+      {
+        id_regi: '10101010-1010-4010-8010-101010101010',
+        created_at: '2026-01-01T00:00:00.000Z',
+        regi_desd: 'OCCIDENTE',
+        regi_saba: true,
+      },
+      {
+        id_regi: '20202020-2020-4020-8020-202020202020',
+        created_at: '2026-01-01T00:00:00.000Z',
+        regi_desd: 'CENTRO',
+        regi_saba: false,
+      },
+      {
+        id_regi: '30303030-3030-4030-8030-303030303030',
+        created_at: '2026-01-01T00:00:00.000Z',
+        regi_desd: 'ANDES',
+        regi_saba: false,
+      },
+    ];
+    tables.promotoras = [
+      {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        nombre_completo: 'María Piña',
+        email: 'maria.pina@promotoras.codizulca.local',
+        telefono: '04141234567',
+        ciudad: 'Maracaibo',
+        estado: 'Zulia',
+        direccion: 'MARACAIBO NORTE',
+        categoria: 'Fijas',
+        region_id: '10101010-1010-4010-8010-101010101010',
+        sucursal: 'ZULIA',
+        supervisor_id: null,
+        activo: true,
+        created_at: '2026-11-01T08:00:00.000Z',
+        updated_at: '2026-11-01T08:00:00.000Z',
+      },
+      {
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        nombre_completo: 'Scarleth Núñez',
+        email: 'scarleth.nunez@promotoras.codizulca.local',
+        telefono: '04147654321',
+        ciudad: 'Maracaibo',
+        estado: 'Zulia',
+        direccion: 'SAN FRANCISCO',
+        categoria: 'Eventuales',
+        region_id: '10101010-1010-4010-8010-101010101010',
+        sucursal: 'ZULIA',
+        supervisor_id: null,
+        activo: true,
+        created_at: '2026-11-01T08:00:00.000Z',
+        updated_at: '2026-11-01T08:00:00.000Z',
+      },
+      {
+        id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        nombre_completo: 'Daniela Ríos',
+        email: 'daniela.rios@promotoras.codizulca.local',
+        telefono: '04149998877',
+        ciudad: 'Valencia',
+        estado: 'Carabobo',
+        direccion: 'VALENCIA NORTE',
+        categoria: 'Merchandising',
+        region_id: '20202020-2020-4020-8020-202020202020',
+        sucursal: 'VALENCIA',
+        supervisor_id: null,
+        activo: true,
+        created_at: '2026-11-01T08:00:00.000Z',
+        updated_at: '2026-11-01T08:00:00.000Z',
+      },
+      {
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        nombre_completo: 'Lucía Paredes',
+        email: 'lucia.paredes@promotoras.codizulca.local',
+        telefono: '04141112233',
+        ciudad: 'Mérida',
+        estado: 'Mérida',
+        direccion: 'ANDES CENTRO',
+        categoria: 'Fijas',
+        region_id: '30303030-3030-4030-8030-303030303030',
+        sucursal: 'ZULIA',
+        supervisor_id: null,
+        activo: true,
+        created_at: '2026-11-01T08:00:00.000Z',
+        updated_at: '2026-11-01T08:00:00.000Z',
+      },
+    ];
     tables.checkins = [];
     tables.prices = [
       {
@@ -1352,6 +1463,105 @@ export async function startLocalMockInfra(port = 0): Promise<LocalMockInfraInsta
         }
         ruta.updated_at = nowIso;
         sendJson(res, 200, ruta);
+        return;
+      }
+
+      if (rpcName === 'rpc_upsert_asistencia_evidencia_cas') {
+        const asistenciaId = String(args.p_asistencia_id || '');
+        const slotFoto = String(args.p_slot_foto || '');
+        const expectedEvidenceId = args.p_expected_evidence_id ?? null;
+        const expectedVersion =
+          args.p_expected_version === null || args.p_expected_version === undefined
+            ? null
+            : Number(args.p_expected_version);
+
+        const existingIdx = tables.asistencia_evidencias.findIndex(
+          (e) => e.asistencia_id === asistenciaId && e.slot_foto === slotFoto
+        );
+        const existing = existingIdx >= 0 ? tables.asistencia_evidencias[existingIdx] : null;
+        const nowIso = new Date().toISOString();
+
+        if (expectedVersion === null) {
+          if (existing) {
+            sendJson(res, 200, {
+              status: 'CONFLICT',
+              reason: 'SLOT_ALREADY_EXISTS',
+              current_id: existing.id,
+              current_version: existing.version ?? 1,
+            });
+            return;
+          }
+          const created = {
+            id: crypto.randomUUID(),
+            asistencia_id: asistenciaId,
+            slot_foto: slotFoto,
+            storage_bucket: args.p_storage_bucket,
+            storage_path: args.p_storage_path,
+            mime_type: args.p_mime_type,
+            tamano_bytes: args.p_tamano_bytes,
+            sha256_hex: args.p_sha256_hex,
+            ancho_px: args.p_ancho_px ?? null,
+            alto_px: args.p_alto_px ?? null,
+            pdv_nombre: args.p_pdv_nombre ?? '',
+            lat: args.p_lat ?? null,
+            lng: args.p_lng ?? null,
+            gps_accuracy: args.p_gps_accuracy ?? null,
+            sucursal: args.p_sucursal ?? null,
+            capturado_en_servidor: nowIso,
+            cargado_por_uid: args.p_cargado_por_uid ?? null,
+            cargado_por_rol: args.p_cargado_por_rol ?? 'promotora',
+            version: 1,
+            updated_at: nowIso,
+          };
+          tables.asistencia_evidencias.push(created);
+          sendJson(res, 200, {
+            status: 'INSERTED',
+            evidencia: created,
+            previous_storage_path: null,
+          });
+          return;
+        }
+
+        if (
+          !existing ||
+          (expectedEvidenceId && existing.id !== expectedEvidenceId) ||
+          Number(existing.version ?? 1) !== expectedVersion
+        ) {
+          sendJson(res, 200, {
+            status: 'CONFLICT',
+            reason: 'VERSION_MISMATCH',
+            current_id: existing?.id ?? null,
+            current_version: existing ? Number(existing.version ?? 1) : null,
+          });
+          return;
+        }
+
+        const previousStoragePath = existing.storage_path;
+        const updated = {
+          ...existing,
+          storage_bucket: args.p_storage_bucket,
+          storage_path: args.p_storage_path,
+          mime_type: args.p_mime_type,
+          tamano_bytes: args.p_tamano_bytes,
+          sha256_hex: args.p_sha256_hex,
+          ancho_px: args.p_ancho_px ?? null,
+          alto_px: args.p_alto_px ?? null,
+          pdv_nombre: args.p_pdv_nombre ?? '',
+          lat: args.p_lat ?? null,
+          lng: args.p_lng ?? null,
+          gps_accuracy: args.p_gps_accuracy ?? null,
+          capturado_en_servidor: nowIso,
+          cargado_por_uid: args.p_cargado_por_uid ?? null,
+          cargado_por_rol: args.p_cargado_por_rol ?? 'promotora',
+          version: Number(existing.version ?? 1) + 1,
+          updated_at: nowIso,
+        };
+        tables.asistencia_evidencias[existingIdx] = updated;
+        sendJson(res, 200, {
+          status: 'UPDATED',
+          evidencia: updated,
+          previous_storage_path: previousStoragePath,
+        });
         return;
       }
 

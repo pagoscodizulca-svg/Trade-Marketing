@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import * as XLSX from 'xlsx';
+import { buildXlsxFixtureBuffer } from './lib/excelFixtureBuilder';
 import {
   MAX_EXCEL_FILE_BYTES,
   MAX_IMPORT_ROWS,
@@ -162,36 +162,37 @@ async function runExcelDateParserSuite(): Promise<void> {
   // - Hoja 2: "CRONOGRAMA" con banner en fila 1, fila 2 vacía, encabezados con tildes/espacios en fila 3,
   //   celdas de fecha combinadas verticalmente en filas 4 y 5 ("05/10/2026"), serial decimal en fila 6,
   //   fila 7 vacía y fecha corrupta en fila 8 ("31/02/2026") + error de fórmula Excel en fila 9 (#¡VALOR!)
-  const wb = XLSX.utils.book_new();
-  const wsCover = XLSX.utils.aoa_to_sheet([['REPORTE CORPORATIVO CODIZULCA'], ['CONFIDENCIAL']]);
-  XLSX.utils.book_append_sheet(wb, wsCover, 'PORTADA');
-
-  const wsSchedule = XLSX.utils.aoa_to_sheet([
-    ['PLANIFICACIÓN COMERCIAL OCTUBRE 2026'], // Fila Excel #1
-    [], // Fila Excel #2 (vacía)
-    [
-      '  Fecha   de   Degustación (DD/MM/AAAA)  ',
-      '  Punto   de   Venta  ',
-      'Producto a Degustar',
-      'Cantidad en Kilos',
-      'Fuerza de Ventas',
-      'Promotora Sugerida',
-    ], // Fila Excel #3 (Encabezados)
-    ['05/10/2026', 'FIORELLA HIPERMARKET NORTE', 'MORTADELA', 3, 'CARLOS PEREZ', 'JULIANNYS'], // Fila Excel #4
-    ['', 'ENNE FUERZAS ARMADAS', 'ESPALDA', 2.5, 'LUIS SOTO', 'SCARLETH'], // Fila Excel #5 (hereda fecha por !merges A4:A5)
-    [46310.5, 'DE CANDIDO EXPRESS', 'ARROZ VENCAMPO', 4, 'ANA RUIZ', ''], // Fila Excel #6 (serial decimal -> 2026-10-15)
-    [], // Fila Excel #7 (completamente vacía -> omitida sin desplazar numeración)
-    ['31/02/2026', 'SUPERMERCADO ZULIA', 'MORTADELA ESPECIAL', 3.5, 'PEDRO GIL', 'MARIANGEL'], // Fila Excel #8 (fecha inexistente)
-    ['placeholder', 'HIPER LIDER CABIMAS', 'CHORIZO', 2, 'JOSE DIAZ', ''], // Fila Excel #9 (se inyecta error de fórmula t='e')
+  const xlsxBuffer = await buildXlsxFixtureBuffer([
+    {
+      name: 'PORTADA',
+      rows: [['REPORTE CORPORATIVO CODIZULCA'], ['CONFIDENCIAL']],
+    },
+    {
+      name: 'CRONOGRAMA',
+      rows: [
+        ['PLANIFICACIÓN COMERCIAL OCTUBRE 2026'], // Fila Excel #1
+        [], // Fila Excel #2 (vacía)
+        [
+          '  Fecha   de   Degustación (DD/MM/AAAA)  ',
+          '  Punto   de   Venta  ',
+          'Producto a Degustar',
+          'Cantidad en Kilos',
+          'Fuerza de Ventas',
+          'Promotora Sugerida',
+        ], // Fila Excel #3 (Encabezados)
+        ['05/10/2026', 'FIORELLA HIPERMARKET NORTE', 'MORTADELA', 3, 'CARLOS PEREZ', 'JULIANNYS'], // Fila Excel #4
+        ['', 'ENNE FUERZAS ARMADAS', 'ESPALDA', 2.5, 'LUIS SOTO', 'SCARLETH'], // Fila Excel #5 (hereda fecha por merge A4:A5)
+        [46310.5, 'DE CANDIDO EXPRESS', 'ARROZ VENCAMPO', 4, 'ANA RUIZ', ''], // Fila Excel #6 (serial decimal -> 2026-10-15)
+        [], // Fila Excel #7 (completamente vacía -> omitida sin desplazar numeración)
+        ['31/02/2026', 'SUPERMERCADO ZULIA', 'MORTADELA ESPECIAL', 3.5, 'PEDRO GIL', 'MARIANGEL'], // Fila Excel #8 (fecha inexistente)
+        ['placeholder', 'HIPER LIDER CABIMAS', 'CHORIZO', 2, 'JOSE DIAZ', ''], // Fila Excel #9 (error de fórmula #VALUE!)
+      ],
+      merges: ['A4:A5'],
+      cellOverrides: {
+        A9: { error: '#VALUE!' },
+      },
+    },
   ]);
-
-  // Combinar verticalmente A4:A5 (índices 0-based r:3..4, c:0)
-  wsSchedule['!merges'] = [{ s: { r: 3, c: 0 }, e: { r: 4, c: 0 } }];
-  // Simular error real de fórmula Excel en celda A9 (r:8, c:0) con código numérico interno v=15
-  wsSchedule['A9'] = { t: 'e', v: 15, w: '#¡VALOR!' };
-
-  XLSX.utils.book_append_sheet(wb, wsSchedule, 'CRONOGRAMA');
-  const xlsxBuffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
 
   const extracted = await extractTabularDegustacionFile(xlsxBuffer, 'xlsx', {
     fileName: 'Planificacion_Octubre_2026.xlsx',

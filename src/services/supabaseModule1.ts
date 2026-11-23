@@ -571,16 +571,57 @@ function inferShiftFromTime(timeOrShift?: string | null, isoDate?: string | null
 }
 
 // ============================================================================
-// TASA BCV EN VIVO (SIN VALOR DE RESPALDO)
+// TASA BCV EN VIVO (SIN VALOR DE RESPALDO · TIMEOUT CON AbortController)
 // ============================================================================
 
+export const DEFAULT_BCV_FETCH_TIMEOUT_MS = 10_000;
+const MAX_BCV_FETCH_TIMEOUT_MS = 60_000;
+
+export function resolveBcvFetchTimeoutMs(overrideMs?: number): number {
+  if (overrideMs !== undefined) {
+    if (Number.isFinite(overrideMs) && overrideMs > 0) {
+      return Math.min(MAX_BCV_FETCH_TIMEOUT_MS, Math.max(1, Math.trunc(overrideMs)));
+    }
+    return DEFAULT_BCV_FETCH_TIMEOUT_MS;
+  }
+
+  const nodeRaw =
+    typeof process !== 'undefined' && process?.env ? process.env.BCV_FETCH_TIMEOUT_MS : undefined;
+  const viteRaw =
+    typeof import.meta !== 'undefined'
+      ? (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BCV_FETCH_TIMEOUT_MS
+      : undefined;
+  const raw = nodeRaw ?? viteRaw;
+
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const parsed = Number.parseInt(String(raw).trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.min(MAX_BCV_FETCH_TIMEOUT_MS, parsed);
+    }
+  }
+  return DEFAULT_BCV_FETCH_TIMEOUT_MS;
+}
+
 /**
- * Obtiene la tasa oficial en vivo. No existe tasa de respaldo ni caché local:
- * si no se puede obtener, devuelve `null` y la interfaz muestra «No disponible».
+ * Obtiene la tasa oficial en vivo con timeout estricto vía `AbortController`.
+ * No existe tasa de respaldo ni caché local: si falla o expira el tiempo de espera,
+ * devuelve `null` de forma controlada sin colgar el event loop.
  */
-export async function fetchLiveBcvRate(): Promise<number | null> {
+export async function fetchLiveBcvRate(options?: {
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}): Promise<number | null> {
+  const timeoutMs = resolveBcvFetchTimeoutMs(options?.timeoutMs);
+  const fetchFn = options?.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
   try {
-    const res = await fetch('https://ve.dolarapi.com/v1/dolares/oficial');
+    const res = await fetchFn('https://ve.dolarapi.com/v1/dolares/oficial', {
+      signal: controller.signal,
+    });
     if (res.ok) {
       const data = await res.json();
       const candidate = Number(data?.promedio);
@@ -588,8 +629,16 @@ export async function fetchLiveBcvRate(): Promise<number | null> {
         return Number(candidate.toFixed(2));
       }
     }
-  } catch {
-    // Sin conexión con el servicio de tasa: se devuelve null
+  } catch (err) {
+    const isAbort =
+      controller.signal.aborted ||
+      (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError'));
+    if (isAbort) {
+      console.warn(`[BCV] Consulta de tasa oficial abortada por timeout (${timeoutMs} ms).`);
+    }
+    // Sin conexión o timeout con el servicio de tasa: se devuelve null de forma segura
+  } finally {
+    clearTimeout(timeoutId);
   }
   return null;
 }
@@ -2963,7 +3012,15 @@ export function parseDegustacionNotificationRow(
  * existe y cae automáticamente a filtrado JSON si la migración SQL aún no se ha aplicado.
  * Deduplica estrictamente por `id` y `degustacionId` canónico.
  */
-export async function fetchUnreadDegustacionNotifications(): Promise<DegustacionNotificationItem[]> {
+export async function fetchUnreadDegustacionNotifications(options?: {
+  signal?: AbortSignal;
+}): Promise<DegustacionNotificationItem[]> {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    const abortErr = new Error('Consulta de notificaciones cancelada.');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
   assertSupabaseConfigured();
   const todayYmd = getTodayVeYmd();
   const client = getSupabaseRealtimeClient();
@@ -2971,16 +3028,51 @@ export async function fetchUnreadDegustacionNotifications(): Promise<Degustacion
     throw new Error('Cliente oficial de Supabase no disponible.');
   }
 
+  const renderFallbackRace = new Promise<RawSupabaseSurvey[]>((resolve, reject) => {
+    const timer = setTimeout(() => resolve([]), 3000);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const abortErr = new Error('Consulta de notificaciones cancelada.');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    fetchFdvPlanificadorRenderDegustaciones({
+      endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
+      timeoutMs: 3000,
+      signal,
+    })
+      .then((rows) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(rows);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          reject(err);
+        } else {
+          resolve([]);
+        }
+      });
+  });
+
   const [allDegustacionRows, renderRows] = await Promise.all([
-    fetchDegustacionSurveysViaSdk(client),
-    Promise.race([
-      fetchFdvPlanificadorRenderDegustaciones({
-        endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
-        timeoutMs: 3000,
-      }),
-      waitMs(3000).then(() => [] as RawSupabaseSurvey[]),
-    ]),
+    fetchDegustacionSurveysViaSdk(client, { signal }),
+    renderFallbackRace,
   ]);
+  if (signal?.aborted) {
+    const abortErr = new Error('Consulta de notificaciones cancelada.');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
   const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(allDegustacionRows, renderRows);
 
   // Si alguna fila gemela por el mismo `degustacionId` ya fue marcada como leída, excluir duplicados

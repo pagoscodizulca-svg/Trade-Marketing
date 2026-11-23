@@ -19,10 +19,12 @@ import {
   validateSlotAgainstAppliedProfile,
 } from '../types/attendanceEvidences';
 import {
+  assertSafeAttendanceStoragePath,
   AttendanceFileSecurityError,
   buildDeterministicAttendanceStoragePath,
   verifyAttendanceImageMagicBytes,
 } from './imageMagicBytesValidator';
+import { createLogger, type Logger } from './logger';
 import {
   type AuthenticatedServerUser,
   createUserScopedSupabaseClient,
@@ -48,6 +50,55 @@ export interface StaffProfileLookupResult {
 }
 
 /**
+ * Error controlado de conflicto de concurrencia (bloqueo optimista / CAS fallido).
+ * El handler responde siempre HTTP 409 Conflict tras ejecutar rollback en Storage.
+ */
+export class AttendanceConcurrencyConflictError extends Error {
+  public readonly statusCode = 409;
+  public readonly code = 'EVIDENCE_CONCURRENCY_CONFLICT';
+  public readonly currentVersion: number | null;
+  public readonly currentId: string | null;
+
+  constructor(
+    message = 'La evidencia fotográfica fue modificada simultáneamente por otra operación. Recargue la vista y vuelva a intentarlo.',
+    details?: { currentVersion?: number | null; currentId?: string | null }
+  ) {
+    super(message);
+    this.name = 'AttendanceConcurrencyConflictError';
+    this.currentVersion = details?.currentVersion ?? null;
+    this.currentId = details?.currentId ?? null;
+  }
+}
+
+export interface UpsertSlotEvidenceParams {
+  asistenciaId: string;
+  slotFoto: SlotFotoAsistencia;
+  storageBucket: string;
+  storagePath: string;
+  mimeType: AllowedAttendanceImageMime;
+  sizeBytes: number;
+  sha256Hex: string;
+  anchoPx: number | null;
+  altoPx: number | null;
+  pdvNombre: string;
+  lat: number | null;
+  lng: number | null;
+  gpsAccuracy: number | null;
+  sucursal?: OperativeSucursal | null;
+  capturadoEnServidorIso: string;
+  cargadoPorUid: string;
+  cargadoPorRol: 'promotora' | 'coordinadora' | 'admin';
+  /** ID de la evidencia previa esperada en reemplazos; `null` en alta inicial. */
+  expectedEvidenceId?: string | null;
+  /** Versión optimista esperada (`version`) en reemplazos; `null` en alta inicial. */
+  expectedVersion?: number | null;
+  /** Ruta Storage previa esperada (respaldo CAS si la columna `version` aún no existe en BD). */
+  expectedStoragePath?: string | null;
+  /** Timestamp previo de captura en servidor (respaldo CAS si `version` aún no existe en BD). */
+  expectedCapturedAtIso?: string | null;
+}
+
+/**
  * Interfaz de persistencia y almacenamiento privado desacoplada para producción (Supabase)
  * y pruebas de integración deterministas sin efectos secundarios.
  */
@@ -69,25 +120,7 @@ export interface AttendancePersistenceGateway {
     openedByUid: string;
   }): Promise<AsistenciaJornadaDbRow>;
   listEvidencesByJornadaId(asistenciaId: string): Promise<AsistenciaEvidenciaDbRow[]>;
-  upsertSlotEvidence(params: {
-    asistenciaId: string;
-    slotFoto: SlotFotoAsistencia;
-    storageBucket: string;
-    storagePath: string;
-    mimeType: AllowedAttendanceImageMime;
-    sizeBytes: number;
-    sha256Hex: string;
-    anchoPx: number | null;
-    altoPx: number | null;
-    pdvNombre: string;
-    lat: number | null;
-    lng: number | null;
-    gpsAccuracy: number | null;
-    sucursal?: OperativeSucursal | null;
-    capturadoEnServidorIso: string;
-    cargadoPorUid: string;
-    cargadoPorRol: 'promotora' | 'coordinadora' | 'admin';
-  }): Promise<AsistenciaEvidenciaDbRow>;
+  upsertSlotEvidence(params: UpsertSlotEvidenceParams): Promise<AsistenciaEvidenciaDbRow>;
   uploadPrivateObject(params: {
     bucket: string;
     path: string;
@@ -108,6 +141,10 @@ export interface AttendancePersistenceGateway {
     }>
   >;
 }
+
+const defaultAttendanceLogger: Logger = createLogger({
+  base: { service: 'attendance-evidences' },
+});
 
 function getConfiguredBucketId(): string {
   const envBucket = String(process.env.ASISTENCIA_STORAGE_BUCKET || '').trim();
@@ -174,6 +211,32 @@ function isCrossBranchViolation(
   const targetRegional = normalizeRegionalSucursal(recordSucursal);
   if (!targetRegional) return false;
   return actorRegional !== targetRegional;
+}
+
+function isMissingRpcError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').trim();
+  const msg = String(err.message || '');
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    /Could not find the function/i.test(msg) ||
+    /rpc_upsert_asistencia_evidencia_cas/i.test(msg)
+  );
+}
+
+function isMissingVersionColumnError(
+  err: { code?: string; message?: string } | null | undefined
+): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').trim();
+  const msg = String(err.message || '');
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    /column ["']?(version|updated_at)["']?.*does not exist/i.test(msg) ||
+    /Could not find the '(version|updated_at)' column/i.test(msg)
+  );
 }
 
 function createSupabaseAttendanceGateway(
@@ -297,43 +360,182 @@ function createSupabaseAttendanceGateway(
       return Array.isArray(data) ? (data as AsistenciaEvidenciaDbRow[]) : [];
     },
 
-    async upsertSlotEvidence(params): Promise<AsistenciaEvidenciaDbRow> {
-      const { data, error } = await client
-        .from('asistencia_evidencias')
-        .upsert(
-          {
-            asistencia_id: params.asistenciaId,
-            slot_foto: params.slotFoto,
-            storage_bucket: params.storageBucket,
-            storage_path: params.storagePath,
-            mime_type: params.mimeType,
-            tamano_bytes: params.sizeBytes,
-            sha256_hex: params.sha256Hex,
-            ancho_px: params.anchoPx,
-            alto_px: params.altoPx,
-            pdv_nombre: params.pdvNombre,
-            lat: params.lat,
-            lng: params.lng,
-            gps_accuracy: params.gpsAccuracy,
-            ...(params.sucursal ? { sucursal: params.sucursal } : {}),
-            capturado_en_servidor: params.capturadoEnServidorIso,
-            cargado_por_uid: params.cargadoPorUid,
-            cargado_por_rol: params.cargadoPorRol,
-          },
-          { onConflict: 'asistencia_id,slot_foto' }
-        )
-        .select('*')
-        .single();
+    /**
+     * Escritura atómica con bloqueo optimista (anti-TOCTOU):
+     * 1. Intenta RPC transaccional `rpc_upsert_asistencia_evidencia_cas` (`FOR UPDATE` + versión).
+     * 2. Si el RPC aún no está desplegado, aplica CAS atómico directo en PostgreSQL:
+     *    - Alta inicial (`expectedEvidenceId == null`): `INSERT` estricto (`23505` -> 409 Conflict).
+     *    - Reemplazo (`expectedEvidenceId != null`): `UPDATE ... WHERE id = $1 AND version = $expectedVersion`
+     *      (con respaldo `storage_path` + `capturado_en_servidor` si la columna `version` aún no se migró).
+     */
+    async upsertSlotEvidence(params: UpsertSlotEvidenceParams): Promise<AsistenciaEvidenciaDbRow> {
+      const safePath = assertSafeAttendanceStoragePath(params.storagePath);
+      const isReplacement = Boolean(params.expectedEvidenceId);
+      const expectedVersion = isReplacement
+        ? Math.max(1, Math.trunc(params.expectedVersion ?? 1))
+        : null;
 
-      if (error || !data) {
-        throw new Error(`DB_UPSERT_EVIDENCE_ERROR: ${error?.message || 'sin respuesta'}`);
+      // 1. Camino preferente: RPC transaccional CAS en PostgreSQL
+      const rpcResp = await client.rpc('rpc_upsert_asistencia_evidencia_cas', {
+        p_asistencia_id: params.asistenciaId,
+        p_slot_foto: params.slotFoto,
+        p_storage_bucket: params.storageBucket,
+        p_storage_path: safePath,
+        p_mime_type: params.mimeType,
+        p_tamano_bytes: params.sizeBytes,
+        p_sha256_hex: params.sha256Hex,
+        p_ancho_px: params.anchoPx,
+        p_alto_px: params.altoPx,
+        p_pdv_nombre: params.pdvNombre,
+        p_lat: params.lat,
+        p_lng: params.lng,
+        p_gps_accuracy: params.gpsAccuracy,
+        p_cargado_por_uid: params.cargadoPorUid,
+        p_cargado_por_rol: params.cargadoPorRol,
+        p_expected_evidence_id: params.expectedEvidenceId ?? null,
+        p_expected_version: expectedVersion,
+        p_sucursal: params.sucursal ?? null,
+      });
+
+      if (!rpcResp.error && rpcResp.data && typeof rpcResp.data === 'object') {
+        const payload = rpcResp.data as {
+          status?: string;
+          evidencia?: AsistenciaEvidenciaDbRow;
+          current_version?: number | null;
+          current_id?: string | null;
+        };
+        if (payload.status === 'CONFLICT') {
+          throw new AttendanceConcurrencyConflictError(undefined, {
+            currentVersion: payload.current_version ?? null,
+            currentId: payload.current_id ?? null,
+          });
+        }
+        if ((payload.status === 'INSERTED' || payload.status === 'UPDATED') && payload.evidencia) {
+          return payload.evidencia;
+        }
+      } else if (rpcResp.error && !isMissingRpcError(rpcResp.error)) {
+        if (rpcResp.error.code === '23505') {
+          throw new AttendanceConcurrencyConflictError();
+        }
+        throw new Error(`DB_UPSERT_EVIDENCE_ERROR: ${rpcResp.error.message}`);
       }
 
-      return data as AsistenciaEvidenciaDbRow;
+      // 2. Respaldo atómico PostgREST CAS (sin sobreescritura ciega `ON CONFLICT DO UPDATE`)
+      const baseColumns = {
+        storage_bucket: params.storageBucket,
+        storage_path: safePath,
+        mime_type: params.mimeType,
+        tamano_bytes: params.sizeBytes,
+        sha256_hex: params.sha256Hex,
+        ancho_px: params.anchoPx,
+        alto_px: params.altoPx,
+        pdv_nombre: params.pdvNombre,
+        lat: params.lat,
+        lng: params.lng,
+        gps_accuracy: params.gpsAccuracy,
+        ...(params.sucursal ? { sucursal: params.sucursal } : {}),
+        capturado_en_servidor: params.capturadoEnServidorIso,
+        cargado_por_uid: params.cargadoPorUid,
+        cargado_por_rol: params.cargadoPorRol,
+      };
+
+      if (!isReplacement) {
+        const insertPayload = {
+          asistencia_id: params.asistenciaId,
+          slot_foto: params.slotFoto,
+          ...baseColumns,
+          version: 1,
+          updated_at: params.capturadoEnServidorIso,
+        };
+        let insertRes = await client
+          .from('asistencia_evidencias')
+          .insert(insertPayload)
+          .select('*')
+          .single();
+
+        if (insertRes.error && isMissingVersionColumnError(insertRes.error)) {
+          insertRes = await client
+            .from('asistencia_evidencias')
+            .insert({
+              asistencia_id: params.asistenciaId,
+              slot_foto: params.slotFoto,
+              ...baseColumns,
+            })
+            .select('*')
+            .single();
+        }
+
+        if (insertRes.error) {
+          if (insertRes.error.code === '23505') {
+            throw new AttendanceConcurrencyConflictError(
+              'Otro envío registró simultáneamente esta misma ranura de evidencia. Recargue la vista antes de reemplazarla.'
+            );
+          }
+          throw new Error(`DB_UPSERT_EVIDENCE_ERROR: ${insertRes.error.message}`);
+        }
+        if (!insertRes.data) {
+          throw new Error('DB_UPSERT_EVIDENCE_ERROR: sin respuesta al insertar evidencia');
+        }
+        return insertRes.data as AsistenciaEvidenciaDbRow;
+      }
+
+      // Reemplazo con bloqueo optimista estricto `WHERE id = $id AND version = $expectedVersion`
+      const nextVersion = (expectedVersion ?? 1) + 1;
+      const versionedUpdate = await client
+        .from('asistencia_evidencias')
+        .update({
+          ...baseColumns,
+          version: nextVersion,
+          updated_at: params.capturadoEnServidorIso,
+        })
+        .eq('id', params.expectedEvidenceId!)
+        .eq('asistencia_id', params.asistenciaId)
+        .eq('slot_foto', params.slotFoto)
+        .eq('version', expectedVersion!)
+        .select('*')
+        .maybeSingle();
+
+      if (versionedUpdate.error && isMissingVersionColumnError(versionedUpdate.error)) {
+        // Fallback CAS si la migración de columna `version` aún no se ha aplicado en remoto
+        let legacyUpdateQuery = client
+          .from('asistencia_evidencias')
+          .update(baseColumns)
+          .eq('id', params.expectedEvidenceId!)
+          .eq('asistencia_id', params.asistenciaId)
+          .eq('slot_foto', params.slotFoto);
+        if (params.expectedStoragePath) {
+          legacyUpdateQuery = legacyUpdateQuery.eq('storage_path', params.expectedStoragePath);
+        }
+        if (params.expectedCapturedAtIso) {
+          legacyUpdateQuery = legacyUpdateQuery.eq(
+            'capturado_en_servidor',
+            params.expectedCapturedAtIso
+          );
+        }
+        const legacyUpdate = await legacyUpdateQuery.select('*').maybeSingle();
+        if (legacyUpdate.error) {
+          throw new Error(`DB_UPSERT_EVIDENCE_ERROR: ${legacyUpdate.error.message}`);
+        }
+        if (!legacyUpdate.data) {
+          throw new AttendanceConcurrencyConflictError();
+        }
+        return legacyUpdate.data as AsistenciaEvidenciaDbRow;
+      }
+
+      if (versionedUpdate.error) {
+        throw new Error(`DB_UPSERT_EVIDENCE_ERROR: ${versionedUpdate.error.message}`);
+      }
+
+      if (!versionedUpdate.data) {
+        throw new AttendanceConcurrencyConflictError();
+      }
+
+      return versionedUpdate.data as AsistenciaEvidenciaDbRow;
     },
 
     async uploadPrivateObject(params): Promise<void> {
-      const { error } = await client.storage.from(params.bucket).upload(params.path, params.buffer, {
+      const safePath = assertSafeAttendanceStoragePath(params.path);
+      const { error } = await client.storage.from(params.bucket).upload(safePath, params.buffer, {
         contentType: params.mimeType,
         upsert: false,
         cacheControl: '900',
@@ -347,7 +549,10 @@ function createSupabaseAttendanceGateway(
     async deletePrivateObjects(bucket: string, paths: string[]): Promise<void> {
       const cleanPaths = paths.map((p) => p.trim()).filter(Boolean);
       if (cleanPaths.length === 0) return;
-      await client.storage.from(bucket).remove(cleanPaths);
+      const { error } = await client.storage.from(bucket).remove(cleanPaths);
+      if (error) {
+        throw new Error(`STORAGE_DELETE_ERROR: ${error.message}`);
+      }
     },
 
     async createSignedUrls(
@@ -435,11 +640,13 @@ export interface AttendanceHandlersDependencies {
   now?: () => Date;
   bucketId?: string;
   signedUrlTtlSeconds?: number;
+  logger?: Pick<Logger, 'warn' | 'error'>;
 }
 
 export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDependencies) {
   const getNow = deps?.now ?? (() => new Date());
   const resolveGateway = deps?.resolveGateway ?? createSupabaseAttendanceGateway;
+  const logger = deps?.logger ?? defaultAttendanceLogger;
 
   const handleUploadEvidence = async (req: Request, res: Response): Promise<void> => {
     const authUser = req.authUser;
@@ -706,15 +913,37 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
       const previousEvidence =
         existingEvidences.find((e) => e.slot_foto === meta.slotFoto) ?? null;
 
-      // 7. Generar ruta determinística en servidor (ignora cualquier nombre de archivo del usuario)
-      const storagePath = buildDeterministicAttendanceStoragePath({
-        fechaJornada: jornada.fecha_jornada,
-        promotoraId: jornada.promotora_id,
-        slotFoto: meta.slotFoto,
-        extension: verifiedImage.extension,
-      });
+      // 6.B Validación temprana de bloqueo optimista si el cliente declaró `expectedVersion`
+      const currentObservedVersion = previousEvidence ? (previousEvidence.version ?? 1) : null;
+      if (
+        meta.expectedVersion !== undefined &&
+        meta.expectedVersion !== null &&
+        currentObservedVersion !== meta.expectedVersion
+      ) {
+        res.status(409).json({
+          ok: false,
+          error:
+            'La evidencia ya fue actualizada por otra operación. Recargue la vista y vuelva a intentarlo.',
+          code: 'EVIDENCE_CONCURRENCY_CONFLICT',
+          currentVersion: currentObservedVersion,
+          retryable: true,
+        });
+        return;
+      }
 
-      // 8. Subir binario verificado al bucket privado
+      // 7. Generar clave Storage inmutable y única (`<slot>_<uuid>-<timestamp>.<ext>`),
+      //    ignorando cualquier nombre del cliente y jamás sobrescribiendo en sitio (`upsert: false`).
+      const storagePath = assertSafeAttendanceStoragePath(
+        buildDeterministicAttendanceStoragePath({
+          fechaJornada: jornada.fecha_jornada,
+          promotoraId: jornada.promotora_id,
+          slotFoto: meta.slotFoto,
+          extension: verifiedImage.extension,
+          timestampMs: serverNow.getTime(),
+        })
+      );
+
+      // 8. Subir binario verificado al bucket privado ANTES de confirmar en PostgreSQL
       await gateway.uploadPrivateObject({
         bucket: bucketId,
         path: storagePath,
@@ -722,7 +951,8 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
         mimeType: verifiedImage.mimeType,
       });
 
-      // 9. Upsert transaccional por (asistencia_id, slot_foto) con rollback compensatorio si falla BD
+      // 9. Escritura atómica CAS (Compare-And-Swap) en PostgreSQL con rollback inmediato en Storage
+      //    si ocurre conflicto concurrente (409) o cualquier error de BD.
       let savedEvidence: AsistenciaEvidenciaDbRow;
       try {
         savedEvidence = await gateway.upsertSlotEvidence({
@@ -746,21 +976,57 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           capturadoEnServidorIso: serverNowIso,
           cargadoPorUid: authUser.id,
           cargadoPorRol: normalizeActorDbRole(authUser.appRole),
+          expectedEvidenceId: previousEvidence?.id ?? null,
+          expectedVersion: currentObservedVersion,
+          expectedStoragePath: previousEvidence?.storage_path ?? null,
+          expectedCapturedAtIso: previousEvidence?.capturado_en_servidor ?? null,
         });
       } catch (dbErr) {
-        await gateway.deletePrivateObjects(bucketId, [storagePath]).catch(() => undefined);
+        // Rollback inmediato del objeto temporal recién subido (NUNCA toca el objeto anterior ni el ganador)
+        await gateway.deletePrivateObjects(bucketId, [storagePath]).catch((rollbackErr) => {
+          logger.warn('attendance_storage_rollback_failed', {
+            bucketId,
+            storagePath,
+            asistenciaId: jornada.id,
+            slotFoto: meta.slotFoto,
+            err: rollbackErr,
+          });
+        });
+
+        if (dbErr instanceof AttendanceConcurrencyConflictError) {
+          res.status(409).json({
+            ok: false,
+            error: dbErr.message,
+            code: dbErr.code,
+            currentVersion: dbErr.currentVersion,
+            retryable: true,
+          });
+          return;
+        }
         throw dbErr;
       }
 
-      // 10. Limpieza de archivo huérfano en Storage cuando se reemplaza una ranura ocupada
+      // 10. Limpieza post-commit del archivo anterior en Storage (ÚNICAMENTE tras confirmar BD).
+      //     Si falla la eliminación del objeto viejo, se registra advertencia estructurada sin
+      //     marcar como fallido el reemplazo ya confirmado.
       if (
         previousEvidence &&
         previousEvidence.storage_path &&
-        previousEvidence.storage_path !== storagePath
+        previousEvidence.storage_path !== savedEvidence.storage_path
       ) {
         await gateway
           .deletePrivateObjects(bucketId, [previousEvidence.storage_path])
-          .catch(() => undefined);
+          .catch((cleanupErr) => {
+            logger.warn('attendance_previous_storage_cleanup_failed', {
+              bucketId,
+              previousStoragePath: previousEvidence.storage_path,
+              activeStoragePath: savedEvidence.storage_path,
+              evidenciaId: savedEvidence.id,
+              asistenciaId: jornada.id,
+              slotFoto: meta.slotFoto,
+              err: cleanupErr,
+            });
+          });
       }
 
       // 11. Emitir Signed URL temporal de corta duración y resumen actualizado de cumplimiento
@@ -802,6 +1068,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           asistenciaId: savedEvidence.asistencia_id,
           slotFoto: savedEvidence.slot_foto,
           storagePath: savedEvidence.storage_path,
+          version: savedEvidence.version ?? 1,
           mimeType: savedEvidence.mime_type,
           sizeBytes: savedEvidence.tamano_bytes,
           pdvNombre: savedEvidence.pdv_nombre,
@@ -823,6 +1090,14 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
         compliance,
       });
     } catch (err) {
+      if (err instanceof AttendanceFileSecurityError) {
+        res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+        });
+        return;
+      }
+
       const msg = err instanceof Error ? err.message : '';
       if (
         msg.includes('22P02') ||

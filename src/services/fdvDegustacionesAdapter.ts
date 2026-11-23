@@ -742,9 +742,20 @@ const SURVEYS_COLUMNS_WITH_READ =
 const SURVEYS_COLUMNS_BASE =
   'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at';
 
+function createAbortError(message = 'Operación cancelada por AbortSignal'): Error {
+  const err = new Error(message);
+  err.name = 'AbortError';
+  return err;
+}
+
 export async function fetchDegustacionSurveysViaSdk(
-  clientOverride?: SupabaseClient | null
+  clientOverride?: SupabaseClient | null,
+  options?: { signal?: AbortSignal }
 ): Promise<RawSupabaseSurvey[]> {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
   if (!clientOverride) {
     assertSupabaseConfigured();
   }
@@ -756,7 +767,30 @@ export async function fetchDegustacionSurveysViaSdk(
   const pageSize = 1000;
   const collected: RawSupabaseSurvey[] = [];
 
+  const runPageQuery = async (cols: string, from: number, to: number) => {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    let query = client
+      .from('surveys')
+      .select(cols)
+      .eq('type', 'Degustacion')
+      .order('created_at', { ascending: false })
+      .range(from, to);
+    if (signal && typeof (query as { abortSignal?: (s: AbortSignal) => typeof query }).abortSignal === 'function') {
+      query = (query as { abortSignal: (s: AbortSignal) => typeof query }).abortSignal(signal);
+    }
+    const res = await query;
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    return res;
+  };
+
   for (let page = 0; page < 5; page++) {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
     const from = page * pageSize;
     const to = from + pageSize - 1;
     const useArchiveCols =
@@ -769,22 +803,12 @@ export async function fetchDegustacionSurveysViaSdk(
         ? SURVEYS_COLUMNS_WITH_READ
         : SURVEYS_COLUMNS_BASE;
 
-    const { data, error } = await client
-      .from('surveys')
-      .select(selectedCols)
-      .eq('type', 'Degustacion')
-      .order('created_at', { ascending: false })
-      .range(from, to);
+    const { data, error } = await runPageQuery(selectedCols, from, to);
 
     if (error) {
       if (useArchiveCols && isMissingColumnPostgrestError(error)) {
         surveysArchiveColumnsSupported = false;
-        const retryRead = await client
-          .from('surveys')
-          .select(SURVEYS_COLUMNS_WITH_READ)
-          .eq('type', 'Degustacion')
-          .order('created_at', { ascending: false })
-          .range(from, to);
+        const retryRead = await runPageQuery(SURVEYS_COLUMNS_WITH_READ, from, to);
 
         if (!retryRead.error) {
           if (surveysLeidoTradeColumnSupported === null) {
@@ -798,12 +822,7 @@ export async function fetchDegustacionSurveysViaSdk(
 
         if (isMissingColumnPostgrestError(retryRead.error)) {
           surveysLeidoTradeColumnSupported = false;
-          const retryBase = await client
-            .from('surveys')
-            .select(SURVEYS_COLUMNS_BASE)
-            .eq('type', 'Degustacion')
-            .order('created_at', { ascending: false })
-            .range(from, to);
+          const retryBase = await runPageQuery(SURVEYS_COLUMNS_BASE, from, to);
 
           if (retryBase.error) {
             throw new Error(`Supabase SDK surveys(Degustacion) failed: ${retryBase.error.message}`);
@@ -819,12 +838,7 @@ export async function fetchDegustacionSurveysViaSdk(
 
       if (useReadCols && isMissingColumnPostgrestError(error)) {
         surveysLeidoTradeColumnSupported = false;
-        const retry = await client
-          .from('surveys')
-          .select(SURVEYS_COLUMNS_BASE)
-          .eq('type', 'Degustacion')
-          .order('created_at', { ascending: false })
-          .range(from, to);
+        const retry = await runPageQuery(SURVEYS_COLUMNS_BASE, from, to);
 
         if (retry.error) {
           throw new Error(`Supabase SDK surveys(Degustacion) failed: ${retry.error.message}`);
@@ -892,7 +906,12 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
   timeoutMs?: number;
   forceRefresh?: boolean;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<RawSupabaseSurvey[]> {
+  const externalSignal = options?.signal;
+  if (externalSignal?.aborted) {
+    throw createAbortError();
+  }
   const safeEndpoint = validateFdvRenderEndpoint(options?.endpointUrl ?? DEFAULT_FDV_RENDER_API_URL);
   if (!safeEndpoint) return [];
 
@@ -906,7 +925,7 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
     return lastRenderCachedRows;
   }
 
-  if (!options?.forceRefresh && !options?.fetchImpl && inFlightRenderGetPromise) {
+  if (!options?.forceRefresh && !options?.fetchImpl && !externalSignal && inFlightRenderGetPromise) {
     return inFlightRenderGetPromise;
   }
 
@@ -916,15 +935,29 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
   const runner = (async (): Promise<RawSupabaseSurvey[]> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        clearTimeout(timer);
+        throw createAbortError();
+      }
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     try {
       const res = await fetcher(safeEndpoint, {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
+      if (externalSignal?.aborted) {
+        throw createAbortError();
+      }
       if (!res.ok) return lastRenderCachedRows;
 
       const rawText = await res.text();
+      if (externalSignal?.aborted) {
+        throw createAbortError();
+      }
       if (!rawText || rawText.length > 5 * 1024 * 1024) return lastRenderCachedRows;
 
       const parsedEnvelope = safeJsonParseObject<{
@@ -944,14 +977,19 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
         lastRenderCacheAt = Date.now();
       }
       return adapted;
-    } catch {
+    } catch (err) {
+      if (externalSignal?.aborted) {
+        throw createAbortError();
+      }
+      void err;
       return lastRenderCachedRows;
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
     }
   })();
 
-  if (!options?.fetchImpl) {
+  if (!options?.fetchImpl && !externalSignal) {
     inFlightRenderGetPromise = runner.finally(() => {
       inFlightRenderGetPromise = null;
     });

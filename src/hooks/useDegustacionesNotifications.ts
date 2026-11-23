@@ -13,6 +13,10 @@ import {
 
 export interface UseDegustacionesNotificationsOptions {
   onRealtimeChange?: () => void;
+  /** Intervalo de respaldo en ms (por defecto 15 000 ms). */
+  pollIntervalMs?: number;
+  /** Cooldown mínimo entre refrescos de foco/visibilidad para evitar tormentas de requests. */
+  resyncCooldownMs?: number;
 }
 
 export interface UseDegustacionesNotificationsResult {
@@ -30,13 +34,228 @@ export interface UseDegustacionesNotificationsResult {
   reloadNotifications: () => Promise<void>;
 }
 
-const FOCUS_RESYNC_THROTTLE_MS = 2500;
+export const NOTIFICATIONS_POLL_INTERVAL_MS = 15_000;
+export const FOCUS_RESYNC_THROTTLE_MS = 2_500;
+
+export interface VisibilityDocumentAdapter {
+  readonly visibilityState: DocumentVisibilityState | 'visible' | 'hidden';
+  addEventListener: (type: 'visibilitychange', listener: () => void) => void;
+  removeEventListener: (type: 'visibilitychange', listener: () => void) => void;
+}
+
+export interface VisibilityAwarePollingOptions {
+  pollIntervalMs?: number;
+  cooldownMs?: number;
+  documentAdapter?: VisibilityDocumentAdapter | null;
+  isOnline?: () => boolean;
+  now?: () => number;
+  onSync: (signal: AbortSignal, isBackgroundDelta: boolean) => Promise<void>;
+}
+
+export interface VisibilityAwarePollingController {
+  start: (options?: { runImmediateIfVisible?: boolean }) => void;
+  triggerSync: (options?: { forceImmediate?: boolean; isBackgroundDelta?: boolean }) => Promise<void>;
+  stopInterval: () => void;
+  abortInFlight: () => void;
+  dispose: () => void;
+  getState: () => {
+    isIntervalActive: boolean;
+    isRequestInFlight: boolean;
+    isDisposed: boolean;
+    lastSyncAtMs: number;
+  };
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: unknown; code?: unknown };
+  return e.name === 'AbortError' || e.code === 'ABORT_ERR';
+}
+
+/**
+ * Controlador determinista de polling gobernado por Page Visibility API + AbortController:
+ * - En `'hidden'`: detiene inmediatamente el intervalo de 15 s y aborta cualquier request en vuelo.
+ * - Al volver a `'visible'`: aplica cooldown anti-tormenta + guardia anti-solapamiento y reinicia
+ *   un intervalo limpio de 15 s.
+ * - En `dispose()`: limpia listeners, timers y aborta requests pendientes (cero memory leaks).
+ */
+export function createVisibilityAwarePollingController(
+  options: VisibilityAwarePollingOptions
+): VisibilityAwarePollingController {
+  const pollIntervalMs = Math.max(1_000, options.pollIntervalMs ?? NOTIFICATIONS_POLL_INTERVAL_MS);
+  const cooldownMs = Math.max(0, options.cooldownMs ?? FOCUS_RESYNC_THROTTLE_MS);
+  const getNow = options.now ?? (() => Date.now());
+  const isOnline =
+    options.isOnline ??
+    (() => (typeof navigator === 'undefined' ? true : navigator.onLine !== false));
+  const docAdapter: VisibilityDocumentAdapter | null =
+    options.documentAdapter !== undefined
+      ? options.documentAdapter
+      : typeof document !== 'undefined'
+        ? document
+        : null;
+
+  let intervalHandle: ReturnType<typeof setInterval> | null = null;
+  let activeController: AbortController | null = null;
+  let isRequestInFlight = false;
+  let isDisposed = false;
+  let lastSyncAtMs = 0;
+  let hasAttachedListener = false;
+
+  const isDocumentHidden = (): boolean => {
+    if (!docAdapter) return false;
+    return docAdapter.visibilityState === 'hidden';
+  };
+
+  const stopInterval = () => {
+    if (intervalHandle !== null) {
+      clearInterval(intervalHandle);
+      intervalHandle = null;
+    }
+  };
+
+  const abortInFlight = () => {
+    if (activeController) {
+      const ctrl = activeController;
+      activeController = null;
+      isRequestInFlight = false;
+      ctrl.abort();
+    }
+  };
+
+  const triggerSync = async (syncOpts?: {
+    forceImmediate?: boolean;
+    isBackgroundDelta?: boolean;
+  }): Promise<void> => {
+    if (isDisposed) return;
+
+    const isBackgroundDelta = syncOpts?.isBackgroundDelta ?? true;
+    const forceImmediate = syncOpts?.forceImmediate ?? false;
+
+    if (isBackgroundDelta && isDocumentHidden()) {
+      return;
+    }
+    if (!isOnline()) {
+      return;
+    }
+
+    // Guardia anti-solapamiento: los polls/resyncs de fondo no se superponen si ya hay uno activo
+    if (isRequestInFlight) {
+      if (isBackgroundDelta) {
+        return;
+      }
+      // Una recarga manual explícita cancela el request previo antes de iniciar uno limpio
+      abortInFlight();
+    }
+
+    const nowMs = getNow();
+    if (
+      isBackgroundDelta &&
+      !forceImmediate &&
+      lastSyncAtMs > 0 &&
+      nowMs - lastSyncAtMs < cooldownMs
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    activeController = controller;
+    isRequestInFlight = true;
+    lastSyncAtMs = nowMs;
+
+    try {
+      await options.onSync(controller.signal, isBackgroundDelta);
+    } catch (err) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        return;
+      }
+    } finally {
+      if (activeController === controller) {
+        activeController = null;
+        isRequestInFlight = false;
+      }
+    }
+  };
+
+  const startInterval = () => {
+    if (isDisposed || isDocumentHidden()) return;
+    stopInterval();
+    intervalHandle = setInterval(() => {
+      if (isDisposed || isDocumentHidden()) {
+        stopInterval();
+        abortInFlight();
+        return;
+      }
+      void triggerSync({ forceImmediate: true, isBackgroundDelta: true });
+    }, pollIntervalMs);
+  };
+
+  const handleVisibilityChange = () => {
+    if (isDisposed) return;
+    if (isDocumentHidden()) {
+      stopInterval();
+      abortInFlight();
+      return;
+    }
+
+    // Al volver a 'visible': refresco controlado con cooldown/anti-solapamiento + reinicio limpio de 15s
+    void triggerSync({ forceImmediate: false, isBackgroundDelta: true });
+    startInterval();
+  };
+
+  const start = (startOpts?: { runImmediateIfVisible?: boolean }) => {
+    if (isDisposed) return;
+
+    if (docAdapter && !hasAttachedListener) {
+      docAdapter.addEventListener('visibilitychange', handleVisibilityChange);
+      hasAttachedListener = true;
+    }
+
+    if (isDocumentHidden()) {
+      stopInterval();
+      abortInFlight();
+      return;
+    }
+
+    if (startOpts?.runImmediateIfVisible !== false) {
+      void triggerSync({ forceImmediate: true, isBackgroundDelta: false });
+    }
+    startInterval();
+  };
+
+  const dispose = () => {
+    if (isDisposed) return;
+    isDisposed = true;
+    stopInterval();
+    abortInFlight();
+    if (docAdapter && hasAttachedListener) {
+      docAdapter.removeEventListener('visibilitychange', handleVisibilityChange);
+      hasAttachedListener = false;
+    }
+  };
+
+  return {
+    start,
+    triggerSync,
+    stopInterval,
+    abortInFlight,
+    dispose,
+    getState: () => ({
+      isIntervalActive: intervalHandle !== null,
+      isRequestInFlight,
+      isDisposed,
+      lastSyncAtMs,
+    }),
+  };
+}
 
 export function useDegustacionesNotifications(
   options?: UseDegustacionesNotificationsOptions
 ): UseDegustacionesNotificationsResult {
   const onRealtimeChangeRef = useRef(options?.onRealtimeChange);
   onRealtimeChangeRef.current = options?.onRealtimeChange;
+  const pollIntervalMs = options?.pollIntervalMs ?? NOTIFICATIONS_POLL_INTERVAL_MS;
+  const resyncCooldownMs = options?.resyncCooldownMs ?? FOCUS_RESYNC_THROTTLE_MS;
 
   const [unreadItems, setUnreadItems] = useState<DegustacionNotificationItem[]>([]);
   const [isLoadingNotifications, setIsLoadingNotifications] = useState<boolean>(true);
@@ -49,18 +268,24 @@ export function useDegustacionesNotifications(
   const hasCompletedInitialLoadRef = useRef<boolean>(false);
   const baselineSeenIdsRef = useRef<Set<string>>(new Set());
   const emittedToastIdsRef = useRef<Set<string>>(new Set());
-  const lastFocusSyncAtRef = useRef<number>(0);
   const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const pollingControllerRef = useRef<VisibilityAwarePollingController | null>(null);
+  const isMountedRef = useRef<boolean>(true);
   const unreadItemsRef = useRef<DegustacionNotificationItem[]>([]);
   unreadItemsRef.current = unreadItems;
 
   const triggerArrivalPulse = useCallback(() => {
+    if (!isMountedRef.current) return;
     setHasRecentArrivalPulse(true);
     if (pulseTimeoutRef.current) {
       clearTimeout(pulseTimeoutRef.current);
     }
     pulseTimeoutRef.current = setTimeout(() => {
-      setHasRecentArrivalPulse(false);
+      pulseTimeoutRef.current = null;
+      if (isMountedRef.current) {
+        setHasRecentArrivalPulse(false);
+      }
     }, 6500);
   }, []);
 
@@ -69,6 +294,7 @@ export function useDegustacionesNotifications(
   }, []);
 
   const enqueueToastForItem = useCallback((item: DegustacionNotificationItem) => {
+    if (!isMountedRef.current) return;
     const canonicalDegKey = normalizeCanonicalDegustacionId(item.degustacionId, item.id);
     if (
       emittedToastIdsRef.current.has(item.id) ||
@@ -96,14 +322,19 @@ export function useDegustacionesNotifications(
     };
 
     setActiveToasts((prev) => [newToast, ...prev].slice(0, 4));
-    setTimeout(() => {
-      setActiveToasts((prev) => prev.filter((t) => t.toastId !== toastId));
+    const timer = setTimeout(() => {
+      toastTimeoutsRef.current.delete(timer);
+      if (isMountedRef.current) {
+        setActiveToasts((prev) => prev.filter((t) => t.toastId !== toastId));
+      }
     }, 7500);
+    toastTimeoutsRef.current.add(timer);
   }, []);
 
   // Procesa un evento INSERT (Realtime WebSocket, reconciliación Render o puente local) garantizando deduplicación estricta (+1 exacto)
   const handleIncomingInsertRow = useCallback(
     (rawRow: Partial<RawSupabaseSurvey> | null | undefined, shouldNotifyToast: boolean) => {
+      if (!isMountedRef.current) return;
       const parsed = parseDegustacionNotificationRow(rawRow);
       if (!parsed) return;
       if (parsed.leidoTrade) {
@@ -159,7 +390,7 @@ export function useDegustacionesNotifications(
   // Procesa un evento UPDATE (ej. marcado como leído o aprobado desde otra pestaña) descontando -1 al instante
   const handleIncomingUpdateRow = useCallback(
     (rawRow: Partial<RawSupabaseSurvey> | null | undefined) => {
-      if (!rawRow || !rawRow.id) return;
+      if (!isMountedRef.current || !rawRow || !rawRow.id) return;
       const parsed = parseDegustacionNotificationRow(rawRow);
       const canonicalDegKey = parsed
         ? normalizeCanonicalDegustacionId(parsed.degustacionId, parsed.id)
@@ -202,15 +433,16 @@ export function useDegustacionesNotifications(
     []
   );
 
-  // Carga inicial exacta y re-sincronización automática al recuperar foco de ventana o reconectar red
+  // Carga inicial exacta y re-sincronización cancelable con AbortSignal
   const syncUnreadFromDatabase = useCallback(
-    async (isBackgroundDelta = false) => {
-      lastFocusSyncAtRef.current = Date.now();
+    async (isBackgroundDelta = false, signal?: AbortSignal) => {
+      if (!isMountedRef.current || signal?.aborted) return;
       if (!isBackgroundDelta) {
         setIsLoadingNotifications(true);
       }
       try {
-        const freshUnread = await fetchUnreadDegustacionNotifications();
+        const freshUnread = await fetchUnreadDegustacionNotifications({ signal });
+        if (!isMountedRef.current || signal?.aborted) return;
         setSyncError(null);
 
         if (!hasCompletedInitialLoadRef.current) {
@@ -249,10 +481,13 @@ export function useDegustacionesNotifications(
           newlyArrived.forEach((item) => enqueueToastForItem(item));
           onRealtimeChangeRef.current?.();
         }
-      } catch {
+      } catch (err) {
+        if (!isMountedRef.current || signal?.aborted || isAbortError(err)) {
+          return;
+        }
         setSyncError('Error de conexión con el servidor');
       } finally {
-        if (!isBackgroundDelta) {
+        if (!isBackgroundDelta && isMountedRef.current) {
           setIsLoadingNotifications(false);
         }
       }
@@ -260,13 +495,37 @@ export function useDegustacionesNotifications(
     [enqueueToastForItem, triggerArrivalPulse]
   );
 
-  // Suscripción Realtime (INSERT, UPDATE, DELETE) + re-sincronización al recuperar foco/red
+  // Suscripción Realtime (INSERT, UPDATE, DELETE) + polling inteligente con Page Visibility API + AbortController
   useEffect(() => {
-    void syncUnreadFromDatabase(false);
+    isMountedRef.current = true;
+
+    const controller = createVisibilityAwarePollingController({
+      pollIntervalMs,
+      cooldownMs: resyncCooldownMs,
+      onSync: (signal, isBackgroundDelta) =>
+        syncUnreadFromDatabase(isBackgroundDelta, signal),
+    });
+    pollingControllerRef.current = controller;
 
     const supabase = getSupabaseRealtimeClient();
-    // Sin credenciales no hay canal en tiempo real (el error de configuración lo reporta la sincronización inicial).
-    if (!supabase) return;
+    // Sin credenciales no hay canal ni polling periódico (solo carga inicial para reportar estado)
+    if (!supabase) {
+      void controller.triggerSync({ forceImmediate: true, isBackgroundDelta: false });
+      return () => {
+        isMountedRef.current = false;
+        controller.dispose();
+        pollingControllerRef.current = null;
+        if (pulseTimeoutRef.current) {
+          clearTimeout(pulseTimeoutRef.current);
+          pulseTimeoutRef.current = null;
+        }
+        toastTimeoutsRef.current.forEach((t) => clearTimeout(t));
+        toastTimeoutsRef.current.clear();
+      };
+    }
+
+    controller.start({ runImmediateIfVisible: true });
+
     const channel = supabase
       .channel('trade-marketing-degustaciones-realtime')
       .on(
@@ -302,15 +561,16 @@ export function useDegustacionesNotifications(
         },
         (payload) => {
           const deletedId = (payload.old as { id?: string } | undefined)?.id;
-          if (deletedId) {
+          if (deletedId && isMountedRef.current) {
             setUnreadItems((prev) => prev.filter((item) => item.id !== deletedId));
           }
         }
       )
       .subscribe((status) => {
+        if (!isMountedRef.current) return;
         setIsRealtimeConnected(status === 'SUBSCRIBED');
         if (status === 'SUBSCRIBED' && hasCompletedInitialLoadRef.current) {
-          void syncUnreadFromDatabase(true);
+          void controller.triggerSync({ forceImmediate: false, isBackgroundDelta: true });
         }
       });
 
@@ -328,56 +588,40 @@ export function useDegustacionesNotifications(
       }
     };
 
-    const triggerThrottledResync = (forceImmediate = false) => {
-      const now = Date.now();
-      if (!forceImmediate && now - lastFocusSyncAtRef.current < FOCUS_RESYNC_THROTTLE_MS) {
-        return;
-      }
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        return;
-      }
-      void syncUnreadFromDatabase(true);
-    };
-
-    // Re-sincronización exacta al recuperar conexión de red (`online`), foco de ventana (`focus`) o pestaña (`visibilitychange`)
     const handleOnline = () => {
-      triggerThrottledResync(true);
+      void controller.triggerSync({ forceImmediate: true, isBackgroundDelta: true });
     };
 
     const handleWindowFocus = () => {
-      triggerThrottledResync(false);
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        triggerThrottledResync(false);
-      }
+      void controller.triggerSync({ forceImmediate: false, isBackgroundDelta: true });
     };
 
     window.addEventListener(DEGUSTACION_SURVEY_LOCAL_EVENT, handleLocalBridge);
     window.addEventListener('online', handleOnline);
     window.addEventListener('focus', handleWindowFocus);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    // Respaldo de reconciliación ligera cada 15s por si ocurren microcortes WebSocket o antes de correr ALTER PUBLICATION
-    const safetyInterval = setInterval(() => {
-      if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-        void syncUnreadFromDatabase(true);
-      }
-    }, 15000);
 
     return () => {
+      isMountedRef.current = false;
       window.removeEventListener(DEGUSTACION_SURVEY_LOCAL_EVENT, handleLocalBridge);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('focus', handleWindowFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      clearInterval(safetyInterval);
+      controller.dispose();
+      pollingControllerRef.current = null;
       if (pulseTimeoutRef.current) {
         clearTimeout(pulseTimeoutRef.current);
+        pulseTimeoutRef.current = null;
       }
+      toastTimeoutsRef.current.forEach((t) => clearTimeout(t));
+      toastTimeoutsRef.current.clear();
       void supabase.removeChannel(channel);
     };
-  }, [handleIncomingInsertRow, handleIncomingUpdateRow, syncUnreadFromDatabase]);
+  }, [
+    handleIncomingInsertRow,
+    handleIncomingUpdateRow,
+    pollIntervalMs,
+    resyncCooldownMs,
+    syncUnreadFromDatabase,
+  ]);
 
   const markAsRead = useCallback(async (surveyId: string) => {
     if (!surveyId) return;
@@ -396,13 +640,17 @@ export function useDegustacionesNotifications(
       )
     );
     setActiveToasts((prev) =>
-      prev.filter((t) => t.surveyId !== surveyId && (!canonicalDegKey || t.degustacionId !== canonicalDegKey))
+      prev.filter(
+        (t) =>
+          t.surveyId !== surveyId &&
+          (!canonicalDegKey || t.degustacionId !== canonicalDegKey)
+      )
     );
 
     try {
       await markSupabaseDegustacionAsRead(surveyId, targetItem?.rawComments);
     } catch {
-      if (targetItem) {
+      if (targetItem && isMountedRef.current) {
         setUnreadItems((prev) =>
           prev.some((i) => i.id === targetItem.id)
             ? prev
@@ -424,12 +672,26 @@ export function useDegustacionesNotifications(
     try {
       await markAllSupabaseDegustacionesAsRead(snapshot);
     } catch {
-      await syncUnreadFromDatabase(true);
+      if (pollingControllerRef.current) {
+        await pollingControllerRef.current.triggerSync({
+          forceImmediate: true,
+          isBackgroundDelta: true,
+        });
+      } else {
+        await syncUnreadFromDatabase(true);
+      }
     }
   }, [syncUnreadFromDatabase]);
 
   const reloadNotifications = useCallback(async () => {
-    await syncUnreadFromDatabase(false);
+    if (pollingControllerRef.current) {
+      await pollingControllerRef.current.triggerSync({
+        forceImmediate: true,
+        isBackgroundDelta: false,
+      });
+    } else {
+      await syncUnreadFromDatabase(false);
+    }
   }, [syncUnreadFromDatabase]);
 
   return {

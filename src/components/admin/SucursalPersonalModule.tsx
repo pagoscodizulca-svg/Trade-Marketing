@@ -50,6 +50,13 @@ import {
 } from './ClientePortalAccesosManager';
 import { PortalQuickLinksBar } from './PortalQuickLinksBar';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
+import {
+  PROMOTORA_CATEGORIAS,
+  classifyPromotoraCategoriaOficial,
+  computePromotorasCategoryStats,
+  formatPromotoraRoleForCategory,
+  type PromotoraCategoriaOficial,
+} from '../../utils/regionalSyncClassifier';
 
 export interface RegionActivaItem {
   id: string;
@@ -64,6 +71,7 @@ export interface SucursalStaffMemberRow {
   role: string;
   email: string;
   status: string;
+  categoria?: PromotoraCategoriaOficial | string | null;
   auth_user_id?: string | null;
   sucursal?: OperativeSucursal | string | null;
   region_id?: string | null;
@@ -320,6 +328,9 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
 
   // Filtros rápidos locales
   const [staffSearch, setStaffSearch] = useState<string>('');
+  const [staffCategoryFilter, setStaffCategoryFilter] = useState<
+    'TODAS' | PromotoraCategoriaOficial
+  >('TODAS');
   const [clientSearch, setClientSearch] = useState<string>('');
 
   // Modal Crear / Editar Promotora en public.staff
@@ -327,7 +338,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
   const [editingStaffRow, setEditingStaffRow] = useState<SucursalStaffMemberRow | null>(null);
   const [staffNameInput, setStaffNameInput] = useState<string>('');
   const [staffEmailInput, setStaffEmailInput] = useState<string>('');
-  const [staffRoleInput, setStaffRoleInput] = useState<string>('Promotora Fija');
+  const [staffCategoryInput, setStaffCategoryInput] = useState<PromotoraCategoriaOficial>('Fijas');
   const [staffStatusInput, setStaffStatusInput] = useState<'Activo' | 'Inactivo'>('Activo');
   const [staffSaving, setStaffSaving] = useState<boolean>(false);
   const [staffFormError, setStaffFormError] = useState<string | null>(null);
@@ -403,16 +414,30 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
       : null;
   }, [activeRegionMeta.id, bundle.region_id]);
 
+  const staffCategoryStats = useMemo(
+    () =>
+      computePromotorasCategoryStats(
+        bundle.staff as unknown as Array<Record<string, unknown>>
+      ),
+    [bundle.staff]
+  );
+
   const filteredStaff = useMemo(() => {
     const q = staffSearch.trim().toLowerCase();
-    if (!q) return bundle.staff;
-    return bundle.staff.filter(
-      (s) =>
+    return bundle.staff.filter((s) => {
+      const cat = classifyPromotoraCategoriaOficial(s as unknown as Record<string, unknown>);
+      if (staffCategoryFilter !== 'TODAS' && cat !== staffCategoryFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
         s.name.toLowerCase().includes(q) ||
         normalizeManagedUserEmail(s.email).includes(q) ||
-        String(s.role || '').toLowerCase().includes(q)
-    );
-  }, [bundle.staff, staffSearch]);
+        String(s.role || '').toLowerCase().includes(q) ||
+        cat.toLowerCase().includes(q)
+      );
+    });
+  }, [bundle.staff, staffSearch, staffCategoryFilter]);
 
   const filteredClientes = useMemo(() => {
     const q = clientSearch.trim().toLowerCase();
@@ -455,7 +480,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
     setEditingStaffRow(null);
     setStaffNameInput('');
     setStaffEmailInput('');
-    setStaffRoleInput('Promotora Fija');
+    setStaffCategoryInput('Fijas');
     setStaffStatusInput('Activo');
     setStaffFormError(null);
     setStaffFormOpen(true);
@@ -465,7 +490,9 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
     setEditingStaffRow(row);
     setStaffNameInput(row.name);
     setStaffEmailInput(normalizeManagedUserEmail(row.email));
-    setStaffRoleInput(row.role || 'Promotora Fija');
+    setStaffCategoryInput(
+      classifyPromotoraCategoriaOficial(row as unknown as Record<string, unknown>)
+    );
     setStaffStatusInput(parseStaffStatus(row.status));
     setStaffFormError(null);
     setStaffFormOpen(true);
@@ -495,59 +522,79 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
     setStaffFormError(null);
     try {
       const client = customClient ?? getSupabaseClient();
+      const canonicalRole = formatPromotoraRoleForCategory(staffCategoryInput);
+      const baseStaffPayload = {
+        name: cleanName,
+        email: cleanEmail,
+        role: canonicalRole,
+        status: staffStatusInput,
+        sucursal: activeHub,
+        ...(resolvedRegionUuid ? { region_id: resolvedRegionUuid } : {}),
+      };
+
       if (editingStaffRow) {
-        const { data, error } = await client
+        let { data, error } = await client
           .from('staff')
-          .update({
-            name: cleanName,
-            email: cleanEmail,
-            role: staffRoleInput,
-            status: staffStatusInput,
-            sucursal: activeHub,
-            ...(resolvedRegionUuid ? { region_id: resolvedRegionUuid } : {}),
-          })
+          .update({ ...baseStaffPayload, categoria: staffCategoryInput })
           .eq('id', editingStaffRow.id)
           .eq('sucursal', activeHub)
           .select('*')
           .single();
 
+        if (error && /column .*categoria|PGRST204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
+          ({ data, error } = await client
+            .from('staff')
+            .update(baseStaffPayload)
+            .eq('id', editingStaffRow.id)
+            .eq('sucursal', activeHub)
+            .select('*')
+            .single());
+        }
+
         if (error || !data) {
           throw new Error(error?.message || 'No se pudo actualizar el registro de personal.');
         }
 
-        const updated = data as SucursalStaffMemberRow;
+        const updated: SucursalStaffMemberRow = {
+          ...(data as SucursalStaffMemberRow),
+          categoria: staffCategoryInput,
+        };
         setBundle((prev) => ({
           ...prev,
           staff: prev.staff.map((s) => (s.id === updated.id ? updated : s)),
         }));
         setFeedbackMsg(
-          `Promotora ${updated.name} actualizada en ${SUCURSAL_LABELS[activeHub]}.`
+          `Promotora ${updated.name} (${staffCategoryInput}) actualizada en ${SUCURSAL_LABELS[activeHub]}.`
         );
       } else {
-        const { data, error } = await client
+        let { data, error } = await client
           .from('staff')
-          .insert({
-            name: cleanName,
-            email: cleanEmail,
-            role: staffRoleInput,
-            status: staffStatusInput,
-            sucursal: activeHub,
-            ...(resolvedRegionUuid ? { region_id: resolvedRegionUuid } : {}),
-          })
+          .insert({ ...baseStaffPayload, categoria: staffCategoryInput })
           .select('*')
           .single();
+
+        if (error && /column .*categoria|PGRST204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
+          ({ data, error } = await client
+            .from('staff')
+            .insert(baseStaffPayload)
+            .select('*')
+            .single());
+        }
 
         if (error || !data) {
           throw new Error(error?.message || 'No se pudo registrar la promotora en public.staff.');
         }
 
-        const inserted = data as SucursalStaffMemberRow;
+        const inserted: SucursalStaffMemberRow = {
+          ...(data as SucursalStaffMemberRow),
+          categoria: staffCategoryInput,
+        };
         setBundle((prev) => ({
           ...prev,
           staff: [inserted, ...prev.staff],
         }));
         setFeedbackMsg(
-          `Promotora ${inserted.name} incorporada a ${SUCURSAL_LABELS[activeHub]}.`
+          `Promotora ${inserted.name} (${staffCategoryInput}) incorporada a ${SUCURSAL_LABELS[activeHub]}.`
         );
       }
 
@@ -912,6 +959,51 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
           </div>
         </div>
 
+        {/* Filtros y contadores por categoría oficial: Fijas / Eventuales / Merchandising */}
+        <div
+          className="flex flex-wrap items-center gap-1.5"
+          role="group"
+          aria-label="Filtrar personal por categoría"
+          data-testid="sucursal-staff-category-filter-bar"
+        >
+          {(
+            [
+              { id: 'TODAS', label: 'Todas', count: staffCategoryStats.total },
+              { id: 'Fijas', label: 'Fijas', count: staffCategoryStats.Fijas },
+              { id: 'Eventuales', label: 'Eventuales', count: staffCategoryStats.Eventuales },
+              {
+                id: 'Merchandising',
+                label: 'Merchandising',
+                count: staffCategoryStats.Merchandising,
+              },
+            ] as const
+          ).map((pill) => {
+            const active = staffCategoryFilter === pill.id;
+            return (
+              <button
+                key={pill.id}
+                type="button"
+                data-testid={`sucursal-filter-categoria-${pill.id}`}
+                onClick={() => setStaffCategoryFilter(pill.id)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-1.5 border transition cursor-pointer ${
+                  active
+                    ? 'bg-red-600 text-white border-red-500'
+                    : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-600'
+                }`}
+              >
+                <span>{pill.label}</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded font-mono text-[10px] ${
+                    active ? 'bg-black/30 text-white' : 'bg-zinc-900 text-zinc-400'
+                  }`}
+                >
+                  {pill.count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="rounded-xl border border-white/[0.07] overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
@@ -945,13 +1037,29 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                   filteredStaff.map((row) => {
                     const statusNorm = parseStaffStatus(row.status);
                     const hasAuth = Boolean(row.auth_user_id);
+                    const rowCat = classifyPromotoraCategoriaOficial(
+                      row as unknown as Record<string, unknown>
+                    );
+                    const rowCatClass =
+                      rowCat === 'Fijas'
+                        ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/35'
+                        : rowCat === 'Eventuales'
+                          ? 'bg-amber-500/15 text-amber-200 border-amber-500/35'
+                          : 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35';
                     return (
                       <tr key={row.id} className="hover:bg-white/[0.02]">
                         <td className="py-2.5 px-3.5 font-semibold text-white">{row.name}</td>
                         <td className="py-2.5 px-3.5 font-mono text-zinc-300">
                           {normalizeManagedUserEmail(row.email) || '—'}
                         </td>
-                        <td className="py-2.5 px-3.5 text-zinc-300">{row.role || 'Promotora'}</td>
+                        <td className="py-2.5 px-3.5">
+                          <span
+                            data-testid={`sucursal-staff-cat-${row.id}`}
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border ${rowCatClass}`}
+                          >
+                            {rowCat}
+                          </span>
+                        </td>
                         <td className="py-2.5 px-3.5">
                           <span
                             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
@@ -1196,15 +1304,20 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold text-zinc-300 mb-1">Modalidad</label>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">Categoría</label>
                 <select
-                  value={staffRoleInput}
-                  onChange={(e) => setStaffRoleInput(e.target.value)}
+                  data-testid="sucursal-select-staff-categoria"
+                  value={staffCategoryInput}
+                  onChange={(e) =>
+                    setStaffCategoryInput(e.target.value as PromotoraCategoriaOficial)
+                  }
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-500 cursor-pointer"
                 >
-                  <option value="Promotora Fija">Promotora Fija</option>
-                  <option value="Promotora Eventual">Promotora Eventual</option>
-                  <option value="Promotora">Promotora</option>
+                  {PROMOTORA_CATEGORIAS.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
               </div>
 

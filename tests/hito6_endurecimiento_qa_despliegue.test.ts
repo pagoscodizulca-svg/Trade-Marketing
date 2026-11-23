@@ -293,16 +293,29 @@ test('Hito 6 · S-01/P-03 lectura Excel sin SheetJS', async (t) => {
     ]);
   });
 
-  await t.test('package.json: xlsx fuera de producción, helmet/cors/exceljs presentes', () => {
+  await t.test('package.json: xlsx retirado por completo (prod y dev), helmet/cors/exceljs presentes', () => {
     const pkg = JSON.parse(read('package.json'));
     assert.equal(pkg.dependencies.xlsx, undefined, 'xlsx no debe ser dependencia de producción');
-    assert.ok(pkg.devDependencies.xlsx, 'xlsx solo como devDependency (fixtures de scripts)');
+    assert.equal(
+      pkg.devDependencies?.xlsx,
+      undefined,
+      'Fase 3: xlsx@0.18.5 debe estar retirado también de devDependencies'
+    );
     for (const d of ['helmet', 'cors', 'exceljs', 'docx', 'read-excel-file']) {
       assert.ok(pkg.dependencies[d], `falta ${d}`);
     }
-    const srcFiles = ['src/utils/degustacionesTabularParser.ts', 'src/services/masterDataSyncService.ts', 'src/utils/excelWorkbookReader.ts'];
+    const srcFiles = [
+      'src/utils/degustacionesTabularParser.ts',
+      'src/services/masterDataSyncService.ts',
+      'src/utils/excelWorkbookReader.ts',
+      'scripts/verifyCalibracionModalCarga.ts',
+      'scripts/verifyExcelDateNormalizer.ts',
+      'scripts/verifyExcelDateParser.ts',
+      'scripts/verifyFase2Parsers.ts',
+      'scripts/verifyRefactorCargaMultiformato.ts',
+    ];
     for (const f of srcFiles) {
-      assert.ok(!/from 'xlsx'|import\('xlsx'\)/.test(read(f)), `${f} no debe importar xlsx`);
+      assert.ok(!/from ['"]xlsx['"]|import\(['"]xlsx['"]\)/.test(read(f)), `${f} no debe importar xlsx`);
     }
   });
 });

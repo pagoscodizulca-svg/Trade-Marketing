@@ -89,6 +89,20 @@ import type {
   TarifarioCostoTradeInput,
 } from '../types/contraloriaFinancial';
 import {
+  DEFAULT_AUDIT_LOG_PAGE_SIZE,
+  DEFAULT_DISCREPANCY_ALERT_PAGE_SIZE,
+  computeAuditIntegrityHash,
+  executeOptimisticAppendWithRollback,
+  executeOptimisticUpdateWithRollback,
+  fetchAuditLogsPage,
+  fetchDiscrepancyAlertsPage,
+  persistAuditLogEntry,
+  persistDiscrepancyAlert,
+  resolveActiveRegionContext,
+  resolveDiscrepancyAlertInSupabase,
+  type PersistDiscrepancyAlertInput,
+} from '../services/auditAndAlertsService';
+import {
   createFiscalReceiptMetadataInSupabase,
   createRequisitionInSupabase,
   fetchContraloriaFinancialBundle,
@@ -208,7 +222,24 @@ export interface AppContextType {
   tastingReports: TastingExecutionReport[];
   reconciliation: InventoryReconciliation;
   auditLogs: AuditLogEntry[];
+  isLoadingAuditLogs: boolean;
+  auditLogsError: string | null;
+  hasMoreAuditLogs: boolean;
+  refreshAuditLogs: () => Promise<void>;
+  loadMoreAuditLogs: () => Promise<void>;
   discrepancyAlerts: DiscrepancyAlert[];
+  isLoadingDiscrepancyAlerts: boolean;
+  discrepancyAlertsError: string | null;
+  hasMoreDiscrepancyAlerts: boolean;
+  refreshDiscrepancyAlerts: () => Promise<void>;
+  loadMoreDiscrepancyAlerts: () => Promise<void>;
+  createDiscrepancyAlert: (
+    input: Omit<PersistDiscrepancyAlertInput, 'regionId' | 'regionCode' | 'sucursal'>
+  ) => Promise<{ success: boolean; data?: DiscrepancyAlert; error?: string }>;
+  resolveDiscrepancyAlert: (
+    alertId: string,
+    resolutionNotes?: string
+  ) => Promise<{ success: boolean; data?: DiscrepancyAlert; error?: string }>;
 
   // Datos sincronizados desde Supabase para el Módulo 1 y Módulo 2
   module1Bundle: Module1SupabaseBundle | null;
@@ -590,7 +621,151 @@ export const AppProvider: React.FC<{
   const [tarifarioCostos, setTarifarioCostos] = useState<TarifarioCostoTrade[]>([]);
   const [isLoadingFinancial, setIsLoadingFinancial] = useState<boolean>(false);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [isLoadingAuditLogs, setIsLoadingAuditLogs] = useState<boolean>(false);
+  const [auditLogsError, setAuditLogsError] = useState<string | null>(null);
+  const [hasMoreAuditLogs, setHasMoreAuditLogs] = useState<boolean>(false);
+  const auditLogsOffsetRef = useRef<number>(0);
+
   const [discrepancyAlerts, setDiscrepancyAlerts] = useState<DiscrepancyAlert[]>([]);
+  const [isLoadingDiscrepancyAlerts, setIsLoadingDiscrepancyAlerts] = useState<boolean>(false);
+  const [discrepancyAlertsError, setDiscrepancyAlertsError] = useState<string | null>(null);
+  const [hasMoreDiscrepancyAlerts, setHasMoreDiscrepancyAlerts] = useState<boolean>(false);
+  const discrepancyAlertsOffsetRef = useRef<number>(0);
+
+  const resolveCurrentAuditRegion = useCallback(async () => {
+    return resolveActiveRegionContext({
+      activeSucursal: activeSucursalRef.current,
+      verifiedRegionId,
+    });
+  }, [verifiedRegionId]);
+
+  const refreshAuditLogs = useCallback(async () => {
+    if (!isSupabaseConfigured || requiresSucursalSelectionRef.current) {
+      setIsLoadingAuditLogs(false);
+      return;
+    }
+    setIsLoadingAuditLogs(true);
+    setAuditLogsError(null);
+    try {
+      const { regionId } = await resolveCurrentAuditRegion();
+      const page = await fetchAuditLogsPage({
+        regionId,
+        limit: DEFAULT_AUDIT_LOG_PAGE_SIZE,
+        offset: 0,
+      });
+      setAuditLogs(page.items);
+      auditLogsOffsetRef.current = page.nextOffset;
+      setHasMoreAuditLogs(page.hasMore);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.trim()
+          ? err.message.trim()
+          : 'No se pudo cargar la bitácora de auditoría desde Supabase.';
+      setAuditLogsError(msg);
+    } finally {
+      setIsLoadingAuditLogs(false);
+    }
+  }, [resolveCurrentAuditRegion]);
+
+  const loadMoreAuditLogs = useCallback(async () => {
+    if (!isSupabaseConfigured || requiresSucursalSelectionRef.current || isLoadingAuditLogs || !hasMoreAuditLogs) {
+      return;
+    }
+    setIsLoadingAuditLogs(true);
+    setAuditLogsError(null);
+    try {
+      const { regionId } = await resolveCurrentAuditRegion();
+      const page = await fetchAuditLogsPage({
+        regionId,
+        limit: DEFAULT_AUDIT_LOG_PAGE_SIZE,
+        offset: auditLogsOffsetRef.current,
+      });
+      setAuditLogs((prev) => {
+        const seen = new Set(prev.map((item) => item.id));
+        const appended = page.items.filter((item) => !seen.has(item.id));
+        return [...prev, ...appended];
+      });
+      auditLogsOffsetRef.current = page.nextOffset;
+      setHasMoreAuditLogs(page.hasMore);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.trim()
+          ? err.message.trim()
+          : 'No se pudieron cargar más registros de auditoría.';
+      setAuditLogsError(msg);
+    } finally {
+      setIsLoadingAuditLogs(false);
+    }
+  }, [hasMoreAuditLogs, isLoadingAuditLogs, resolveCurrentAuditRegion]);
+
+  const refreshDiscrepancyAlerts = useCallback(async () => {
+    if (!isSupabaseConfigured || requiresSucursalSelectionRef.current) {
+      setIsLoadingDiscrepancyAlerts(false);
+      return;
+    }
+    setIsLoadingDiscrepancyAlerts(true);
+    setDiscrepancyAlertsError(null);
+    try {
+      const { regionId } = await resolveCurrentAuditRegion();
+      const page = await fetchDiscrepancyAlertsPage({
+        regionId,
+        limit: DEFAULT_DISCREPANCY_ALERT_PAGE_SIZE,
+        offset: 0,
+      });
+      setDiscrepancyAlerts(page.items);
+      discrepancyAlertsOffsetRef.current = page.nextOffset;
+      setHasMoreDiscrepancyAlerts(page.hasMore);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.trim()
+          ? err.message.trim()
+          : 'No se pudieron cargar las alertas de discrepancia desde Supabase.';
+      setDiscrepancyAlertsError(msg);
+    } finally {
+      setIsLoadingDiscrepancyAlerts(false);
+    }
+  }, [resolveCurrentAuditRegion]);
+
+  const loadMoreDiscrepancyAlerts = useCallback(async () => {
+    if (
+      !isSupabaseConfigured ||
+      requiresSucursalSelectionRef.current ||
+      isLoadingDiscrepancyAlerts ||
+      !hasMoreDiscrepancyAlerts
+    ) {
+      return;
+    }
+    setIsLoadingDiscrepancyAlerts(true);
+    setDiscrepancyAlertsError(null);
+    try {
+      const { regionId } = await resolveCurrentAuditRegion();
+      const page = await fetchDiscrepancyAlertsPage({
+        regionId,
+        limit: DEFAULT_DISCREPANCY_ALERT_PAGE_SIZE,
+        offset: discrepancyAlertsOffsetRef.current,
+      });
+      setDiscrepancyAlerts((prev) => {
+        const seen = new Set(prev.map((item) => item.id));
+        const appended = page.items.filter((item) => !seen.has(item.id));
+        return [...prev, ...appended];
+      });
+      discrepancyAlertsOffsetRef.current = page.nextOffset;
+      setHasMoreDiscrepancyAlerts(page.hasMore);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.trim()
+          ? err.message.trim()
+          : 'No se pudieron cargar más alertas de discrepancia.';
+      setDiscrepancyAlertsError(msg);
+    } finally {
+      setIsLoadingDiscrepancyAlerts(false);
+    }
+  }, [hasMoreDiscrepancyAlerts, isLoadingDiscrepancyAlerts, resolveCurrentAuditRegion]);
+
+  useEffect(() => {
+    void refreshAuditLogs();
+    void refreshDiscrepancyAlerts();
+  }, [refreshAuditLogs, refreshDiscrepancyAlerts, activeSucursal, verifiedProfile?.userId]);
 
   const reconciliationRef = useRef<InventoryReconciliation>(reconciliation);
   useEffect(() => {
@@ -1005,45 +1180,177 @@ export const AppProvider: React.FC<{
     newState?: string,
     justification?: string
   ) => {
-    const newEntry: AuditLogEntry = {
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      timestamp: new Date().toISOString(),
+    const tempId = `log_tmp_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const nowIso = new Date().toISOString();
+    const actorId = currentUser?.id ?? '';
+    const actorName = currentUser?.name ?? '';
+    const actorRole = currentUser?.role ?? currentRole;
+
+    const optimisticEntry: AuditLogEntry = {
+      id: tempId,
+      timestamp: nowIso,
       entityType,
       entityId,
       action,
-      userId: currentUser?.id ?? '',
-      userName: currentUser?.name ?? '',
-      userRole: currentUser?.role ?? currentRole,
+      userId: actorId,
+      userName: actorName,
+      userRole: actorRole,
       ipAddress: '',
       previousState,
       newState,
       justification,
       integrityHash: '',
     };
-    setAuditLogs((prev) => [newEntry, ...prev]);
-    // Hash SHA-256 real del contenido de la entrada (se completa de forma asíncrona).
-    void sha256Hex(
-      JSON.stringify({
-        id: newEntry.id,
-        timestamp: newEntry.timestamp,
+
+    if (!isSupabaseConfigured) {
+      // Sin backend Supabase configurado: conserva trazabilidad local con hash SHA-256 real
+      setAuditLogs((prev) => [optimisticEntry, ...prev]);
+      void computeAuditIntegrityHash({
+        id: tempId,
+        timestamp: nowIso,
         entityType,
         entityId,
         action,
-        userId: newEntry.userId,
+        userId: actorId,
         previousState,
         newState,
         justification,
-      })
-    )
-      .then((hex) => {
+      }).then((hash) => {
+        if (!hash) return;
         setAuditLogs((prev) =>
-          prev.map((e) => (e.id === newEntry.id ? { ...e, integrityHash: 'sha256:' + hex } : e))
+          prev.map((e) => (e.id === tempId ? { ...e, integrityHash: hash } : e))
         );
-      })
-      .catch(() => {
-        // Sin crypto.subtle disponible: la entrada queda sin hash (nunca con uno falso)
       });
+      return;
+    }
+
+    setAuditLogsError(null);
+    void executeOptimisticAppendWithRollback<AuditLogEntry>({
+      tempItem: optimisticEntry,
+      updateState: setAuditLogs,
+      persist: async () => {
+        const { regionId, regionCode } = await resolveCurrentAuditRegion();
+        const persisted = await persistAuditLogEntry({
+          entityType,
+          entityId,
+          action,
+          actorId: actorId || null,
+          actorName,
+          actorRole,
+          previousState,
+          newState,
+          justification,
+          regionId,
+          regionCode,
+          sucursal: activeSucursalRef.current,
+        });
+        auditLogsOffsetRef.current += 1;
+        return persisted;
+      },
+      onError: (msg) => {
+        setAuditLogsError(msg);
+        console.error('[AppContext] Rollback al persistir audit_logs:', msg);
+      },
+    });
   };
+
+  const createDiscrepancyAlert = useCallback(
+    async (
+      input: Omit<PersistDiscrepancyAlertInput, 'regionId' | 'regionCode' | 'sucursal'>
+    ): Promise<{ success: boolean; data?: DiscrepancyAlert; error?: string }> => {
+      const tempId = `alert_tmp_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const optimisticAlert: DiscrepancyAlert = {
+        id: tempId,
+        severity: input.severity,
+        title: input.title,
+        description: input.description,
+        entityCode: input.entityCode,
+        timestamp: new Date().toISOString(),
+        detectedByRule: input.detectedByRule,
+        resolved: false,
+      };
+
+      if (!isSupabaseConfigured) {
+        setDiscrepancyAlerts((prev) => [optimisticAlert, ...prev]);
+        return { success: true, data: optimisticAlert };
+      }
+
+      setDiscrepancyAlertsError(null);
+      const outcome = await executeOptimisticAppendWithRollback<DiscrepancyAlert>({
+        tempItem: optimisticAlert,
+        updateState: setDiscrepancyAlerts,
+        persist: async () => {
+          const { regionId, regionCode } = await resolveCurrentAuditRegion();
+          const persisted = await persistDiscrepancyAlert({
+            ...input,
+            regionId,
+            regionCode,
+            sucursal: activeSucursalRef.current,
+          });
+          discrepancyAlertsOffsetRef.current += 1;
+          return persisted;
+        },
+        onError: (msg) => {
+          setDiscrepancyAlertsError(msg);
+          console.error('[AppContext] Rollback al persistir discrepancy_alerts:', msg);
+        },
+      });
+
+      return outcome.ok
+        ? { success: true, data: outcome.data }
+        : { success: false, error: outcome.error };
+    },
+    [resolveCurrentAuditRegion]
+  );
+
+  const resolveDiscrepancyAlert = useCallback(
+    async (
+      alertId: string,
+      resolutionNotes = ''
+    ): Promise<{ success: boolean; data?: DiscrepancyAlert; error?: string }> => {
+      if (!isSupabaseConfigured) {
+        let updated: DiscrepancyAlert | undefined;
+        setDiscrepancyAlerts((prev) =>
+          prev.map((a) => {
+            if (a.id !== alertId) return a;
+            updated = { ...a, resolved: true, resolutionNotes };
+            return updated;
+          })
+        );
+        return updated
+          ? { success: true, data: updated }
+          : { success: false, error: 'Alerta no encontrada.' };
+      }
+
+      setDiscrepancyAlertsError(null);
+      const outcome = await executeOptimisticUpdateWithRollback<DiscrepancyAlert>({
+        targetId: alertId,
+        optimisticUpdate: (current) => ({
+          ...current,
+          resolved: true,
+          resolutionNotes: resolutionNotes || current.resolutionNotes,
+        }),
+        updateState: setDiscrepancyAlerts,
+        persist: (previous) =>
+          resolveDiscrepancyAlertInSupabase({
+            alertId,
+            resolutionNotes,
+            resolvedBy: currentUser?.id ?? null,
+            status: 'RESOLVED',
+            existingMetadata: { detectedByRule: previous.detectedByRule },
+          }),
+        onError: (msg) => {
+          setDiscrepancyAlertsError(msg);
+          console.error('[AppContext] Rollback al resolver discrepancy_alerts:', msg);
+        },
+      });
+
+      return outcome.ok
+        ? { success: true, data: outcome.data }
+        : { success: false, error: outcome.error };
+    },
+    [currentUser?.id]
+  );
 
   // Sincronización automática con la matriz de Requisiciones de Contraloría al aprobar/rechazar una Solicitud de Productos
   const syncApprovedOrRejectedSolicitudToControllerRequests = (
@@ -1188,7 +1495,13 @@ export const AppProvider: React.FC<{
     setTarifarioCostos([]);
     setFallbackStores([]);
     setAuditLogs([]);
+    setAuditLogsError(null);
+    setHasMoreAuditLogs(false);
+    auditLogsOffsetRef.current = 0;
     setDiscrepancyAlerts([]);
+    setDiscrepancyAlertsError(null);
+    setHasMoreDiscrepancyAlerts(false);
+    discrepancyAlertsOffsetRef.current = 0;
     setUsers([]);
     setFocusedTastingId(null);
     setFocusedTastingSnapshot(null);
@@ -1228,6 +1541,8 @@ export const AppProvider: React.FC<{
       // 3. Recargar en limpio exclusivamente para la sucursal seleccionada
       void refreshSupabaseData();
       void refreshFinancialData();
+      void refreshAuditLogs();
+      void refreshDiscrepancyAlerts();
       void rawMasterData.refrescar().finally(() => {
         setIsMasterCachePurged(false);
       });
@@ -1240,6 +1555,8 @@ export const AppProvider: React.FC<{
       purgeRegionalStateCache,
       refreshSupabaseData,
       refreshFinancialData,
+      refreshAuditLogs,
+      refreshDiscrepancyAlerts,
       rawMasterData,
       masterEntities,
       solicitudesContraloria,
@@ -1452,17 +1769,18 @@ export const AppProvider: React.FC<{
     );
 
     if (existsLocally) {
-      const alert: DiscrepancyAlert = {
-        id: `alert_${Date.now()}`,
+      void createDiscrepancyAlert({
         severity: 'CRITICA',
         title: 'Intento de Factura Fiscal Duplicada',
         description: `Se intentó cargar la factura ${receipt.invoiceNumber} del proveedor ${receipt.supplierRif} que ya fue rendida previamente.`,
         entityCode: receipt.invoiceNumber,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        entityType: 'EXPENSE',
         detectedByRule: 'RULE_ANTIFRAUD_DUPLICATE_INVOICE',
-        resolved: false,
-      };
-      setDiscrepancyAlerts((prev) => [alert, ...prev]);
+        metadata: {
+          supplierRif: receipt.supplierRif,
+          invoiceNumber: receipt.invoiceNumber,
+        },
+      });
       addAuditLog(
         'EXPENSE',
         receipt.invoiceNumber,
@@ -1535,19 +1853,18 @@ export const AppProvider: React.FC<{
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error registrando factura fiscal.';
       if (/ANTIFRAUDE|duplicad/i.test(msg)) {
-        setDiscrepancyAlerts((prev) => [
-          {
-            id: `alert_${Date.now()}`,
-            severity: 'CRITICA',
-            title: 'Bloqueo Antifraude BD: Factura Duplicada',
-            description: msg,
-            entityCode: receipt.invoiceNumber,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            detectedByRule: 'DB_UNIQUE_RIF_INVOICE',
-            resolved: false,
+        void createDiscrepancyAlert({
+          severity: 'CRITICA',
+          title: 'Bloqueo Antifraude BD: Factura Duplicada',
+          description: msg,
+          entityCode: receipt.invoiceNumber,
+          entityType: 'EXPENSE',
+          detectedByRule: 'DB_UNIQUE_RIF_INVOICE',
+          metadata: {
+            supplierRif: receipt.supplierRif,
+            invoiceNumber: receipt.invoiceNumber,
           },
-          ...prev,
-        ]);
+        });
       }
       return { success: false, message: msg };
     }
@@ -2362,6 +2679,8 @@ export const AppProvider: React.FC<{
     await Promise.all([
       refreshSupabaseData(),
       refreshFinancialData(),
+      refreshAuditLogs(),
+      refreshDiscrepancyAlerts(),
       rawMasterData.refrescar().finally(() => {
         setIsMasterCachePurged(false);
       }),
@@ -2400,7 +2719,19 @@ export const AppProvider: React.FC<{
         tastingReports,
         reconciliation,
         auditLogs,
+        isLoadingAuditLogs,
+        auditLogsError,
+        hasMoreAuditLogs,
+        refreshAuditLogs,
+        loadMoreAuditLogs,
         discrepancyAlerts,
+        isLoadingDiscrepancyAlerts,
+        discrepancyAlertsError,
+        hasMoreDiscrepancyAlerts,
+        refreshDiscrepancyAlerts,
+        loadMoreDiscrepancyAlerts,
+        createDiscrepancyAlert,
+        resolveDiscrepancyAlert,
         module1Bundle,
         isLoadingSupabase,
         supabaseError,

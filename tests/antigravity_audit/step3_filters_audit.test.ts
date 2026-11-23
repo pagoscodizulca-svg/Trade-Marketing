@@ -127,7 +127,7 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
     });
   });
 
-  await t.test('FLT-02: Omisión de statusFilter y shiftFilter en Consulta Servidor de Historial', async () => {
+  await t.test('FLT-02: Aplicación efectiva de statusFilter, shiftFilter y searchQuery en Consulta Servidor de Historial', async () => {
     mock.resetSeedData();
     mock.recordedRequests.length = 0;
 
@@ -138,38 +138,46 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
         statusFilter: 'NO_AUTORIZADA',
         shiftFilter: 'TARDE',
         productFilter: 'ESPALDA',
+        searchQuery: 'Central',
       },
       { referenceNow: '2026-11-16T15:00:00Z' }
     );
 
     const surveyQuery = mock.recordedRequests.find((r) => r.pathname === '/rest/v1/surveys');
     assert.ok(surveyQuery, 'Debe emitir consulta GET /rest/v1/surveys');
+    const decodedSearch = decodeURIComponent(surveyQuery!.search).toLowerCase();
     assert.ok(
-      surveyQuery!.search.includes('product=ilike.'),
-      'productFilter sí se envía al servidor'
+      decodedSearch.includes('product=ilike.'),
+      'productFilter debe enviarse al servidor'
     );
-    const sendsStatus = surveyQuery!.search.toLowerCase().includes('no_autorizada');
-    const sendsShift = surveyQuery!.search.toLowerCase().includes('tarde');
+    const sendsStatus = decodedSearch.includes('no_autorizada');
+    const sendsShift = decodedSearch.includes('tarde');
+    const sendsStoreSearch = decodedSearch.includes('store.ilike.') && decodedSearch.includes('product.ilike.');
 
     assert.equal(
       sendsStatus,
-      false,
-      'DEFECTO CONFIRMADO: statusFilter es validado por Zod pero nunca se aplica a la query PostgREST'
+      true,
+      'statusFilter debe aplicarse efectivamente a la query PostgREST'
     );
     assert.equal(
       sendsShift,
-      false,
-      'DEFECTO CONFIRMADO: shiftFilter es validado por Zod pero nunca se aplica a la query PostgREST'
+      true,
+      'shiftFilter debe aplicarse efectivamente a la query PostgREST'
+    );
+    assert.equal(
+      sendsStoreSearch,
+      true,
+      'searchQuery debe buscar en comments, store y product en PostgREST'
     );
 
     filterAuditMatrix.push({
       filterId: 'FLT-02',
       module: 'Módulo 1 · queryServerPaginatedHistorialSurveys (Combinación Múltiple)',
       layer: 'Backend/PostgREST',
-      edgeCasesTested: 'Combinación simultánea statusFilter + shiftFilter + productFilter sobre página 1',
+      edgeCasesTested: 'Combinación simultánea statusFilter + shiftFilter + productFilter + searchQuery sobre página 1',
       securityValidated: true,
-      status: 'FALLIDO',
-      finding: 'degustacionesWeeklyCycleService.ts:298-405 ignora statusFilter y shiftFilter en servidor, desalineando conteo y páginas.',
+      status: 'APROBADO',
+      finding: 'statusFilter, shiftFilter y searchQuery (comments, store, product) se aplican de forma sanitizada en PostgREST.',
     });
   });
 
@@ -185,7 +193,7 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
     assert.equal(byEnye[0]!.codigo_cliente, 'CLI-002');
 
     // Case B: Searching exact legal name containing comma "INVERSIONES EL SOL, C.A."
-    // sanitizarTerminoIlike replaces ',' with ' ' -> "INVERSIONES EL SOL  C.A.", failing ILIKE against "INVERSIONES EL SOL, C.A."!
+    // Preserva la coma dentro de operandos PostgREST entrecomillados y devuelve CLI-001
     const byLegalWithComma = await masterSyncSvc.obtenerClientesMaestros({
       busqueda: 'INVERSIONES EL SOL, C.A.',
       forzarRefresco: true,
@@ -193,9 +201,10 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
 
     assert.equal(
       byLegalWithComma.length,
-      0,
-      'DEFECTO CONFIRMADO: sanitizarTerminoIlike convierte la coma en doble espacio y rompe la búsqueda exacta de razones sociales con ", C.A."'
+      1,
+      'La búsqueda exacta de razones sociales con ", C.A." debe devolver el cliente coincidente'
     );
+    assert.equal(byLegalWithComma[0]!.codigo_cliente, 'CLI-001');
 
     // Case C: Delimiter sanitization prevents injecting extra PostgREST .or() clauses
     mock.recordedRequests.length = 0;
@@ -209,7 +218,7 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
     assert.equal(
       decodedSearch.includes(',activo.eq.false'),
       false,
-      'La coma inyectada fue neutralizada antes de interpolar en .or()'
+      'La cláusula PostgREST inyectada debe ser neutralizada antes de interpolar en .or()'
     );
 
     filterAuditMatrix.push({
@@ -218,8 +227,8 @@ test('PASO 3 — Auditoría Exhaustiva de Filtros, Casos Borde y Sanitización D
       layer: 'Backend/PostgREST',
       edgeCasesTested: 'Letra Ñ, comas en razón social (", C.A."), paréntesis y delimitadores de operador .or()',
       securityValidated: true,
-      status: 'CON_ADVERTENCIAS',
-      finding: 'Neutraliza inyección de cláusulas .or() al eliminar comas/paréntesis, pero genera falsos negativos (0 resultados) al buscar razones sociales reales con ", C.A.".',
+      status: 'APROBADO',
+      finding: 'Preserva comas legítimas (", C.A.") mediante operandos PostgREST entrecomillados y bloquea inyección de operadores .or().',
     });
   });
 

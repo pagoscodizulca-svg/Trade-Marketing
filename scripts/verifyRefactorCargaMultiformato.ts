@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as XLSX from 'xlsx';
+import { buildXlsxFixtureBuffer } from './lib/excelFixtureBuilder';
+import { loadXlsxAsSheetShim, shimXlsxApi } from '../src/utils/excelSheetShim';
 import {
   MAX_UPLOAD_FILE_BYTES,
   extractTabularDegustacionFile,
@@ -104,53 +105,37 @@ async function runVerification() {
     );
 
     // Libro multi-pestaña en orden desordenado con hoja decorativa y hoja oculta del futuro
-    const wbScrambled = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet([
-        ['CODIZULCA C.A. - PORTADA EJECUTIVA 2029'],
-        ['Documento informativo sin columnas de degustación'],
-      ]),
-      'PORTADA 2029'
-    );
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-09-10', 'PDV SEPTIEMBRE')),
-      '09-2026'
-    );
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-11-22', 'PDV GANADOR NOVIEMBRE')),
-      'NOV 2026'
-    );
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-10-18', 'PDV OCTUBRE')),
-      'Octubre_26'
-    );
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-10-05', 'PDV DIA OCTUBRE')),
-      '05-10-2026'
-    );
-    XLSX.utils.book_append_sheet(
-      wbScrambled,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2027-12-15', 'PDV OCULTO NO LEER')),
-      'Diciembre 2027'
-    );
-    wbScrambled.Workbook = {
-      Sheets: [
-        { Hidden: 0 }, // PORTADA 2029 (decorativa, debe descartarse)
-        { Hidden: 0 }, // 09-2026
-        { Hidden: 0 }, // NOV 2026 (más reciente visible estructurada)
-        { Hidden: 0 }, // Octubre_26
-        { Hidden: 0 }, // 05-10-2026
-        { Hidden: 1 }, // Diciembre 2027 (oculta, debe ignorarse)
-      ],
-    };
-
-    const xlsxBytes = XLSX.write(wbScrambled, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-    const result = await extractTabularDegustacionFile(toArrayBuffer(xlsxBytes), 'xlsx', {
+    const xlsxBytes = await buildXlsxFixtureBuffer([
+      {
+        name: 'PORTADA 2029',
+        rows: [
+          ['CODIZULCA C.A. - PORTADA EJECUTIVA 2029'],
+          ['Documento informativo sin columnas de degustación'],
+        ],
+      },
+      {
+        name: '09-2026',
+        rows: buildStandardDegustacionRows('2026-09-10', 'PDV SEPTIEMBRE'),
+      },
+      {
+        name: 'NOV 2026',
+        rows: buildStandardDegustacionRows('2026-11-22', 'PDV GANADOR NOVIEMBRE'),
+      },
+      {
+        name: 'Octubre_26',
+        rows: buildStandardDegustacionRows('2026-10-18', 'PDV OCTUBRE'),
+      },
+      {
+        name: '05-10-2026',
+        rows: buildStandardDegustacionRows('2026-10-05', 'PDV DIA OCTUBRE'),
+      },
+      {
+        name: 'Diciembre 2027',
+        rows: buildStandardDegustacionRows('2027-12-15', 'PDV OCULTO NO LEER'),
+        hidden: true,
+      },
+    ]);
+    const result = await extractTabularDegustacionFile(xlsxBytes, 'xlsx', {
       fileName: 'Planificacion_Anual_2026.xlsx',
     });
 
@@ -172,7 +157,7 @@ async function runVerification() {
     assert.equal(result.rows[0]?.fecha, '2026-11-22');
 
     // Cambio manual de pestaña desde la UI usando el mismo buffer
-    const switched = await extractTabularDegustacionFile(toArrayBuffer(xlsxBytes), 'xlsx', {
+    const switched = await extractTabularDegustacionFile(xlsxBytes, 'xlsx', {
       fileName: 'Planificacion_Anual_2026.xlsx',
       targetSheetName: 'Octubre_26',
     });
@@ -182,23 +167,22 @@ async function runVerification() {
     assert.equal(switched.rows[0]?.clienteNombre, 'PDV OCTUBRE');
 
     // Libro con meses sin año en desorden: ["Noviembre", "Agosto", "Octubre"]
-    const wbMonthsOnly = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      wbMonthsOnly,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-11-12', 'PDV MES NOV')),
-      'Noviembre'
-    );
-    XLSX.utils.book_append_sheet(
-      wbMonthsOnly,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-08-12', 'PDV MES AGO')),
-      'Agosto'
-    );
-    XLSX.utils.book_append_sheet(
-      wbMonthsOnly,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('2026-10-12', 'PDV MES OCT')),
-      'Octubre'
-    );
-    const monthsOnlyRead = readMostRecentWorkbookSheet(XLSX, wbMonthsOnly);
+    const wbMonthsBytes = await buildXlsxFixtureBuffer([
+      {
+        name: 'Noviembre',
+        rows: buildStandardDegustacionRows('2026-11-12', 'PDV MES NOV'),
+      },
+      {
+        name: 'Agosto',
+        rows: buildStandardDegustacionRows('2026-08-12', 'PDV MES AGO'),
+      },
+      {
+        name: 'Octubre',
+        rows: buildStandardDegustacionRows('2026-10-12', 'PDV MES OCT'),
+      },
+    ]);
+    const wbMonthsOnly = await loadXlsxAsSheetShim(wbMonthsBytes);
+    const monthsOnlyRead = readMostRecentWorkbookSheet(shimXlsxApi, wbMonthsOnly);
     assert.equal(monthsOnlyRead.selectedSheetName, 'Noviembre');
     assert.equal(monthsOnlyRead.selectionReason, 'NOMBRE_PESTANA');
 
@@ -211,29 +195,25 @@ async function runVerification() {
   // (b) Nivel 2: Fallback por contenido interno cuando los nombres son "Hoja1", "Hoja2", "Datos"
   // ---------------------------------------------------------------------------
   {
-    const wbGeneric = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      wbGeneric,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('14/09/2026', 'CLIENTE HOJA 1')),
-      'Hoja1'
-    );
-    XLSX.utils.book_append_sheet(
-      wbGeneric,
-      XLSX.utils.aoa_to_sheet([
-        ['FECHA DE DEGUSTACIÓN', 'TURNO', 'CLIENTE', 'PRODUCTO', 'KILOS'],
-        ['05/12/2026', 'TARDE', 'CLIENTE MAS RECIENTE HOJA 2', 'ESPALDA AHUMADA', 4],
-        ['19/12/2026', 'MAÑANA', 'CLIENTE PICO DICIEMBRE HOJA 2', 'MORTADELA', 2.5],
-      ]),
-      'Hoja2'
-    );
-    XLSX.utils.book_append_sheet(
-      wbGeneric,
-      XLSX.utils.aoa_to_sheet(buildStandardDegustacionRows('28/10/2026', 'CLIENTE DATOS')),
-      'Datos'
-    );
-
-    const genericBytes = XLSX.write(wbGeneric, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-    const fallbackOut = await extractTabularDegustacionFile(toArrayBuffer(genericBytes), 'xlsx', {
+    const genericBytes = await buildXlsxFixtureBuffer([
+      {
+        name: 'Hoja1',
+        rows: buildStandardDegustacionRows('14/09/2026', 'CLIENTE HOJA 1'),
+      },
+      {
+        name: 'Hoja2',
+        rows: [
+          ['FECHA DE DEGUSTACIÓN', 'TURNO', 'CLIENTE', 'PRODUCTO', 'KILOS'],
+          ['05/12/2026', 'TARDE', 'CLIENTE MAS RECIENTE HOJA 2', 'ESPALDA AHUMADA', 4],
+          ['19/12/2026', 'MAÑANA', 'CLIENTE PICO DICIEMBRE HOJA 2', 'MORTADELA', 2.5],
+        ],
+      },
+      {
+        name: 'Datos',
+        rows: buildStandardDegustacionRows('28/10/2026', 'CLIENTE DATOS'),
+      },
+    ]);
+    const fallbackOut = await extractTabularDegustacionFile(genericBytes, 'xlsx', {
       fileName: 'Reporte_Sin_Fecha_Pestana.xlsx',
     });
 
@@ -304,14 +284,13 @@ async function runVerification() {
       [], // Fila 10 vacía final
     ];
 
-    const wbDisplaced = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      wbDisplaced,
-      XLSX.utils.aoa_to_sheet(displacedMatrix),
-      'Noviembre 2026'
-    );
-    const displacedBytes = XLSX.write(wbDisplaced, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-    const displacedOut = await extractTabularDegustacionFile(toArrayBuffer(displacedBytes), 'xlsx');
+    const displacedBytes = await buildXlsxFixtureBuffer([
+      {
+        name: 'Noviembre 2026',
+        rows: displacedMatrix,
+      },
+    ]);
+    const displacedOut = await extractTabularDegustacionFile(displacedBytes, 'xlsx');
 
     assert.equal(
       displacedOut.rows.length,

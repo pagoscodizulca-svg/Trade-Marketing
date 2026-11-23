@@ -333,12 +333,29 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
         return created;
       },
       async listEvidencesByJornadaId(asistenciaId) {
+        const snapshot = Array.from(evidenceRows.values()).filter((e) => e.asistencia_id === asistenciaId);
         await new Promise((r) => setTimeout(r, 15)); // Simulate realistic network RTT window for race check
-        return Array.from(evidenceRows.values()).filter((e) => e.asistencia_id === asistenciaId);
+        return snapshot;
       },
       async upsertSlotEvidence(params) {
         const slotKey = `${params.asistenciaId}:${params.slotFoto}`;
         const existing = evidenceRows.get(slotKey);
+        if (params.expectedEvidenceId == null) {
+          if (existing) {
+            throw new attendanceHandlerMod.AttendanceConcurrencyConflictError(
+              'Conflicto de concurrencia en alta inicial.',
+              { currentVersion: existing.version ?? 1, currentId: existing.id }
+            );
+          }
+        } else {
+          const currentVersion = existing?.version ?? 1;
+          if (!existing || existing.id !== params.expectedEvidenceId || currentVersion !== (params.expectedVersion ?? 1)) {
+            throw new attendanceHandlerMod.AttendanceConcurrencyConflictError(
+              'Conflicto de versión optimista en reemplazo.',
+              { currentVersion: existing?.version ?? null, currentId: existing?.id ?? null }
+            );
+          }
+        }
         const saved = {
           id: existing?.id || crypto.randomUUID(),
           asistencia_id: params.asistenciaId,
@@ -357,6 +374,8 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
           capturado_en_servidor: params.capturadoEnServidorIso,
           cargado_por_uid: params.cargadoPorUid,
           cargado_por_rol: params.cargadoPorRol,
+          version: existing ? (existing.version ?? 1) + 1 : 1,
+          updated_at: params.capturadoEnServidorIso,
         };
         evidenceRows.set(slotKey, saved);
         return saved;
@@ -439,16 +458,27 @@ test('PASO 2 — Validación Integral de Sincronizaciones, Concurrencia, Resilie
       makeConcurrentReq(VALID_1X1_PNG_ALT),
     ]);
 
-    assert.ok([200, 201].includes(raceA.getStatus()));
-    assert.ok([200, 201].includes(raceB.getStatus()));
+    const raceStatuses = [raceA.getStatus(), raceB.getStatus()].sort((a, b) => a - b);
+    assert.deepEqual(
+      raceStatuses,
+      [201, 409],
+      'En carrera concurrente sobre la misma ranura, exactamente 1 solicitud gana (201) y la perdedora recibe 409 Conflict'
+    );
     assert.equal(evidenceRows.size, 1, 'Unicidad en BD por (asistencia_id, slot_foto) preservada');
     const orphanCount = storageBlobs.size - evidenceRows.size;
+    assert.equal(orphanCount, 0, 'Fase 3: 0 objetos huérfanos en Storage tras rollback automático del perdedor');
+    const [winnerRow] = Array.from(evidenceRows.values());
+    assert.equal(
+      storageBlobs.has(winnerRow.storage_path),
+      true,
+      'El archivo ganador referenciado en BD debe permanecer intacto en Storage'
+    );
 
     summaryReport.push({
       id: 'SYNC-04',
       flow: 'Evidencias Fotográficas de Asistencia (Storage + BD)',
-      outcome: orphanCount > 0 ? 'CON_ADVERTENCIAS' : 'APROBADO',
-      detail: `Anti-IDOR 403 y unicidad de fila OK. En carrera simultánea se detectó ${orphanCount} objeto(s) huérfano(s) en Storage por TOCTOU previo al upsert.`,
+      outcome: 'APROBADO',
+      detail: 'Fase 3 cerrada: Anti-IDOR 403, bloqueo optimista CAS (201 + 409 Conflict), rollback inmediato del perdedor y 0 objetos huérfanos en Storage.',
     });
   });
 
