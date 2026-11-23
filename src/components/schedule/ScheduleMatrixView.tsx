@@ -61,6 +61,9 @@ export const ScheduleMatrixView: React.FC = () => {
     visits, 
     stores, 
     users,
+    masterData,
+    activeSucursal,
+    activeSucursalLabel,
     module1Bundle,
     isCronogramaRealtimeConnected,
     updateVisitFromProductFill, 
@@ -340,6 +343,18 @@ export const ScheduleMatrixView: React.FC = () => {
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
   const [storeZoneFilter, setStoreZoneFilter] = useState<string>('TODAS');
   const [storeSearchInBatch, setStoreSearchInBatch] = useState<string>('');
+  const [visibleBatchStoresLimit, setVisibleBatchStoresLimit] = useState<number>(150);
+
+  // Al cambiar de sede operativa, limpiar selección previa y reiniciar filtro de zona
+  useEffect(() => {
+    setSelectedStoreIds([]);
+    setStoreZoneFilter('TODAS');
+    setVisibleBatchStoresLimit(150);
+  }, [activeSucursal]);
+
+  useEffect(() => {
+    setVisibleBatchStoresLimit(150);
+  }, [storeZoneFilter, storeSearchInBatch]);
 
   // Estados de carga para persistencia en Supabase y bloqueo de doble envío
   const [isPersistingMatrix, setIsPersistingMatrix] = useState<boolean>(false);
@@ -407,20 +422,36 @@ export const ScheduleMatrixView: React.FC = () => {
     );
   };
 
-  // Unique zones for filtering clients in batch selector
-  const availableZones = Array.from(new Set(stores.map((s) => s.zone))).filter(Boolean);
+  // Unique zones for filtering clients in batch selector (ordenadas alfabéticamente)
+  const availableZones = useMemo(
+    () =>
+      Array.from(new Set(stores.map((s) => s.zone)))
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'es')),
+    [stores]
+  );
 
-  // Stores filtered for the batch selection list (búsqueda NFD insensible a tildes)
-  const filteredStoresForBatch = stores.filter((s) => {
-    const matchZone = storeZoneFilter === 'TODAS' || s.zone === storeZoneFilter;
+  // Stores filtered for the batch selection list (búsqueda NFD insensible a tildes y ", C.A.")
+  const filteredStoresForBatch = useMemo(() => {
     const q = normalizeSearchText(storeSearchInBatch);
-    const matchSearch =
-      !q ||
-      normalizeSearchText(s.name).includes(q) ||
-      normalizeSearchText(s.zone).includes(q) ||
-      normalizeSearchText(s.clientCode).includes(q);
-    return matchZone && matchSearch;
-  });
+    const qCompact = q.replace(/[^a-z0-9]+/g, '');
+    return stores.filter((s) => {
+      const matchZone = storeZoneFilter === 'TODAS' || s.zone === storeZoneFilter;
+      if (!matchZone) return false;
+      if (!q) return true;
+      const fields = [s.name, s.zone, s.clientCode, s.sellerName, s.city];
+      return fields.some((field) => {
+        const norm = normalizeSearchText(field);
+        if (norm.includes(q)) return true;
+        return qCompact.length >= 2 && norm.replace(/[^a-z0-9]+/g, '').includes(qCompact);
+      });
+    });
+  }, [stores, storeZoneFilter, storeSearchInBatch]);
+
+  const visibleStoresInBatch = useMemo(
+    () => filteredStoresForBatch.slice(0, visibleBatchStoresLimit),
+    [filteredStoresForBatch, visibleBatchStoresLimit]
+  );
 
   // Solo clientes marcados Y visibles dentro del filtro/zona actual
   const effectiveBatchStoreIds = filteredStoresForBatch
@@ -1251,37 +1282,67 @@ export const ScheduleMatrixView: React.FC = () => {
                 </select>
               </div>
 
-              {/* Listado con Checkboxes de Tiendas */}
+              {/* Listado con Checkboxes de Tiendas (renderizado incremental para carteras > 3,000 clientes) */}
               <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1 divide-y divide-zinc-900/60">
-                {filteredStoresForBatch.map((store) => {
-                  const isSelected = selectedStoreIds.includes(store.id);
-                  return (
-                    <label
-                      key={store.id}
-                      onClick={() => toggleStoreSelection(store.id)}
-                      className={`flex items-center justify-between p-2 rounded-xl cursor-pointer text-xs transition border ${
-                        isSelected
-                          ? 'bg-red-950/30 border-red-700/60 text-white'
-                          : 'bg-zinc-950/60 border-zinc-900 text-zinc-300 hover:bg-zinc-900 hover:border-zinc-800'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                        <div className="text-red-500">
-                          {isSelected ? <CheckSquare className="w-4 h-4 text-red-500" /> : <Square className="w-4 h-4 text-zinc-600" />}
-                        </div>
-                        <div className="truncate">
-                          <span className="font-bold text-white block truncate">{store.name}</span>
-                          <span className="text-[10px] text-zinc-400 font-mono block">
-                            {store.clientCode} • {store.zone}
+                {masterData.cargando && stores.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-zinc-400">
+                    Cargando clientes de {activeSucursalLabel}...
+                  </div>
+                ) : filteredStoresForBatch.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-zinc-500 space-y-1">
+                    <p className="font-semibold text-zinc-400">
+                      {stores.length === 0
+                        ? `Sin clientes activos registrados para ${activeSucursalLabel}.`
+                        : 'Ningún cliente coincide con el filtro actual.'}
+                    </p>
+                    {masterData.error && (
+                      <p className="text-[11px] text-amber-400">{masterData.error}</p>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {visibleStoresInBatch.map((store) => {
+                      const isSelected = selectedStoreIds.includes(store.id);
+                      return (
+                        <label
+                          key={store.id}
+                          onClick={() => toggleStoreSelection(store.id)}
+                          className={`flex items-center justify-between p-2 rounded-xl cursor-pointer text-xs transition border ${
+                            isSelected
+                              ? 'bg-red-950/30 border-red-700/60 text-white'
+                              : 'bg-zinc-950/60 border-zinc-900 text-zinc-300 hover:bg-zinc-900 hover:border-zinc-800'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                            <div className="text-red-500">
+                              {isSelected ? <CheckSquare className="w-4 h-4 text-red-500" /> : <Square className="w-4 h-4 text-zinc-600" />}
+                            </div>
+                            <div className="truncate">
+                              <span className="font-bold text-white block truncate">{store.name}</span>
+                              <span className="text-[10px] text-zinc-400 font-mono block">
+                                {store.clientCode} • {store.zone}
+                              </span>
+                            </div>
+                          </div>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-black text-zinc-400 border border-zinc-800 shrink-0 font-mono">
+                            {store.sellerName}
                           </span>
-                        </div>
+                        </label>
+                      );
+                    })}
+                    {filteredStoresForBatch.length > visibleStoresInBatch.length && (
+                      <div className="pt-2 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setVisibleBatchStoresLimit((prev) => prev + 200)}
+                          className="w-full py-1.5 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[11px] font-bold text-zinc-200 transition"
+                        >
+                          Mostrar más clientes ({visibleStoresInBatch.length} de {filteredStoresForBatch.length})
+                        </button>
                       </div>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-black text-zinc-400 border border-zinc-800 shrink-0 font-mono">
-                        {store.sellerName}
-                      </span>
-                    </label>
-                  );
-                })}
+                    )}
+                  </>
+                )}
               </div>
             </div>
 

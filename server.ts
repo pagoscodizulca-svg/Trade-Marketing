@@ -27,6 +27,7 @@ import {
   requireCoordinatorOrAdminAuth,
   requireFdvOrTradeAuth,
   requireIncidenciaActorAuth,
+  requireMasterDataReaderAuth,
   requireSuperAdminAuth,
   requireTorreControlAuth,
 } from './src/server/supabaseAdminAuth';
@@ -55,6 +56,7 @@ import {
 import { defaultShiftLinksHandlers } from './src/server/shiftLinksHandler';
 import { defaultTastingAlertDispatcher } from './src/server/tastingAlertDispatcher';
 import { defaultPromotorasHandlers } from './src/server/promotorasHandler';
+import { defaultMasterDataErpHandlers } from './src/server/masterDataErpHandler';
 import {
   createGracefulShutdownController,
   registerProcessShutdownHandlers,
@@ -612,6 +614,55 @@ export function registerPromotorasRoutes(
 }
 
 registerPromotorasRoutes(app);
+
+// ============================================================================
+// 1.M. DATA MAESTRA ERP POR SEDE (CLIENTES Y VENDEDORES DESDE SUPABASE)
+// ============================================================================
+const masterDataReadRateLimiter = createRateLimiter({
+  name: 'master-data-erp-read',
+  windowMs: 60 * 1000,
+  maxRequests: 120,
+});
+
+export interface MasterDataErpRouteDeps {
+  rateLimiter: express.RequestHandler;
+  authMiddleware: express.RequestHandler;
+  listClientesHandler: express.RequestHandler;
+  listVendedoresHandler: express.RequestHandler;
+  sedesResumenHandler: express.RequestHandler;
+}
+
+export function registerMasterDataErpRoutes(
+  targetApp: express.Express,
+  deps: MasterDataErpRouteDeps = {
+    rateLimiter: masterDataReadRateLimiter,
+    authMiddleware: requireMasterDataReaderAuth,
+    listClientesHandler: defaultMasterDataErpHandlers.handleListClientesMaestros,
+    listVendedoresHandler: defaultMasterDataErpHandlers.handleListVendedoresMaestros,
+    sedesResumenHandler: defaultMasterDataErpHandlers.handleGetSedesClientesResumen,
+  }
+): void {
+  targetApp.get(
+    '/api/maestros/clientes',
+    deps.rateLimiter,
+    deps.authMiddleware,
+    deps.listClientesHandler
+  );
+  targetApp.get(
+    '/api/maestros/vendedores',
+    deps.rateLimiter,
+    deps.authMiddleware,
+    deps.listVendedoresHandler
+  );
+  targetApp.get(
+    '/api/maestros/sedes-resumen',
+    deps.rateLimiter,
+    deps.authMiddleware,
+    deps.sedesResumenHandler
+  );
+}
+
+registerMasterDataErpRoutes(app);
 
 // ============================================================================
 // 2. API 404 + MANEJO DE ERRORES

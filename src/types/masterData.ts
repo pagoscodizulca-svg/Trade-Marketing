@@ -402,6 +402,7 @@ export interface ResultadoSincronizacion {
 
 export interface FiltrosConsultaVendedores {
   soloActivos?: boolean;
+  sucursal?: SucursalMaestro | null;
   zona?: string;
   supervisor?: string;
   busqueda?: string;
@@ -410,6 +411,7 @@ export interface FiltrosConsultaVendedores {
 
 export interface FiltrosConsultaClientes {
   soloActivos?: boolean;
+  sucursal?: SucursalMaestro | null;
   zona?: string;
   ruta?: string;
   vendedorId?: string;
@@ -450,6 +452,198 @@ export type MasterDataDatabase = {
           created_at?: string;
           regi_desd?: string;
           regi_saba?: boolean;
+        };
+        Relationships: [];
+      };
+      Sucursales: {
+        Row: {
+          id_sucu: string;
+          created_at: string;
+          sucu_desc: string;
+          id_regi: string | null;
+        };
+        Insert: {
+          id_sucu?: string;
+          created_at?: string;
+          sucu_desc: string;
+          id_regi?: string | null;
+        };
+        Update: {
+          id_sucu?: string;
+          created_at?: string;
+          sucu_desc?: string;
+          id_regi?: string | null;
+        };
+        Relationships: [];
+      };
+      Estados: {
+        Row: {
+          id_esta: string;
+          created_at: string;
+          esta_desc: string;
+          id_regi: string | null;
+        };
+        Insert: {
+          id_esta?: string;
+          created_at?: string;
+          esta_desc: string;
+          id_regi?: string | null;
+        };
+        Update: {
+          id_esta?: string;
+          created_at?: string;
+          esta_desc?: string;
+          id_regi?: string | null;
+        };
+        Relationships: [];
+      };
+      Municipios: {
+        Row: {
+          id_muni: string;
+          created_at: string;
+          muni_desc: string;
+          id_esta: string | null;
+          id_regi: string | null;
+        };
+        Insert: {
+          id_muni?: string;
+          created_at?: string;
+          muni_desc: string;
+          id_esta?: string | null;
+          id_regi?: string | null;
+        };
+        Update: {
+          id_muni?: string;
+          created_at?: string;
+          muni_desc?: string;
+          id_esta?: string | null;
+          id_regi?: string | null;
+        };
+        Relationships: [];
+      };
+      Supervisores: {
+        Row: {
+          id_supe: string;
+          created_at: string;
+          supe_nomb: string;
+          supe_acti: boolean | null;
+          id_regi: string | null;
+          supe_cont: string | null;
+        };
+        Insert: {
+          id_supe?: string;
+          created_at?: string;
+          supe_nomb: string;
+          supe_acti?: boolean | null;
+          id_regi?: string | null;
+          supe_cont?: string | null;
+        };
+        Update: {
+          id_supe?: string;
+          created_at?: string;
+          supe_nomb?: string;
+          supe_acti?: boolean | null;
+          id_regi?: string | null;
+          supe_cont?: string | null;
+        };
+        Relationships: [];
+      };
+      Tipificacion_Clientes: {
+        Row: {
+          id_tipi: string;
+          created_at: string;
+          tipi_desc: string;
+          id_cave: string | null;
+        };
+        Insert: {
+          id_tipi?: string;
+          created_at?: string;
+          tipi_desc: string;
+          id_cave?: string | null;
+        };
+        Update: {
+          id_tipi?: string;
+          created_at?: string;
+          tipi_desc?: string;
+          id_cave?: string | null;
+        };
+        Relationships: [];
+      };
+      Vendedores: {
+        Row: {
+          id_vend: string;
+          created_at: string;
+          vend_codi: string | null;
+          vend_nomb: string;
+          vend_acti: boolean | null;
+          id_sucu: string | null;
+          id_supe: string | null;
+          vend_cont: string | null;
+        };
+        Insert: {
+          id_vend?: string;
+          created_at?: string;
+          vend_codi?: string | null;
+          vend_nomb: string;
+          vend_acti?: boolean | null;
+          id_sucu?: string | null;
+          id_supe?: string | null;
+          vend_cont?: string | null;
+        };
+        Update: {
+          id_vend?: string;
+          created_at?: string;
+          vend_codi?: string | null;
+          vend_nomb?: string;
+          vend_acti?: boolean | null;
+          id_sucu?: string | null;
+          id_supe?: string | null;
+          vend_cont?: string | null;
+        };
+        Relationships: [];
+      };
+      Clientes: {
+        Row: {
+          id_clie: string;
+          created_at: string;
+          clie_rif: string | null;
+          clie_nomb: string;
+          id_esta: string | null;
+          id_vend: string | null;
+          id_muni: string | null;
+          clie_regi: string | null;
+          clie_acti: boolean | null;
+          clie_lati: number | null;
+          clie_long: number | null;
+          id_tipi: string | null;
+        };
+        Insert: {
+          id_clie?: string;
+          created_at?: string;
+          clie_rif?: string | null;
+          clie_nomb: string;
+          id_esta?: string | null;
+          id_vend?: string | null;
+          id_muni?: string | null;
+          clie_regi?: string | null;
+          clie_acti?: boolean | null;
+          clie_lati?: number | null;
+          clie_long?: number | null;
+          id_tipi?: string | null;
+        };
+        Update: {
+          id_clie?: string;
+          created_at?: string;
+          clie_rif?: string | null;
+          clie_nomb?: string;
+          id_esta?: string | null;
+          id_vend?: string | null;
+          id_muni?: string | null;
+          clie_regi?: string | null;
+          clie_acti?: boolean | null;
+          clie_lati?: number | null;
+          clie_long?: number | null;
+          id_tipi?: string | null;
         };
         Relationships: [];
       };

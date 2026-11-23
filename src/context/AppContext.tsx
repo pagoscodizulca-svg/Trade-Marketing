@@ -856,8 +856,20 @@ export const AppProvider: React.FC<{
     [conciliacionesByReqId, requests]
   );
 
-  // Fuente Única de Verdad de Maestros (`public.clientes`, `public.vendedores`, `cadenas_comerciales`, `zonas`)
+  // Fuente Única de Verdad de Maestros (`public.clientes` / ERP `public."Clientes"`, vendedores, cadenas, zonas)
+  // Acotada automáticamente a la `activeSucursal` seleccionada para cargar los clientes de cada sede
+  const filtrosClientesPorSede = useMemo(
+    () => (activeSucursal ? { sucursal: activeSucursal } : undefined),
+    [activeSucursal]
+  );
+  const filtrosVendedoresPorSede = useMemo(
+    () => (activeSucursal ? { sucursal: activeSucursal } : undefined),
+    [activeSucursal]
+  );
+
   const rawMasterData = useMasterData({
+    filtrosClientes: filtrosClientesPorSede,
+    filtrosVendedores: filtrosVendedoresPorSede,
     cargarVendedores: true,
     cargarClientes: true,
     cargarCadenas: true,

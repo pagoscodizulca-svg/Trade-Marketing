@@ -677,6 +677,7 @@ export async function requireFdvOrTradeAuth(
   }
 }
 
+
 /**
  * Middleware Zero Trust para lectura autenticada de logotipos secundarios de cadenas comerciales
  * (`GET /api/cadenas-comerciales/:id/logo`):
@@ -773,6 +774,7 @@ export async function requireCadenaLogoViewerAuth(
     });
   }
 }
+
 
 export function isIncidenciaActorRole(rawRole: string): boolean {
   const clean = String(rawRole || '').trim().toLowerCase();
@@ -965,6 +967,114 @@ export async function requireTorreControlAuth(
       appRole,
       sucursal: effective.sucursal,
       activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
+      accessToken: token,
+    };
+    next();
+  } catch {
+    res.status(502).json({
+      error: 'No se pudo verificar la sesión contra el proveedor de identidad.',
+      code: 'AUTH_UPSTREAM_ERROR',
+    });
+  }
+}
+
+
+export function isMasterDataReaderRole(rawRole: string): boolean {
+  const clean = String(rawRole || '').trim().toLowerCase();
+  return (
+    ALLOWED_TORRE_VIEWER_ROLES.has(clean) ||
+    clean === 'vendedor' ||
+    clean === 'promotora'
+  );
+}
+
+/**
+ * Middleware Zero Trust para lectura autenticada del catálogo maestro de Clientes y Vendedores
+ * (`GET /api/maestros/clientes`, `GET /api/maestros/vendedores`, `GET /api/maestros/sedes-resumen`):
+ *  - Exige Bearer JWT verificado contra Supabase Auth (cero acceso anónimo).
+ *  - Acepta perfiles activos de Torre de Control (`super_admin`, `coordinacion`, `contraloria`,
+ *    `admin`, `gerencia`), `vendedor` y `promotora`.
+ *  - Propaga `req.authUser.sucursal` y `activeSucursalHeader` para aislar estrictamente por sede.
+ */
+export async function requireMasterDataReaderAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    res.status(401).json({
+      error: 'Autenticación requerida (Bearer token ausente).',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 20) {
+    res.status(401).json({
+      error: 'Token de sesión inválido.',
+      code: 'AUTH_TOKEN_INVALID',
+    });
+    return;
+  }
+
+  const verifier = getVerifierSupabaseClient();
+  if (!verifier) {
+    res.status(503).json({
+      error: 'Servicio de verificación Supabase no configurado en el servidor.',
+      code: 'SUPABASE_SERVER_UNCONFIGURED',
+    });
+    return;
+  }
+
+  try {
+    const { data, error } = await verifier.auth.getUser(token);
+    if (error || !data.user || !UUID_REGEX.test(data.user.id)) {
+      res.status(401).json({
+        error: 'Sesión inválida o expirada. Inicie sesión nuevamente.',
+        code: 'AUTH_SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    const appMeta = (data.user.app_metadata ?? {}) as Record<string, unknown>;
+    const jwtAppRole = String(appMeta.app_role ?? appMeta.role ?? '')
+      .trim()
+      .toLowerCase();
+    const effective = await resolveEffectiveServerAppRole(
+      data.user.id,
+      token,
+      jwtAppRole,
+      appMeta.sucursal,
+      data.user.email
+    );
+    const appRole = effective.role;
+
+    if (!effective.isActive) {
+      res.status(403).json({
+        error: 'Acceso denegado: la cuenta se encuentra suspendida.',
+        code: 'ACCOUNT_SUSPENDED',
+      });
+      return;
+    }
+
+    if (!isMasterDataReaderRole(appRole)) {
+      res.status(403).json({
+        error: 'Acceso denegado: perfil sin permisos para consultar Data Maestra.',
+        code: 'FORBIDDEN_ROLE',
+      });
+      return;
+    }
+
+    req.authUser = {
+      id: data.user.id,
+      email: normalizeCanonicalEmail(data.user.email),
+      appRole,
+      sucursal: effective.sucursal,
+      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      isSuperAdmin: appRole === 'super_admin' || appRole === 'superadmin',
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };

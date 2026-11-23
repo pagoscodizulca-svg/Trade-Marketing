@@ -92,7 +92,7 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       setCargando(true);
       setError(null);
       try {
-        const [resVend, resCli, resCad, resZon] = await Promise.all([
+        const [vendSettled, cliSettled, cadSettled, zonSettled] = await Promise.allSettled([
           cargarVendedores
             ? obtenerVendedoresMaestros({ ...(filtrosVendedores ?? {}), forzarRefresco })
             : Promise.resolve([]),
@@ -100,16 +100,31 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
             ? obtenerClientesMaestros({ ...(filtrosClientes ?? {}), forzarRefresco })
             : Promise.resolve([]),
           cargarCadenas
-            ? obtenerCadenasComerciales({ soloActivos: false, forzarRefresco }).catch(() => [])
+            ? obtenerCadenasComerciales({ soloActivos: false, forzarRefresco })
             : Promise.resolve([]),
           cargarZonas
-            ? obtenerZonasComerciales({ soloActivos: false, forzarRefresco }).catch(() => [])
+            ? obtenerZonasComerciales({ soloActivos: false, forzarRefresco })
             : Promise.resolve([]),
         ]);
-        if (cargarVendedores) setVendedores(resVend);
-        if (cargarClientes) setClientes(resCli);
-        if (cargarCadenas) setCadenas(resCad);
-        if (cargarZonas) setZonas(resZon);
+        if (cargarVendedores && vendSettled.status === 'fulfilled') {
+          setVendedores(vendSettled.value);
+        }
+        if (cargarClientes && cliSettled.status === 'fulfilled') {
+          setClientes(cliSettled.value);
+        }
+        if (cargarCadenas && cadSettled.status === 'fulfilled') {
+          setCadenas(cadSettled.value);
+        }
+        if (cargarZonas && zonSettled.status === 'fulfilled') {
+          setZonas(zonSettled.value);
+        }
+        if (cliSettled.status === 'rejected') {
+          const reason = cliSettled.reason;
+          setError(reason instanceof Error ? reason.message : 'Error consultando clientes maestros.');
+        } else if (vendSettled.status === 'rejected' && !cargarClientes) {
+          const reason = vendSettled.reason;
+          setError(reason instanceof Error ? reason.message : 'Error consultando vendedores maestros.');
+        }
         setUltimaActualizacionIso(new Date().toISOString());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Error consultando Data Maestra.');
@@ -161,6 +176,8 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
       .channel('master-data-trade-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'vendedores' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Vendedores' }, programarRefresco)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Clientes' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cadenas_comerciales' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'zonas' }, programarRefresco)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'regiones' }, programarRefresco)
