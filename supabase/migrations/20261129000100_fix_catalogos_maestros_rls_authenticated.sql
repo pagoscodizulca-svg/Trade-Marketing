@@ -247,7 +247,8 @@ DECLARE
     'clientes',
     'cadenas_comerciales',
     'zonas',
-    'regiones'
+    'regiones',
+    'promotoras'
   ];
 BEGIN
   -- 2A. Esquema normalizado Trade Marketing (cuando existan las tablas en minúsculas)

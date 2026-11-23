@@ -482,6 +482,58 @@ export function createDefaultMasterDataErpGateway(
       const now = Date.now();
       const adminClient = getAdminSupabaseClient();
 
+      const loadUserScopedSnapshot = async (reason: string): Promise<MasterDataErpSnapshot> => {
+        const userToken = String(options.accessToken ?? '').trim();
+        const userClient = userToken
+          ? createUserScopedSupabaseClient(userToken, options.activeSucursalHeader)
+          : null;
+
+        if (!userClient) {
+          throw new ServerMasterDataError({
+            message:
+              'Falta configurar SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o llave pública + sesión autenticada) en el servidor.',
+            categoryCode: 'ENV_MISSING',
+            technicalCode: 'ENV_MISSING',
+            httpStatus: 503,
+            hint: 'Configura SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY y SUPABASE_SERVICE_ROLE_KEY en Render.',
+          });
+        }
+
+        const scopeKey = `${options.userId || 'auth-user'}::${options.activeSucursalHeader || 'ALL'}`;
+        if (!options.forceRefresh) {
+          const cachedUserSnap = userScopedSnapshotCache.get(scopeKey);
+          if (cachedUserSnap && now - cachedUserSnap.fetchedAtMs < cacheTtlMs) {
+            return cachedUserSnap;
+          }
+          const existingInflight = userScopedInflightMap.get(scopeKey);
+          if (existingInflight) {
+            return existingInflight;
+          }
+        }
+
+        serverLogger.warn('master_data_using_user_scoped_rls_fallback', {
+          reason,
+          userId: options.userId ?? null,
+        });
+
+        const userPromise = loadErpMasterSnapshotFromClient(userClient)
+          .then((snap) => {
+            if (userScopedSnapshotCache.size >= MAX_USER_SCOPED_CACHE_ENTRIES) {
+              userScopedSnapshotCache.clear();
+            }
+            userScopedSnapshotCache.set(scopeKey, snap);
+            return snap;
+          })
+          .finally(() => {
+            if (userScopedInflightMap.get(scopeKey) === userPromise) {
+              userScopedInflightMap.delete(scopeKey);
+            }
+          });
+
+        userScopedInflightMap.set(scopeKey, userPromise);
+        return userPromise;
+      };
+
       if (adminClient) {
         if (
           !options.forceRefresh &&
@@ -492,7 +544,20 @@ export function createDefaultMasterDataErpGateway(
         }
 
         if (inflightSnapshotPromise && !options.forceRefresh) {
-          return inflightSnapshotPromise;
+          try {
+            return await inflightSnapshotPromise;
+          } catch (inflightErr) {
+            const classified = classifyServerErpError(inflightErr);
+            if (
+              (classified.categoryCode === 'RLS_42501' || classified.categoryCode === 'AUTH_REQUIRED') &&
+              options.accessToken
+            ) {
+              return loadUserScopedSnapshot(
+                'adminClient rechazado por Supabase (42501/401); ejecutando respaldo con JWT authenticated bajo RLS.'
+              );
+            }
+            throw inflightErr;
+          }
         }
 
         const promise = loadErpMasterSnapshotFromClient(adminClient)
@@ -507,61 +572,25 @@ export function createDefaultMasterDataErpGateway(
           });
 
         inflightSnapshotPromise = promise;
-        return promise;
-      }
-
-      // Respaldo seguro en servidor cuando falta `SUPABASE_SERVICE_ROLE_KEY` en Render:
-      // ejecuta la consulta con el JWT verificado del usuario (`authenticated` bajo RLS)
-      // con caché estrictamente aislada por `userId` (jamás compartida entre usuarios).
-      const userToken = String(options.accessToken ?? '').trim();
-      const userClient = userToken
-        ? createUserScopedSupabaseClient(userToken, options.activeSucursalHeader)
-        : null;
-
-      if (!userClient) {
-        throw new ServerMasterDataError({
-          message:
-            'Falta configurar SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o llave pública + sesión autenticada) en el servidor.',
-          categoryCode: 'ENV_MISSING',
-          technicalCode: 'ENV_MISSING',
-          httpStatus: 503,
-          hint: 'Configura SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY y SUPABASE_SERVICE_ROLE_KEY en Render.',
-        });
-      }
-
-      const scopeKey = `${options.userId || 'auth-user'}::${options.activeSucursalHeader || 'ALL'}`;
-      if (!options.forceRefresh) {
-        const cachedUserSnap = userScopedSnapshotCache.get(scopeKey);
-        if (cachedUserSnap && now - cachedUserSnap.fetchedAtMs < cacheTtlMs) {
-          return cachedUserSnap;
-        }
-        const existingInflight = userScopedInflightMap.get(scopeKey);
-        if (existingInflight) {
-          return existingInflight;
+        try {
+          return await promise;
+        } catch (adminErr) {
+          const classified = classifyServerErpError(adminErr);
+          if (
+            (classified.categoryCode === 'RLS_42501' || classified.categoryCode === 'AUTH_REQUIRED') &&
+            options.accessToken
+          ) {
+            return loadUserScopedSnapshot(
+              'adminClient rechazado por Supabase (42501/401); ejecutando respaldo con JWT authenticated bajo RLS.'
+            );
+          }
+          throw adminErr;
         }
       }
 
-      serverLogger.warn('master_data_using_user_scoped_rls_fallback', {
-        reason: 'SUPABASE_SERVICE_ROLE_KEY ausente en runtime; consultando Data Maestra con JWT authenticated bajo RLS.',
-        userId: options.userId ?? null,
-      });
-
-      const userPromise = loadErpMasterSnapshotFromClient(userClient)
-        .then((snap) => {
-          if (userScopedSnapshotCache.size >= MAX_USER_SCOPED_CACHE_ENTRIES) {
-            userScopedSnapshotCache.clear();
-          }
-          userScopedSnapshotCache.set(scopeKey, snap);
-          return snap;
-        })
-        .finally(() => {
-          if (userScopedInflightMap.get(scopeKey) === userPromise) {
-            userScopedInflightMap.delete(scopeKey);
-          }
-        });
-
-      userScopedInflightMap.set(scopeKey, userPromise);
-      return userPromise;
+      return loadUserScopedSnapshot(
+        'SUPABASE_SERVICE_ROLE_KEY ausente o no-secreta en runtime; consultando Data Maestra con JWT authenticated bajo RLS.'
+      );
     },
   };
 }

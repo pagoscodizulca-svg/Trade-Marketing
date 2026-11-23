@@ -226,7 +226,8 @@ DECLARE
     'clientes',
     'cadenas_comerciales',
     'zonas',
-    'regiones'
+    'regiones',
+    'promotoras'
   ];
 BEGIN
   FOREACH tbl IN ARRAY normalized_master_tables LOOP
@@ -306,7 +307,7 @@ WHERE schemaname = 'public'
   AND tablename IN (
     'Regiones', 'Sucursales', 'Estados', 'Municipios', 'Supervisores',
     'Tipificacion_Clientes', 'Canal_Comercializacion', 'Forecast_Vendedores_Excluidos',
-    'Vendedores', 'Clientes', 'Productos',
+    'Vendedores', 'Clientes', 'Productos', 'promotoras',
     'vendedores', 'clientes', 'cadenas_comerciales', 'zonas', 'regiones'
   )
 ORDER BY tablename, policyname;
@@ -322,7 +323,7 @@ WHERE table_schema = 'public'
   AND table_name IN (
     'Regiones', 'Sucursales', 'Estados', 'Municipios', 'Supervisores',
     'Tipificacion_Clientes', 'Canal_Comercializacion', 'Forecast_Vendedores_Excluidos',
-    'Vendedores', 'Clientes', 'Productos',
+    'Vendedores', 'Clientes', 'Productos', 'promotoras',
     'vendedores', 'clientes', 'cadenas_comerciales', 'zonas', 'regiones'
   )
 ORDER BY table_name, grantee, privilege_type;
@@ -338,4 +339,6 @@ UNION ALL SELECT 'Canal_Comercializacion', COUNT(*) FROM public."Canal_Comercial
 UNION ALL SELECT 'Vendedores (total)', COUNT(*) FROM public."Vendedores"
 UNION ALL SELECT 'Vendedores (activos)', COUNT(*) FROM public."Vendedores" WHERE vend_acti = true
 UNION ALL SELECT 'Clientes (total)', COUNT(*) FROM public."Clientes"
-UNION ALL SELECT 'Clientes (activos)', COUNT(*) FROM public."Clientes" WHERE clie_acti = true;
+UNION ALL SELECT 'Clientes (activos)', COUNT(*) FROM public."Clientes" WHERE clie_acti = true
+UNION ALL SELECT 'Productos (total)', COUNT(*) FROM public."Productos"
+UNION ALL SELECT 'promotoras (total)', COUNT(*) FROM public.promotoras;

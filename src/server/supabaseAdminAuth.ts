@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { NextFunction, Request, Response } from 'express';
+import { serverLogger } from './logger';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -549,10 +550,70 @@ export function getVerifierSupabaseClient(): SupabaseClient | null {
   return verifierClient;
 }
 
+function decodeServerJwtRole(rawKey: string): string | null {
+  const parts = rawKey.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payloadJson = Buffer.from(parts[1]!, 'base64url').toString('utf8');
+    const payload = JSON.parse(payloadJson) as Record<string, unknown>;
+    return typeof payload?.role === 'string' ? payload.role.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Valida que `SUPABASE_SERVICE_ROLE_KEY` corresponda realmente a una llave secreta de servidor
+ * (`sb_secret_*` o JWT con `role: "service_role"`).
+ * Si por error se colocó una llave pública (`sb_publishable_*` o JWT `anon`) en Render, devuelve
+ * `false` para impedir que el servidor consulte PostgreSQL como `anon` (error `42501`) y permitir
+ * la degradación segura al cliente acotado por JWT `authenticated` bajo RLS.
+ */
+export function isValidServerServiceRoleKey(rawKey: string, supabaseUrl = ''): boolean {
+  const clean = String(rawKey ?? '').trim();
+  if (!clean) return false;
+
+  // Rechazar explícitamente llaves públicas/anon o placeholders
+  if (/^sb_publishable_/i.test(clean)) return false;
+  if (/^(your[_-]|placeholder|changeme|example)/i.test(clean)) return false;
+
+  if (clean.startsWith('sb_secret_') && clean.length >= 20) {
+    return true;
+  }
+
+  if (clean.startsWith('eyJ')) {
+    const role = decodeServerJwtRole(clean);
+    if (role === 'service_role') return true;
+    if (role === 'anon' || role === 'authenticated') return false;
+  }
+
+  // En pruebas unitarias locales contra loopback (127.0.0.1 / localhost), permitir tokens mock no-publicos
+  if (
+    process.env.NODE_TEST_CONTEXT &&
+    /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(supabaseUrl)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+let invalidServiceKeyWarned = false;
+
 export function getAdminSupabaseClient(): SupabaseClient | null {
   const url = getSupabaseProjectUrl();
   const serviceKey = getSupabaseServiceRoleKey();
   if (!url || !serviceKey) return null;
+  if (!isValidServerServiceRoleKey(serviceKey, url)) {
+    if (!invalidServiceKeyWarned) {
+      invalidServiceKeyWarned = true;
+      serverLogger.error('invalid_service_role_key_ignored', {
+        detail:
+          'SUPABASE_SERVICE_ROLE_KEY contiene una llave pública/anon o inválida (se requiere sb_secret_* o JWT service_role). Se ignorará para evitar consultas como rol anon (42501) y usar el JWT authenticated del usuario bajo RLS.',
+      });
+    }
+    return null;
+  }
   const cacheKey = `${url}::${serviceKey}`;
   if (!adminClient || adminClientCacheKey !== cacheKey) {
     adminClient = createClient(url, serviceKey, {

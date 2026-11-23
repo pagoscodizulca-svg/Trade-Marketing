@@ -30,7 +30,11 @@ import {
   invalidateMasterDataErpServerCache,
   type MasterDataErpGateway,
 } from '../src/server/masterDataErpHandler';
-import { createRateLimiter } from '../src/server/supabaseAdminAuth';
+import {
+  createRateLimiter,
+  getAdminSupabaseClient,
+  isValidServerServiceRoleKey,
+} from '../src/server/supabaseAdminAuth';
 import { registerMasterDataErpRoutes } from '../server';
 
 function buildUnsignedJwt(payload: Record<string, unknown>): string {
@@ -618,6 +622,41 @@ test('BFF default gateway: funciona sin SUPABASE_SERVICE_ROLE_KEY usando JWT del
     if (prevAnon === undefined) delete process.env.SUPABASE_ANON_KEY;
     else process.env.SUPABASE_ANON_KEY = prevAnon;
     await new Promise<void>((resolve) => mockPostgrest.close(() => resolve()));
+  }
+});
+
+test('Guardia anti-anon en servidor: rechaza llaves públicas/anon en SUPABASE_SERVICE_ROLE_KEY y degrada a JWT authenticated bajo RLS', async () => {
+  const anonJwt = buildUnsignedJwt({ role: 'anon', iss: 'supabase' });
+  const serviceJwt = buildUnsignedJwt({ role: 'service_role', iss: 'supabase' });
+
+  assert.equal(isValidServerServiceRoleKey('sb_publishable_fake_public_key_123456', 'https://demo.supabase.co'), false);
+  assert.equal(isValidServerServiceRoleKey(anonJwt, 'https://demo.supabase.co'), false);
+  assert.equal(isValidServerServiceRoleKey('placeholder_key', 'https://demo.supabase.co'), false);
+  assert.equal(isValidServerServiceRoleKey('sb_secret_real_server_key_1234567890', 'https://demo.supabase.co'), true);
+  assert.equal(isValidServerServiceRoleKey(serviceJwt, 'https://demo.supabase.co'), true);
+
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevService = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  try {
+    process.env.SUPABASE_URL = 'https://apaxdgxtaoeyswlfblgi.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_publishable_wrongly_placed_in_service_key_12345';
+    assert.equal(
+      getAdminSupabaseClient(),
+      null,
+      'Nunca debe crear adminClient con una llave sb_publishable_* (causaría 42501 anon)'
+    );
+
+    process.env.SUPABASE_SERVICE_ROLE_KEY = anonJwt;
+    assert.equal(
+      getAdminSupabaseClient(),
+      null,
+      'Nunca debe crear adminClient con un JWT anon (causaría 42501 anon)'
+    );
+  } finally {
+    if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = prevUrl;
+    if (prevService === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = prevService;
   }
 });
 

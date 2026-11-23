@@ -27,11 +27,12 @@ import type {
 } from '../types/masterData';
 import {
   getActiveClientSucursalHeader,
-  getCachedAccessToken,
+  getAuthenticatedSessionToken,
   getSupabaseClient,
   isSupabaseConfigured,
   registerSupabaseSessionResetCallback,
 } from './supabaseClient';
+import { executeWithSessionRefreshRetry } from './masterCatalogsService';
 import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
 import {
   invalidarCacheMaestros,
@@ -310,14 +311,7 @@ function resolveClient(customClient?: SupabaseClient | null): SupabaseClient | n
 }
 
 async function resolveBearerTokenForCatalogApi(client: SupabaseClient): Promise<string> {
-  const cached = getCachedAccessToken();
-  if (cached && cached.length >= 20) return cached;
-  try {
-    const { data } = await client.auth.getSession();
-    return data?.session?.access_token?.trim() || '';
-  } catch {
-    return '';
-  }
+  return (await getAuthenticatedSessionToken(client)) ?? '';
 }
 
 async function fetchCatalogFromBackendApi<T>(
@@ -328,8 +322,8 @@ async function fetchCatalogFromBackendApi<T>(
   if (typeof window === 'undefined' || typeof fetch !== 'function') {
     return { status: 'unavailable' };
   }
-  const token = await resolveBearerTokenForCatalogApi(client);
-  if (!token) {
+  const initialToken = await resolveBearerTokenForCatalogApi(client);
+  if (!initialToken) {
     return { status: 'no_token' };
   }
 
@@ -339,37 +333,51 @@ async function fetchCatalogFromBackendApi<T>(
     qs.set(k, typeof v === 'boolean' ? (v ? 'true' : 'false') : v);
   }
   const url = `${endpoint}${qs.toString() ? `?${qs.toString()}` : ''}`;
+  const activeSucursal = getActiveClientSucursalHeader();
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (res.status === 404) {
-    return { status: 'unavailable' };
-  }
-
-  if (!res.ok) {
-    let serverMsg = '';
+  return executeWithSessionRefreshRetry(client, 'maestros', async (token) => {
+    const bearer = token || initialToken;
+    let res: Response;
     try {
-      const errBody = (await res.json()) as { error?: string };
-      serverMsg = errBody?.error ? String(errBody.error) : '';
+      res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          ...(activeSucursal ? { 'x-sucursal-activa': activeSucursal } : {}),
+        },
+      });
     } catch {
-      // Sin cuerpo JSON
+      return { status: 'unavailable' as const };
     }
-    throw new Error(
-      serverMsg ||
-        `Error HTTP ${res.status} consultando ${endpoint.replace('/api/maestros/', '')} en el servidor.`
-    );
-  }
 
-  const payload = (await res.json()) as { data?: unknown };
-  if (!Array.isArray(payload?.data)) {
-    throw new Error(`Respuesta inválida recibida desde ${endpoint}.`);
-  }
-  return { status: 'ok', data: payload.data as T[] };
+    if (res.status === 401) {
+      throw { status: 401, code: 'AUTH_SESSION_EXPIRED', message: 'Sesión inválida o expirada.' };
+    }
+
+    if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+      return { status: 'unavailable' as const };
+    }
+
+    if (!res.ok) {
+      let serverMsg = '';
+      try {
+        const errBody = (await res.json()) as { error?: string };
+        serverMsg = errBody?.error ? String(errBody.error) : '';
+      } catch {
+        // Sin cuerpo JSON
+      }
+      throw new Error(
+        serverMsg ||
+          `Error HTTP ${res.status} consultando ${endpoint.replace('/api/maestros/', '')} en el servidor.`
+      );
+    }
+
+    const payload = (await res.json()) as { data?: unknown };
+    if (!Array.isArray(payload?.data)) {
+      throw new Error(`Respuesta inválida recibida desde ${endpoint}.`);
+    }
+    return { status: 'ok' as const, data: payload.data as T[] };
+  });
 }
 
 async function fetchPaginatedDirectTable<T>(
@@ -589,7 +597,8 @@ export async function obtenerProductosMaestros(
     fetchPaginatedDirectTable<ErpVwProductoDetalleRow>(
       client,
       'vw_productos_detalle',
-      'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at'
+      'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at',
+      { orderBy: 'id_prod' }
     ).catch((err) => {
       if (isMissingRelationDbError(err as { code?: string; message?: string })) return [];
       throw err;
@@ -597,7 +606,8 @@ export async function obtenerProductosMaestros(
     fetchPaginatedDirectTable<ErpProductoRow>(
       client,
       'Productos',
-      'id_prod,created_at,prod_codi,prod_desc,prod_unid,prod_acti'
+      'id_prod,created_at,prod_codi,prod_desc,prod_unid,prod_acti',
+      { orderBy: 'id_prod' }
     ),
   ]);
 
@@ -733,16 +743,25 @@ export async function obtenerSupervisoresMaestros(
     fetchPaginatedDirectTable<ErpSupervisorRow>(
       client,
       'Supervisores',
-      'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont'
+      'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont',
+      { orderBy: 'id_supe' }
     ),
     fetchPaginatedDirectTable<ErpRegionRow>(
       client,
       'Regiones',
-      'id_regi,created_at,regi_desd,regi_saba'
+      'id_regi,created_at,regi_desd,regi_saba',
+      { orderBy: 'id_regi' }
     ).catch(() => [] as ErpRegionRow[]),
   ]);
 
   let normalized = normalizeErpSupervisoresDataset(supRaw, regRaw);
+  const activeRegionFilter = normalizeRegionName(getActiveClientSucursalHeader());
+  if (activeRegionFilter) {
+    normalized = normalized.filter(
+      (s) =>
+        normalizeRegionName(s.metadata?.region_codigo ?? s.sucursal ?? s.zona) === activeRegionFilter
+    );
+  }
   if (options.soloActivos) {
     normalized = normalized.filter((s) => s.activo);
   }
@@ -926,7 +945,8 @@ export async function obtenerPromotorasMaestras(
   const regRaw = await fetchPaginatedDirectTable<ErpRegionRow>(
     client,
     'Regiones',
-    'id_regi,created_at,regi_desd,regi_saba'
+    'id_regi,created_at,regi_desd,regi_saba',
+    { orderBy: 'id_regi' }
   ).catch(() => [] as ErpRegionRow[]);
 
   let rows =
@@ -936,6 +956,14 @@ export async function obtenerPromotorasMaestras(
           .map(normalizePromotoraMasterRow)
           .sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'));
 
+  const activeRegionFilter = normalizeRegionName(getActiveClientSucursalHeader());
+  if (activeRegionFilter && !options.regionId) {
+    rows = rows.filter(
+      (r) =>
+        normalizeRegionName(r.metadata?.region_codigo ?? r.region ?? r.sucursal) ===
+        activeRegionFilter
+    );
+  }
   if (options.regionId) {
     rows = rows.filter((r) => r.region_id === options.regionId);
   }
