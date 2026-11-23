@@ -135,7 +135,10 @@ export function buildOutboxHeaders(
 }
 
 const esErrorDeColumna = (status: number, texto: string) =>
-  status === 400 && /PGRST204|42703|hora_entrega_real|actualizado_chofer_at|client_mutation_id/i.test(texto);
+  status === 400 &&
+  /PGRST204|42703|hora_entrega_real|actualizado_chofer_at|client_mutation_id|estado_logistico|hora_salida|hora_llegada|evidencia_path|evidencia_bucket|evidencia_subida_at/i.test(
+    texto
+  );
 
 /**
  * Envía UNA operación de jornada temporal firmada (`?t=...`) hacia `POST /api/shift-links/sync`

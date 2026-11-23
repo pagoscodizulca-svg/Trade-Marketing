@@ -259,6 +259,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
 
   // Modal Promotora
   const [promModalOpen, setPromModalOpen] = useState(false);
+  const [promModalError, setPromModalError] = useState<string | null>(null);
   const [editingPromId, setEditingPromId] = useState<string | undefined>(undefined);
   const [promNombre, setPromNombre] = useState('');
   const [promEmail, setPromEmail] = useState('');
@@ -581,6 +582,8 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
 
   const handleSubmitPromotora = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (busyKey === 'save_prom') return;
+    setPromModalError(null);
     setBusyKey('save_prom');
     try {
       const targetRegion = regionesById.get(promRegionId);
@@ -595,15 +598,40 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
         email: promEmail || null,
         telefono: promTelefono || null,
         ciudad: promCiudad || null,
+        direccion: promCiudad || null,
         categoria: promCategoria,
         region_id: isSuperAdmin ? promRegionId || null : verifiedRegionId,
         sucursal,
         supervisor_id: promSupervisorId || null,
       });
+      await appCtx?.masterEntities.refresh(true).catch(() => undefined);
       setPromModalOpen(false);
-      flashNotice('ok', 'Promotora sincronizada correctamente.');
+      flashNotice('ok', 'Promotora sincronizada correctamente en Supabase.');
     } catch (err) {
-      flashNotice('err', err instanceof Error ? err.message : 'No se pudo guardar la promotora.');
+      const msg = err instanceof Error ? err.message : 'No se pudo guardar la promotora.';
+      setPromModalError(msg);
+      flashNotice('err', msg);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleTogglePromotora = async (prom: PromotoraMaestra) => {
+    const key = `prom:${prom.id}`;
+    if (busyKey === key) return;
+    setBusyKey(key);
+    try {
+      await cambiarEstadoPromotoraMaestra(prom.id, !prom.activo);
+      await appCtx?.masterEntities.refresh(true).catch(() => undefined);
+      flashNotice(
+        'ok',
+        `Promotora ${prom.activo ? 'desactivada' : 'reactivada'} correctamente en Supabase.`
+      );
+    } catch (err) {
+      flashNotice(
+        'err',
+        err instanceof Error ? err.message : 'No se pudo cambiar el estado de la promotora.'
+      );
     } finally {
       setBusyKey(null);
     }
@@ -1258,17 +1286,19 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                             <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
+                                data-testid={`btn-edit-promotora-${prom.id}`}
                                 onClick={() => {
+                                  setPromModalError(null);
                                   setEditingPromId(prom.id);
-                                  setPromNombre(prom.nombre_completo);
-                                  setPromEmail(prom.email || '');
-                                  setPromTelefono(prom.telefono || '');
-                                  setPromCiudad(prom.ciudad || '');
+                                  setPromNombre(String(prom.nombre_completo ?? ''));
+                                  setPromEmail(String(prom.email ?? ''));
+                                  setPromTelefono(String(prom.telefono ?? ''));
+                                  setPromCiudad(String(prom.direccion ?? prom.ciudad ?? ''));
                                   setPromCategoria(cat);
                                   setPromRegionId(
                                     prom.region_id || verifiedRegionId || regiones[0]?.id || ''
                                   );
-                                  setPromSupervisorId(prom.supervisor_id || '');
+                                  setPromSupervisorId(String(prom.supervisor_id ?? ''));
                                   setPromModalOpen(true);
                                 }}
                                 className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-white cursor-pointer"
@@ -1278,10 +1308,9 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                               </button>
                               <button
                                 type="button"
-                                onClick={() =>
-                                  void cambiarEstadoPromotoraMaestra(prom.id, !prom.activo)
-                                }
-                                className="p-1.5 rounded-lg bg-zinc-900 hover:bg-red-950/70 border border-zinc-700 text-zinc-200 cursor-pointer"
+                                disabled={busyKey === `prom:${prom.id}`}
+                                onClick={() => void handleTogglePromotora(prom)}
+                                className="p-1.5 rounded-lg bg-zinc-900 hover:bg-red-950/70 disabled:opacity-50 border border-zinc-700 text-zinc-200 cursor-pointer"
                                 title={prom.activo ? 'Desactivar promotora' : 'Reactivar promotora'}
                               >
                                 <Power className="w-3.5 h-3.5" />
@@ -1723,12 +1752,25 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
               </h4>
               <button
                 type="button"
-                onClick={() => setPromModalOpen(false)}
-                className="p-1 text-zinc-400 hover:text-white cursor-pointer"
+                disabled={busyKey === 'save_prom'}
+                onClick={() => {
+                  setPromModalError(null);
+                  setPromModalOpen(false);
+                }}
+                className="p-1 text-zinc-400 hover:text-white cursor-pointer disabled:opacity-40"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+            {promModalError && (
+              <div
+                role="alert"
+                data-testid="promotora-modal-error"
+                className="rounded-xl bg-red-950/70 border border-red-500/60 px-3 py-2 text-[11px] text-red-200"
+              >
+                {promModalError}
+              </div>
+            )}
             <input
               required
               value={promNombre}
@@ -1779,7 +1821,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
             </div>
             {isSuperAdmin && (
               <select
-                required
+                required={!editingPromId && regiones.length > 0}
                 value={promRegionId}
                 onChange={(e) => {
                   setPromRegionId(e.target.value);
@@ -1787,7 +1829,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                 }}
                 className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
               >
-                <option value="">Selecciona región obligatoria...</option>
+                <option value="">Selecciona región...</option>
                 {regiones.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.nombre}
@@ -1810,16 +1852,23 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setPromModalOpen(false)}
-                className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 cursor-pointer"
+                disabled={busyKey === 'save_prom'}
+                onClick={() => {
+                  setPromModalError(null);
+                  setPromModalOpen(false);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 cursor-pointer disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-xl bg-[#DC2626] hover:bg-red-500 text-white text-xs font-extrabold cursor-pointer"
+                data-testid="btn-save-promotora-modal"
+                disabled={busyKey === 'save_prom'}
+                className="px-4 py-1.5 rounded-xl bg-[#DC2626] hover:bg-red-500 disabled:opacity-60 text-white text-xs font-extrabold cursor-pointer inline-flex items-center gap-1.5"
               >
-                Guardar Promotora
+                {busyKey === 'save_prom' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{busyKey === 'save_prom' ? 'Guardando...' : 'Guardar Promotora'}</span>
               </button>
             </div>
           </form>

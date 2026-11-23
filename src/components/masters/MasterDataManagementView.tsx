@@ -45,18 +45,19 @@ import type {
 
 type MasterSubTab = 'clientes' | 'cadenas' | 'zonas' | 'vendedores';
 
-function matchesCommercialSearch(haystack: string, rawQuery: string): boolean {
-  const q = rawQuery.trim();
+function matchesCommercialSearch(haystack: string | null | undefined, rawQuery: string | null | undefined): boolean {
+  const q = String(rawQuery ?? '').trim();
   if (!q) return true;
+  const safeHaystack = String(haystack ?? '');
   const norm = (s: string) =>
     normalizeSearchText(s)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toUpperCase();
-  if (norm(haystack).includes(norm(q))) return true;
+  if (norm(safeHaystack).includes(norm(q))) return true;
   const compact = (s: string) => norm(s).replace(/[^A-Z0-9Ñ]+/g, '');
   const cq = compact(q);
-  return cq.length >= 2 && compact(haystack).includes(cq);
+  return cq.length >= 2 && compact(safeHaystack).includes(cq);
 }
 
 function resolveClientOfficialRegionLabel(c: {
@@ -700,7 +701,10 @@ export const MasterDataManagementView: React.FC = () => {
               <input
                 type="text"
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => {
+                  setSearchTerm(e.target.value);
+                  setClientesPage(0);
+                }}
                 placeholder="Buscar por código, nombre, RIF, zona..."
                 className="w-full pl-8 pr-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500"
               />
@@ -710,7 +714,10 @@ export const MasterDataManagementView: React.FC = () => {
               <>
                 <select
                   value={filterCadenaId}
-                  onChange={(e) => setFilterCadenaId(e.target.value)}
+                  onChange={(e) => {
+                    setFilterCadenaId(e.target.value);
+                    setClientesPage(0);
+                  }}
                   className="px-2.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-red-500"
                 >
                   <option value="TODAS">Todas las cadenas</option>
@@ -722,7 +729,10 @@ export const MasterDataManagementView: React.FC = () => {
                 </select>
                 <select
                   value={filterZonaId}
-                  onChange={(e) => setFilterZonaId(e.target.value)}
+                  onChange={(e) => {
+                    setFilterZonaId(e.target.value);
+                    setClientesPage(0);
+                  }}
                   className="px-2.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-red-500"
                 >
                   <option value="TODAS">Todas las zonas</option>
@@ -734,7 +744,10 @@ export const MasterDataManagementView: React.FC = () => {
                 </select>
                 <select
                   value={filterCanal}
-                  onChange={(e) => setFilterCanal(e.target.value)}
+                  onChange={(e) => {
+                    setFilterCanal(e.target.value);
+                    setClientesPage(0);
+                  }}
                   className="px-2.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-red-500"
                 >
                   <option value="TODOS">Todos los canales</option>
@@ -751,11 +764,37 @@ export const MasterDataManagementView: React.FC = () => {
               <input
                 type="checkbox"
                 checked={showInactive}
-                onChange={(e) => setShowInactive(e.target.checked)}
+                onChange={(e) => {
+                  setShowInactive(e.target.checked);
+                  setClientesPage(0);
+                }}
                 className="accent-red-600"
               />
               <span>Ver inactivos</span>
             </label>
+
+            {(searchTerm.trim() !== '' ||
+              filterCadenaId !== 'TODAS' ||
+              filterZonaId !== 'TODAS' ||
+              filterCanal !== 'TODOS' ||
+              showInactive) && (
+              <button
+                type="button"
+                data-testid="btn-limpiar-filtros-maestros"
+                onClick={() => {
+                  setSearchTerm('');
+                  setFilterCadenaId('TODAS');
+                  setFilterZonaId('TODAS');
+                  setFilterCanal('TODOS');
+                  setShowInactive(false);
+                  setClientesPage(0);
+                }}
+                className="px-2.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[11px] font-bold text-zinc-200 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5 text-red-400" />
+                <span>Limpiar filtros</span>
+              </button>
+            )}
           </div>
         </div>
 

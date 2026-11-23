@@ -12,6 +12,40 @@ export type AppTab =
 
 export type StandaloneRoute = 'portal' | 'cliente';
 
+export type PortalSubTab =
+  | 'ruta'
+  | 'asistencia'
+  | 'encuestas'
+  | 'precios'
+  | 'inventario'
+  | 'merchandising'
+  | 'perfil';
+
+export const PORTAL_SUBTAB_TO_PATH: Readonly<Record<PortalSubTab, string>> = {
+  ruta: '/portal/ruta',
+  asistencia: '/portal/asistencia',
+  encuestas: '/portal/encuestas',
+  precios: '/portal/precios',
+  inventario: '/portal/inventario',
+  merchandising: '/portal/merchandising',
+  perfil: '/portal/perfil',
+};
+
+export function resolvePortalSubTab(pathname: string): PortalSubTab {
+  const p = normalizePathname(pathname);
+  if (p === '/portal/asistencia' || p === '/portal/checkin') return 'asistencia';
+  if (p === '/portal/inventario') return 'inventario';
+  if (p === '/portal/encuestas') return 'encuestas';
+  if (p === '/portal/precios') return 'precios';
+  if (p === '/portal/merchandising') return 'merchandising';
+  if (p === '/portal/perfil') return 'perfil';
+  return 'ruta';
+}
+
+export function pathForPortalSubTab(tab: PortalSubTab): string {
+  return PORTAL_SUBTAB_TO_PATH[tab];
+}
+
 export const TAB_TO_PATH: Readonly<Record<AppTab, string>> = {
   promotoras: '/promotoras',
   llenado_cronograma: '/cronograma',

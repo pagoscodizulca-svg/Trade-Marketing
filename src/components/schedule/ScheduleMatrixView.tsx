@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '../../context/AppContext';
 import { 
   Download, 
@@ -360,7 +361,30 @@ export const ScheduleMatrixView: React.FC = () => {
   );
 
   const batchDay = useMemo(() => formatDayLabelFromYmd(batchDate), [batchDate]);
-  const [batchPromotora] = useState<string>('AUTO');
+  const [batchPromotora, setBatchPromotora] = useState<string>('AUTO');
+  const [batchNotes, setBatchNotes] = useState<string>('');
+
+  const activePromotoraOptions = useMemo(() => {
+    const byKey = new Map<string, { id: string; name: string; email: string }>();
+    for (const u of users) {
+      if (u.role !== 'promotora' || !u.name?.trim()) continue;
+      const k = canonicalStaffKey(u.name, u.email);
+      if (!k) continue;
+      byKey.set(k, { id: u.id, name: u.name.trim(), email: String(u.email || '').trim().toLowerCase() });
+    }
+    for (const p of masterEntities?.promotoras ?? []) {
+      if (p.activo === false) continue;
+      const catLower = String(p.categoria || '').toLowerCase();
+      if (catLower.includes('merch')) continue;
+      const cleanName = String(p.nombre_completo || '').trim();
+      if (!cleanName) continue;
+      const cleanEmail = String(p.email || '').trim().toLowerCase();
+      const k = canonicalStaffKey(cleanName, cleanEmail);
+      if (!k || byKey.has(k)) continue;
+      byKey.set(k, { id: String(p.id), name: cleanName, email: cleanEmail });
+    }
+    return Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }, [users, masterEntities?.promotoras]);
   
   // Selected store IDs for batch (inicia vacío, sin selección prefabricada)
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
@@ -426,9 +450,10 @@ export const ScheduleMatrixView: React.FC = () => {
   const [newStoreId, setNewStoreId] = useState<string>('');
   const [newZone, setNewZone] = useState<string>('');
   const [newSellerNameInput, setNewSellerNameInput] = useState<string>('');
+  const [newVisitNotes, setNewVisitNotes] = useState<string>('');
 
   const [newPromotoraName, setNewPromotoraName] = useState<string>(
-    () => users.find((u) => u.role === 'promotora')?.name || ''
+    () => users.find((u) => u.role === 'promotora')?.name || 'POR ASIGNAR (Trade Marketing)'
   );
 
   const showNotification = (text: string, count: number, subtitle?: string) => {
@@ -803,6 +828,11 @@ export const ScheduleMatrixView: React.FC = () => {
 
     const shiftToUse = shiftOverride || batchShift;
     const promotoraToUse = batchPromotora === 'AUTO' ? undefined : batchPromotora;
+    const matchedPromotoraOption = promotoraToUse
+      ? activePromotoraOptions.find(
+          (p) => canonicalStaffKey(p.name) === canonicalStaffKey(promotoraToUse)
+        )
+      : undefined;
 
     // Validación de regla de negocio: No duplicar la misma promotora en la misma jornada
     if (promotoraToUse) {
@@ -836,6 +866,8 @@ export const ScheduleMatrixView: React.FC = () => {
         dayLabel: batchDay,
         date: batchDate,
         promotoraName: promotoraToUse,
+        promotoraEmail: matchedPromotoraOption?.email || undefined,
+        notes: batchNotes.trim() || undefined,
       });
 
       if (!result.ok) {
@@ -849,12 +881,13 @@ export const ScheduleMatrixView: React.FC = () => {
         return;
       }
 
+      setBatchNotes('');
       const totalProcessed = result.countUpdated + result.countCreated;
       showNotification(
         `¡Llenado por lote persistido en Supabase! Se cargó ${batchProductBadgeLabel} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
           (hiddenSelectedCount > 0 ? ` ${hiddenSelectedCount} marcados ocultos por filtro omitidos.` : ''),
         totalProcessed,
-        'Sincronizado en cronograma_degustaciones y rutas_promotoras.'
+        'Sincronizado en cronograma_degustaciones, rutas_promotoras y entregas_degustacion.'
       );
     } finally {
       setIsPersistingMatrix(false);
@@ -1637,9 +1670,18 @@ export const ScheduleMatrixView: React.FC = () => {
 
             <div className="mt-3 pt-3 border-t border-zinc-900 flex items-center justify-between text-xs text-zinc-400">
               <span>Total clientes seleccionados:</span>
-              <span className="font-black text-white font-mono px-2 py-0.5 rounded bg-red-600 text-white text-xs">
-                {effectiveBatchStoreIds.length} visibles{hiddenSelectedCount > 0 ? ` · ${hiddenSelectedCount} ocultos por filtro` : ''}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono text-zinc-400">
+                  {filteredStoresForBatch.length} visibles
+                </span>
+                <span
+                  data-testid="batch-stores-selected-pill"
+                  className="font-black text-white font-mono px-2 py-0.5 rounded bg-red-600 text-xs"
+                >
+                  {effectiveBatchStoreIds.length} elegidos
+                  {hiddenSelectedCount > 0 ? ` · ${hiddenSelectedCount} ocultos` : ''}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -2003,6 +2045,46 @@ export const ScheduleMatrixView: React.FC = () => {
                 </div>
 
               </div>
+
+              {/* Promotora asignada y notas operativas del lote */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 pt-3 border-t border-zinc-900">
+                <div>
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                    Promotora Asignada ({activePromotoraOptions.length} activas)
+                  </label>
+                  <select
+                    data-testid="batch-promotora-select"
+                    value={batchPromotora}
+                    onChange={(e) => setBatchPromotora(e.target.value)}
+                    className="w-full py-2 px-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-bold text-white focus:outline-none focus:border-red-600"
+                  >
+                    <option value="AUTO">Asignación Automática (Disponible)</option>
+                    {activePromotoraOptions.map((p) => {
+                      const conflict = isPromotoraBooked(p.name, batchDay, batchShift, undefined, batchDate);
+                      return (
+                        <option key={p.id} value={p.name}>
+                          {p.name} {conflict ? `⛔ (Ocupada en ${conflict.storeName.slice(0, 14)}...)` : '✓'}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                    Notas / Observaciones Operativas (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="batch-notes-input"
+                    value={batchNotes}
+                    onChange={(e) => setBatchNotes(e.target.value)}
+                    placeholder="Ej: Instrucciones de stand, horario especial..."
+                    maxLength={500}
+                    className="w-full py-2 px-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
+                  />
+                </div>
+              </div>
             </div>
 
             {/* BOTÓN PRINCIPAL DE DISPARO DEL LOTE */}
@@ -2043,11 +2125,35 @@ export const ScheduleMatrixView: React.FC = () => {
         </div>
       </div>
 
-      {isClearModalOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true">
+      {isClearModalOpen && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[90] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={(ev) => {
+            if (ev.target === ev.currentTarget && !isPersistingMatrix) {
+              setIsClearModalOpen(false);
+              setClearAllConfirmText('');
+            }
+          }}
+        >
           <div className="w-full max-w-lg bg-zinc-950 border border-red-700/60 rounded-2xl p-5 shadow-2xl shadow-red-950/60 space-y-4">
-            <div className="flex items-center gap-2 text-white font-black uppercase text-sm tracking-wider">
-              <Trash2 className="w-5 h-5 text-red-500" /> Cancelación lógica por lote / Nueva carga
+            <div className="flex items-center justify-between gap-2 text-white font-black uppercase text-sm tracking-wider">
+              <span className="flex items-center gap-2">
+                <Trash2 className="w-5 h-5 text-red-500" /> Cancelación lógica por lote / Nueva carga
+              </span>
+              <button
+                type="button"
+                aria-label="Cerrar modal de cancelación"
+                disabled={isPersistingMatrix}
+                onClick={() => {
+                  setIsClearModalOpen(false);
+                  setClearAllConfirmText('');
+                }}
+                className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-900 cursor-pointer disabled:opacity-40"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs font-black uppercase">
@@ -2107,7 +2213,8 @@ export const ScheduleMatrixView: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       {/* Filter and Search Bar for Table + Navegador Automático de Semanas */}
       <div id="tabla-general-matriz" className="bg-zinc-950 border border-zinc-900 p-4 rounded-2xl space-y-3">
@@ -2329,13 +2436,28 @@ export const ScheduleMatrixView: React.FC = () => {
               ))}
             </div>
 
-            {/* Product filter */}
+            {/* Product filter (base + productos reales presentes en la tabla) */}
             <div className="flex flex-wrap items-center gap-1 bg-black p-1 rounded-lg border border-zinc-900">
-              {['TODOS', 'MORTADELA', 'VENCAMPO', 'ESPALDA', 'JAMON', 'SALCHICHA'].map((prod) => (
+              {Array.from(
+                new Set([
+                  'TODOS',
+                  'MORTADELA',
+                  'VENCAMPO',
+                  'ESPALDA',
+                  'JAMON',
+                  'SALCHICHA',
+                  ...visits
+                    .map((v) => String(v.productFocus || '').trim().toUpperCase())
+                    .filter((p) => p.length > 0 && p.length <= 28),
+                ])
+              )
+                .slice(0, 12)
+                .map((prod) => (
                 <button
                   key={prod}
+                  type="button"
                   onClick={() => setSelectedProduct(prod)}
-                  className={`px-3 py-1 rounded text-xs font-black tracking-wide uppercase transition ${
+                  className={`px-3 py-1 rounded text-xs font-black tracking-wide uppercase transition cursor-pointer ${
                     selectedProduct === prod
                       ? 'bg-red-600 text-white shadow-sm border border-red-500'
                       : 'text-zinc-400 hover:text-white'
@@ -3219,7 +3341,7 @@ export const ScheduleMatrixView: React.FC = () => {
                   <option value="POR ASIGNAR (Trade Marketing)">
                     POR ASIGNAR (Trade Marketing)
                   </option>
-                  {users.filter((u) => u.role === 'promotora').map((u) => {
+                  {activePromotoraOptions.map((u) => {
                     const fullName = u.name;
                     const conflict = isPromotoraBooked(fullName, batchDay, batchShift, undefined, batchDate);
                     return (
@@ -3234,6 +3356,21 @@ export const ScheduleMatrixView: React.FC = () => {
                     );
                   })}
                 </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">
+                  Observaciones / Notas (Opcional)
+                </label>
+                <input
+                  type="text"
+                  data-testid="single-visit-notes-input"
+                  placeholder="Ej: Nota operativa de degustación..."
+                  value={newVisitNotes}
+                  onChange={(e) => setNewVisitNotes(e.target.value)}
+                  maxLength={500}
+                  className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
+                />
               </div>
             </div>
 
@@ -3342,6 +3479,7 @@ export const ScheduleMatrixView: React.FC = () => {
                       lecheGrams,
                       rowHighlight: prodUpper.includes('VENCAMPO') ? 'green' : 'none',
                       status: 'PENDIENTE',
+                      ...(newVisitNotes.trim() ? { notes: newVisitNotes.trim() } : {}),
                       additionalGoods: {
                         arrozKg: arrozQty,
                         azucarKg: azucarGrams / 1000,
@@ -3365,10 +3503,11 @@ export const ScheduleMatrixView: React.FC = () => {
                     setNewStoreId('');
                     setNewZone('');
                     setNewSellerNameInput('');
+                    setNewVisitNotes('');
                     showNotification(
                       '✓ Nueva activación persistida en Supabase y sincronizada en la Tabla General.',
                       1,
-                      'Guardada en cronograma_degustaciones.'
+                      'Guardada en cronograma_degustaciones, rutas_promotoras y entregas_degustacion.'
                     );
                   } finally {
                     setIsPersistingMatrix(false);

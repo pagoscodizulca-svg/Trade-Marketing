@@ -293,6 +293,7 @@ export const FieldPromotoraView: React.FC = () => {
     upsertVisitFromApprovedTasting,
     removeVisitByTastingRequest,
     module1Bundle,
+    masterEntities,
     isLoadingSupabase,
     supabaseError,
     refreshSupabaseData,
@@ -2190,6 +2191,10 @@ export const FieldPromotoraView: React.FC = () => {
   const [activeReportTab, setActiveReportTab] = useState<ReportSubTab>('asistencia');
   const [reportSearchQuery, setReportSearchQuery] = useState('');
   const [reportRowLimit, setReportRowLimit] = useState<number>(150);
+  const [invRegionFilter, setInvRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
+  const [invPromoterFilter, setInvPromoterFilter] = useState<string>('TODAS');
+  const [invDateFrom, setInvDateFrom] = useState<string>('');
+  const [invDateTo, setInvDateTo] = useState<string>('');
   const [checkinPhotosMap, setCheckinPhotosMap] = useState<Record<string, string>>({});
 
   // Estados sincronizados para Inventario y Degustación
@@ -2251,6 +2256,43 @@ export const FieldPromotoraView: React.FC = () => {
   const inventorySampling = useMemo<InventorySamplingRecord[]>(() => {
     return module1Bundle?.inventorySampling || [];
   }, [module1Bundle]);
+
+  const inventoryPromoterOptions = useMemo<string[]>(() => {
+    const names = new Set<string>();
+    inventorySampling.forEach((inv) => {
+      const clean = String(inv.promotora || '').trim();
+      if (clean) names.add(clean);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [inventorySampling]);
+
+  const filteredInventorySampling = useMemo<InventorySamplingRecord[]>(() => {
+    const q = reportSearchQuery.trim().toLowerCase();
+    return inventorySampling.filter((inv) => {
+      if (!inv) return false;
+      const invReg = inv.region === 'Valencia' ? 'Valencia' : 'Occidente';
+      if (invRegionFilter !== 'TODAS' && invReg !== invRegionFilter) return false;
+      if (
+        invPromoterFilter !== 'TODAS' &&
+        String(inv.promotora || '').trim().toLowerCase() !== invPromoterFilter.trim().toLowerCase()
+      ) {
+        return false;
+      }
+      const invYmd = String(inv.date || '').slice(0, 10);
+      if (invDateFrom && invYmd && invYmd < invDateFrom) return false;
+      if (invDateTo && invYmd && invYmd > invDateTo) return false;
+      if (!q) return true;
+      return (
+        String(inv.storeName || '').toLowerCase().includes(q) ||
+        String(inv.productName || '').toLowerCase().includes(q) ||
+        String(inv.promotora || '').toLowerCase().includes(q) ||
+        String(inv.zone || '').toLowerCase().includes(q) ||
+        invReg.toLowerCase().includes(q) ||
+        String(inv.dateSlash || inv.date || '').toLowerCase().includes(q) ||
+        String(inv.observations || '').toLowerCase().includes(q)
+      );
+    });
+  }, [inventorySampling, invRegionFilter, invPromoterFilter, invDateFrom, invDateTo, reportSearchQuery]);
 
   const attendanceRecords = useMemo<AttendanceRecord[]>(() => {
     return module1Bundle?.attendanceRecords || [];
@@ -2517,6 +2559,7 @@ export const FieldPromotoraView: React.FC = () => {
   const [loadingPersonalCatalog, setLoadingPersonalCatalog] = useState(false);
   const [uploadingPhotoStaffId, setUploadingPhotoStaffId] = useState<string | null>(null);
   const [isSavingStaffModal, setIsSavingStaffModal] = useState<boolean>(false);
+  const [staffFormError, setStaffFormError] = useState<string | null>(null);
   const [staffFormModal, setStaffFormModal] = useState<{
     isOpen: boolean;
     id?: string;
@@ -2773,6 +2816,7 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   const openCreateStaffModal = (defaultCategory: StaffCategory = 'fija') => {
+    setStaffFormError(null);
     setStaffFormModal({
       isOpen: true,
       id: undefined,
@@ -2790,31 +2834,38 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   const openEditStaffModal = (member: StaffMemberRecord) => {
+    setStaffFormError(null);
     setStaffFormModal({
       isOpen: true,
       id: member.id,
-      name: member.name,
-      role: member.role,
-      category: member.category,
-      phone: member.phone,
-      email: member.email,
-      assignedStore: member.assignedStore,
-      address: member.address,
+      name: String(member.name ?? ''),
+      role: String(member.role ?? 'Promotora'),
+      category: member.category || 'fija',
+      phone: String(member.phone ?? ''),
+      email: String(member.email ?? ''),
+      assignedStore: String(member.assignedStore ?? 'VARIAS'),
+      address: String(member.address ?? ''),
       // Seguridad Zero Trust: nunca poblar ni mostrar contraseñas almacenadas
       password: '',
-      status: member.status,
+      status: member.status === 'Inactivo' ? 'Inactivo' : 'Activo',
       photoUrl: member.photoUrl,
     });
   };
 
   const handleSaveStaffModal = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!staffFormModal.name.trim()) return;
+    if (isSavingStaffModal) return;
+    const cleanName = staffFormModal.name.trim();
+    if (!cleanName) {
+      setStaffFormError('El nombre completo es obligatorio.');
+      return;
+    }
+    setStaffFormError(null);
     setIsSavingStaffModal(true);
     try {
       const saved = await saveSupabaseStaffMember({
         id: staffFormModal.id,
-        name: staffFormModal.name,
+        name: cleanName,
         role: staffFormModal.role,
         category: staffFormModal.category,
         email: staffFormModal.email,
@@ -2831,7 +2882,7 @@ export const FieldPromotoraView: React.FC = () => {
       if (saved.id && isValidUuid(saved.id) && (cleanPass || staffFormModal.status === 'Inactivo')) {
         await provisionStaffAuthAccountViaBackend({
           staffId: saved.id,
-          name: staffFormModal.name.trim(),
+          name: cleanName,
           email: staffFormModal.email.trim(),
           password: cleanPass || undefined,
           appRole: 'promotora',
@@ -2840,16 +2891,22 @@ export const FieldPromotoraView: React.FC = () => {
       }
 
       setStaffFormModal((prev) => ({ ...prev, isOpen: false, password: '' }));
-      await refreshSupabaseData();
+      await Promise.all([
+        masterEntities?.refresh(true).catch(() => undefined),
+        loadFallbackPromotorasCatalog(true).catch(() => undefined),
+        refreshSupabaseData(),
+      ]);
       showToast(
         staffFormModal.status === 'Inactivo'
-          ? `✓ ${staffFormModal.name} marcada como inactiva y revocado su acceso a /portal/ruta.`
-          : `✓ Perfil de ${staffFormModal.name} sincronizado de forma segura.`
+          ? `✓ ${cleanName} marcada como inactiva y revocado su acceso a /portal/ruta.`
+          : `✓ Perfil de ${cleanName} guardado y sincronizado en Supabase.`
       );
     } catch (err) {
-      showToast(
-        err instanceof Error ? err.message : 'No se pudo guardar el perfil en Supabase.'
-      );
+      const msg =
+        err instanceof Error ? err.message : 'No se pudo guardar el perfil en Supabase.';
+      console.error('[FieldPromotoraView] Error guardando perfil:', err);
+      setStaffFormError(msg);
+      showToast(msg);
     } finally {
       setIsSavingStaffModal(false);
     }
@@ -2865,10 +2922,16 @@ export const FieldPromotoraView: React.FC = () => {
     }
     try {
       await deleteSupabaseStaffMember(member.id, member.name);
-      await refreshSupabaseData();
+      await Promise.all([
+        masterEntities?.refresh(true).catch(() => undefined),
+        loadFallbackPromotorasCatalog(true).catch(() => undefined),
+        refreshSupabaseData(),
+      ]);
       showToast(`✓ ${member.name} retirada del sistema y sincronizada con Supabase.`);
-    } catch {
-      showToast('No se pudo eliminar el registro en Supabase.');
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'No se pudo eliminar el registro en Supabase.';
+      showToast(msg);
     }
   };
 
@@ -5087,38 +5150,121 @@ export const FieldPromotoraView: React.FC = () => {
             </div>
           </div>
 
-          {/* BARRA DE FILTRO Y LÍMITE DE VISUALIZACIÓN (SOLO PARA SUB-TAB INVENTARIO; ASISTENCIA USA SU PROPIA BARRA CONDICIONAL) */}
+          {/* BARRA DE FILTROS COMPLETOS (REGIÓN, PROMOTORA, FECHAS, BUSCADOR Y LÍMITE) */}
           {activeReportTab === 'inventario' && (
-            <div className="flex flex-wrap items-center justify-between gap-4 p-3 rounded-2xl bg-zinc-950 border border-zinc-900">
-              <div className="relative flex-1 min-w-[240px] max-w-md">
-                <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Buscar promotora (ej. Camila Morales), tienda, producto o fecha..."
-                  value={reportSearchQuery}
-                  onChange={(e) => setReportSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600 font-medium"
-                />
+            <div className="space-y-3 p-3.5 rounded-2xl bg-zinc-950 border border-zinc-900">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'TODAS', label: 'Todas las Regiones' },
+                      { id: 'Occidente', label: 'Occidente' },
+                      { id: 'Valencia', label: 'Valencia' },
+                    ] as const
+                  ).map((reg) => (
+                    <button
+                      key={reg.id}
+                      type="button"
+                      data-testid={`inv-region-${reg.id}`}
+                      onClick={() => setInvRegionFilter(reg.id)}
+                      className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        invRegionFilter === reg.id
+                          ? 'bg-red-600 text-white border-red-500 shadow'
+                          : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      {reg.label}
+                    </button>
+                  ))}
+
+                  <select
+                    value={invPromoterFilter}
+                    onChange={(e) => setInvPromoterFilter(e.target.value)}
+                    aria-label="Filtrar inventario por promotora"
+                    data-testid="inv-promotora-select"
+                    className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-white text-xs font-medium focus:outline-none focus:border-red-600"
+                  >
+                    <option value="TODAS">Todas las promotoras ({inventoryPromoterOptions.length})</option>
+                    {inventoryPromoterOptions.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <input
+                      type="date"
+                      value={invDateFrom}
+                      onChange={(e) => setInvDateFrom(e.target.value)}
+                      aria-label="Fecha desde inventario"
+                      className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white"
+                    />
+                    <span className="text-zinc-500">a</span>
+                    <input
+                      type="date"
+                      value={invDateTo}
+                      onChange={(e) => setInvDateTo(e.target.value)}
+                      aria-label="Fecha hasta inventario"
+                      className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white"
+                    />
+                  </div>
+                </div>
+
+                {(invRegionFilter !== 'TODAS' ||
+                  invPromoterFilter !== 'TODAS' ||
+                  invDateFrom !== '' ||
+                  invDateTo !== '' ||
+                  reportSearchQuery.trim() !== '') && (
+                  <button
+                    type="button"
+                    data-testid="inv-clear-filters"
+                    onClick={() => {
+                      setInvRegionFilter('TODAS');
+                      setInvPromoterFilter('TODAS');
+                      setInvDateFrom('');
+                      setInvDateTo('');
+                      setReportSearchQuery('');
+                    }}
+                    className="min-h-[34px] px-3 py-1 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-xs font-bold text-zinc-200 transition cursor-pointer"
+                  >
+                    Limpiar filtros
+                  </button>
+                )}
               </div>
 
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
-                  <span>Mostrar:</span>
-                  <select
-                    value={reportRowLimit}
-                    onChange={(e) => setReportRowLimit(Number(e.target.value))}
-                    className="px-2.5 py-1 rounded-lg bg-black border border-zinc-800 text-white text-xs font-mono"
-                  >
-                    <option value={150}>150 filas</option>
-                    <option value={400}>400 filas</option>
-                    <option value={2000}>Todos ({inventorySampling.length})</option>
-                  </select>
+              <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-zinc-900">
+                <div className="relative flex-1 min-w-[240px] max-w-md">
+                  <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    data-testid="inv-search-input"
+                    placeholder="Buscar promotora (ej. Nicole Godoy), PDV, producto o fecha..."
+                    value={reportSearchQuery}
+                    onChange={(e) => setReportSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600 font-medium"
+                  />
                 </div>
-                <div className="text-[11px] text-zinc-400 font-mono hidden sm:flex items-center gap-1.5">
-                  <Database className="w-3.5 h-3.5 text-red-500" />
-                  <span>
-                    Base de datos Supabase conectada • {inventorySampling.length} balances
-                  </span>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
+                    <span>Mostrar:</span>
+                    <select
+                      value={reportRowLimit}
+                      onChange={(e) => setReportRowLimit(Number(e.target.value))}
+                      className="px-2.5 py-1 rounded-lg bg-black border border-zinc-800 text-white text-xs font-mono"
+                    >
+                      <option value={150}>150 filas</option>
+                      <option value={400}>400 filas</option>
+                      <option value={2000}>Todos ({filteredInventorySampling.length})</option>
+                    </select>
+                  </div>
+                  <div className="text-[11px] text-zinc-400 font-mono hidden sm:flex items-center gap-1.5">
+                    <Database className="w-3.5 h-3.5 text-red-500" />
+                    <span>
+                      Base de datos Supabase conectada • {filteredInventorySampling.length} de {inventorySampling.length} balances
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -5136,7 +5282,7 @@ export const FieldPromotoraView: React.FC = () => {
                     <Box className="w-5 h-5 text-red-400" />
                     Control de Inventarios & Resultados de Degustación
                     <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-red-500/10 text-red-400 border border-red-500/20">
-                      {inventorySampling.length} balances registrados
+                      {filteredInventorySampling.length} balances
                     </span>
                   </h4>
                   <p className="text-xs text-slate-400 mt-1">
@@ -5170,7 +5316,7 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Inv. Inicial Total</p>
                   <p className="text-2xl font-bold text-white">
-                    {inventorySampling.reduce((acc, r) => acc + r.initialStock, 0).toFixed(1)}{' '}
+                    {filteredInventorySampling.reduce((acc, r) => acc + r.initialStock, 0).toFixed(1)}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Stock al iniciar la jornada</p>
@@ -5178,7 +5324,7 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Inv. Final Remanente</p>
                   <p className="text-2xl font-bold text-amber-400">
-                    {inventorySampling.reduce((acc, r) => acc + r.finalStock, 0).toFixed(1)}{' '}
+                    {filteredInventorySampling.reduce((acc, r) => acc + r.finalStock, 0).toFixed(1)}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Stock físico al cierre</p>
@@ -5186,14 +5332,14 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Muestras Degustadas</p>
                   <p className="text-2xl font-bold text-purple-400">
-                    {inventorySampling.reduce((acc, r) => acc + r.portionsSampled, 0).toFixed(1)}
+                    {filteredInventorySampling.reduce((acc, r) => acc + r.portionsSampled, 0).toFixed(1)}
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Impactos directos a consumidores</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Resultado (Ventas)</p>
                   <p className="text-2xl font-bold text-emerald-400">
-                    {inventorySampling.reduce((acc, r) => acc + r.salesGenerated, 0).toFixed(1)}{' '}
+                    {filteredInventorySampling.reduce((acc, r) => acc + r.salesGenerated, 0).toFixed(1)}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-emerald-400/80 mt-1">Rotación efectiva durante degustación</p>
@@ -5218,18 +5364,13 @@ export const FieldPromotoraView: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 text-sm">
-                      {inventorySampling
-                        .filter((inv) => {
-                          if (!reportSearchQuery.trim()) return true;
-                          const q = reportSearchQuery.toLowerCase();
-                          return (
-                            inv.storeName.toLowerCase().includes(q) ||
-                            inv.productName.toLowerCase().includes(q) ||
-                            inv.promotora.toLowerCase().includes(q) ||
-                            (inv.dateSlash || inv.date).toLowerCase().includes(q) ||
-                            inv.observations.toLowerCase().includes(q)
-                          );
-                        })
+                      {filteredInventorySampling.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="p-8 text-center text-xs text-slate-400">
+                            No se encontraron balances de inventario con los filtros seleccionados.
+                          </td>
+                        </tr>
+                      ) : filteredInventorySampling
                         .slice(0, reportRowLimit)
                         .map((inv) => (
                           <tr key={inv.id} className="hover:bg-slate-800/30 transition-colors">
@@ -5237,7 +5378,12 @@ export const FieldPromotoraView: React.FC = () => {
                               {inv.dateSlash || inv.date}
                             </td>
                             <td className="p-4">
-                              <div className="font-medium text-white">{inv.storeName}</div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-medium text-white">{inv.storeName}</span>
+                                <span className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[10px] font-mono text-zinc-300">
+                                  {inv.region || 'Occidente'}
+                                </span>
+                              </div>
                               <div className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
                                 <MapPin className="w-3 h-3 text-red-400" /> {inv.zone} • {inv.promotora}
                               </div>
@@ -6695,7 +6841,7 @@ export const FieldPromotoraView: React.FC = () => {
                   <div className="flex items-center justify-between border-b border-white/10 pb-3">
                     <div>
                       <span className="text-[10px] font-black uppercase tracking-wider text-red-400">
-                        Sincronización Directa Supabase • Tabla `staff`
+                        Sincronización Directa Supabase • Padrón Activo
                       </span>
                       <h4 className="text-base font-black text-white">
                         {staffFormModal.id ? `Editar Perfil: ${staffFormModal.name}` : 'Registrar Nuevo Personal Activo'}
@@ -6703,12 +6849,27 @@ export const FieldPromotoraView: React.FC = () => {
                     </div>
                     <button
                       type="button"
-                      onClick={() => setStaffFormModal((prev) => ({ ...prev, isOpen: false }))}
-                      className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10"
+                      disabled={isSavingStaffModal}
+                      onClick={() => {
+                        setStaffFormError(null);
+                        setStaffFormModal((prev) => ({ ...prev, isOpen: false }));
+                      }}
+                      className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 disabled:opacity-40"
                     >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
+
+                  {staffFormError && (
+                    <div
+                      role="alert"
+                      data-testid="staff-modal-error"
+                      className="rounded-xl bg-red-950/70 border border-red-500/60 px-3 py-2.5 text-xs text-red-200 flex items-start gap-2"
+                    >
+                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                      <span>{staffFormError}</span>
+                    </div>
+                  )}
 
                   <form onSubmit={handleSaveStaffModal} className="space-y-3.5 text-xs">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -6845,18 +7006,23 @@ export const FieldPromotoraView: React.FC = () => {
                     <div className="flex items-center justify-end gap-2 pt-3 border-t border-white/10">
                       <button
                         type="button"
-                        onClick={() => setStaffFormModal((prev) => ({ ...prev, isOpen: false }))}
-                        className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold border border-white/10"
+                        disabled={isSavingStaffModal}
+                        onClick={() => {
+                          setStaffFormError(null);
+                          setStaffFormModal((prev) => ({ ...prev, isOpen: false }));
+                        }}
+                        className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold border border-white/10 disabled:opacity-50"
                       >
                         Cancelar
                       </button>
                       <button
                         type="submit"
+                        data-testid="btn-save-staff-modal"
                         disabled={isSavingStaffModal}
-                        className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold flex items-center gap-2 shadow-lg shadow-red-950/50"
+                        className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-60 text-white font-bold flex items-center gap-2 shadow-lg shadow-red-950/50 cursor-pointer"
                       >
                         {isSavingStaffModal && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                        <span>Guardar en Supabase</span>
+                        <span>{isSavingStaffModal ? 'Guardando...' : 'Guardar en Supabase'}</span>
                       </button>
                     </div>
                   </form>

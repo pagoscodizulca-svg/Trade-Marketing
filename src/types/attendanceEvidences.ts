@@ -130,10 +130,13 @@ export interface AsistenciaJornadaDbRow {
   id: string;
   fecha_jornada: string; // YYYY-MM-DD
   promotora_id: string;
+  promotora_ref_id?: number | null;
+  auth_user_id?: string | null;
   promotora_nombre: string;
   perfil_aplicado: PerfilAsistencia;
   pdv_nombre: string;
   zona: string;
+  region?: 'Occidente' | 'Valencia' | string | null;
   sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
   opened_at_server: string;
   updated_at_server: string;
@@ -155,6 +158,7 @@ export interface AsistenciaEvidenciaDbRow {
   lat: number | null;
   lng: number | null;
   gps_accuracy: number | null;
+  region?: 'Occidente' | 'Valencia' | string | null;
   sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
   capturado_en_servidor: string;
   cargado_por_uid: string | null;
@@ -206,6 +210,7 @@ export interface DailyPromotoraAttendanceViewModel {
   promotoraEmail: string;
   pdvNombre: string;
   zona: string;
+  region?: 'Occidente' | 'Valencia';
   perfilAplicado: PerfilAsistencia;
   perfilFuente: 'SNAPSHOT_HISTORICO' | 'PERFIL_MAESTRO_ACTUAL';
   compliance: AttendanceComplianceSummary;
@@ -290,7 +295,13 @@ export const PerfilAsistenciaSchema = z.enum(PERFILES_ASISTENCIA);
 export const SlotFotoAsistenciaSchema = z.enum(ALL_SLOTS_FOTO_ASISTENCIA);
 
 export const UploadAttendanceEvidenceMetadataSchema = z.object({
-  promotoraId: z.string().uuid('El identificador de la promotora debe ser un UUID válido.'),
+  promotoraId: z
+    .string()
+    .trim()
+    .regex(
+      /^[A-Za-z0-9_-]{1,64}$/,
+      'El identificador de la promotora debe ser un ID válido (UUID o numérico).'
+    ),
   fechaJornada: z
     .string()
     .trim()

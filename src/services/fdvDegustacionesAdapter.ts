@@ -134,7 +134,9 @@ export function isMissingTablePostgrestError(statusOrCode: number | string, mess
   if (statusOrCode === 404 || statusOrCode === 'PGRST205' || statusOrCode === '42P01') {
     return true;
   }
-  return /PGRST205|42P01|cronograma_degustaciones/i.test(message);
+  return /PGRST205|42P01|could not find the table|relation\s+["']?[^"']+["']?\s+does not exist|cronograma_degustaciones/i.test(
+    message
+  );
 }
 
 // ============================================================================

@@ -968,7 +968,7 @@ export function createMasterDataErpHandlers(
           return true;
         });
 
-        res.setHeader('Cache-Control', 'private, max-age=30');
+        res.setHeader('Cache-Control', 'no-store');
         res.status(200).json({
           source: snap.source,
           region: regionFilter ?? 'ALL',
@@ -1031,7 +1031,7 @@ export function createMasterDataErpHandlers(
           return true;
         });
 
-        res.setHeader('Cache-Control', 'private, max-age=30');
+        res.setHeader('Cache-Control', 'no-store');
         res.status(200).json({
           source: snap.source,
           region: regionFilter ?? 'ALL',
@@ -1079,7 +1079,7 @@ export function createMasterDataErpHandlers(
           return true;
         });
 
-        res.setHeader('Cache-Control', 'private, max-age=30');
+        res.setHeader('Cache-Control', 'no-store');
         res.status(200).json({
           source: snap.source,
           region: regionFilter ?? 'ALL',
@@ -1128,7 +1128,7 @@ export function createMasterDataErpHandlers(
           return true;
         });
 
-        res.setHeader('Cache-Control', 'private, max-age=30');
+        res.setHeader('Cache-Control', 'no-store');
         res.status(200).json({
           source: snap.source,
           region: regionFilter ?? 'ALL',

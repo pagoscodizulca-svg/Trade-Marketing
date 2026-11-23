@@ -6,7 +6,11 @@ import type {
 import { getCaracasTodayYmd } from '../utils/caracasWeekCycle';
 import { DEFAULT_GEOFENCE_RADIUS_METERS } from '../utils/geofenceHaversine';
 import type { VerifiedAuthProfile } from './authService';
-import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+import {
+  getAuthenticatedSessionToken,
+  getSupabaseClient,
+  isSupabaseConfigured,
+} from './supabaseClient';
 
 export interface PortalPdvGeofenceRef {
   id: string;
@@ -115,7 +119,8 @@ export async function fetchPortalRutaRecords(params: {
 
 /**
  * Registra Check-in (`EN_CURSO`) o Check-out (`COMPLETADA`) en `/portal/ruta`
- * mediante la RPC transaccional idempotente `public.registrar_avance_ruta_promotora`.
+ * mediante la RPC transaccional idempotente `public.registrar_avance_ruta_promotora`,
+ * con respaldo directo seguro por RLS sobre `public.rutas_promotoras` cuando la RPC aún no existe.
  */
 export async function registerPromotoraRouteStep(
   rutaId: string,
@@ -132,18 +137,67 @@ export async function registerPromotoraRouteStep(
     p_accion: accion,
   });
 
-  if (error || !data) {
-    throw new Error(
-      error?.message || 'No se pudo registrar el avance operativo de la degustación.'
-    );
+  if (!error && data) {
+    return data as RutaPromotoraRecord;
   }
 
-  return data as RutaPromotoraRecord;
+  if (error && isRpcMissingError(error)) {
+    const nowIso = new Date().toISOString();
+    const patchPayload: Record<string, unknown> =
+      accion === 'CHECKIN'
+        ? { estado_ruta: 'EN_CURSO', checkin_at: nowIso, updated_at: nowIso }
+        : { estado_ruta: 'COMPLETADA', checkout_at: nowIso, updated_at: nowIso };
+
+    const upd = await client
+      .from('rutas_promotoras')
+      .update(patchPayload)
+      .eq('id', cleanId)
+      .select('*');
+
+    if (upd.error) {
+      console.error('[registerPromotoraRouteStep] Error en UPDATE directo rutas_promotoras:', {
+        code: upd.error.code,
+        message: upd.error.message,
+        hint: upd.error.hint,
+        rutaId: cleanId,
+        accion,
+      });
+      throw new Error(
+        upd.error.code === '42501'
+          ? 'Permiso denegado por RLS al registrar tu avance de ruta. Verifica tu sesión.'
+          : upd.error.message || 'No se pudo registrar el avance operativo de la degustación.'
+      );
+    }
+
+    const rows = Array.isArray(upd.data) ? upd.data : upd.data ? [upd.data] : [];
+    if (rows.length === 0) {
+      console.error('[registerPromotoraRouteStep] 0 filas afectadas en rutas_promotoras (RLS)', {
+        rutaId: cleanId,
+        accion,
+      });
+      throw new Error(
+        'No se registró el avance en Supabase (0 filas afectadas). Verifica que la degustación esté asignada a tu usuario.'
+      );
+    }
+
+    return rows[0] as RutaPromotoraRecord;
+  }
+
+  console.error('[registerPromotoraRouteStep] Error en RPC registrar_avance_ruta_promotora:', {
+    code: error?.code,
+    message: error?.message,
+    hint: error?.hint,
+    rutaId: cleanId,
+    accion,
+  });
+  throw new Error(
+    error?.message || 'No se pudo registrar el avance operativo de la degustación.'
+  );
 }
 
 /**
  * Consulta las geocercas maestras (`latitud`, `longitud`, `radio_geocerca_m`) de `public.clientes`
- * dentro de la sucursal autorizada por RLS.
+ * dentro de la sucursal autorizada por RLS, con respaldo automático al endpoint ERP `/api/maestros/clientes`.
  */
 export async function fetchPortalPdvGeofences(): Promise<PortalPdvGeofenceRef[]> {
   if (!isSupabaseConfigured) return [];
@@ -154,14 +208,33 @@ export async function fetchPortalPdvGeofences(): Promise<PortalPdvGeofenceRef[]>
     .eq('activo', true)
     .limit(2000);
 
-  if (error || !Array.isArray(data)) {
-    return [];
+  let sourceRows: Record<string, unknown>[] = [];
+  if (!error && Array.isArray(data)) {
+    sourceRows = data as Record<string, unknown>[];
+  } else if (typeof window !== 'undefined' && typeof fetch === 'function') {
+    const token = await getAuthenticatedSessionToken(client).catch(() => null);
+    if (token) {
+      try {
+        const res = await fetch('/api/maestros/clientes?soloActivos=true', {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const parsed = (await res.json()) as { data?: unknown };
+          if (Array.isArray(parsed?.data)) {
+            sourceRows = parsed.data as Record<string, unknown>[];
+          }
+        }
+      } catch {
+        // Sin conectividad con el endpoint ERP local
+      }
+    }
   }
 
-  return data.map((raw: Record<string, unknown>) => ({
+  return sourceRows.map((raw: Record<string, unknown>) => ({
     id: String(raw.id || ''),
     codigoCliente: String(raw.codigo_cliente || '').trim(),
-    nombreComercial: String(raw.nombre_comercial || '').trim(),
+    nombreComercial: String(raw.nombre_comercial || raw.razon_social || '').trim(),
     latitud:
       raw.latitud !== null && raw.latitud !== undefined && Number.isFinite(Number(raw.latitud))
         ? Number(raw.latitud)
@@ -210,7 +283,8 @@ function isRpcMissingError(err: { code?: string; message?: string } | null): boo
     code === 'PGRST202' ||
     code === '42883' ||
     msg.includes('could not find the function') ||
-    msg.includes('rpc_registrar_ejecucion_ruta_promotora')
+    msg.includes('rpc_registrar_ejecucion_ruta_promotora') ||
+    msg.includes('registrar_avance_ruta_promotora')
   );
 }
 

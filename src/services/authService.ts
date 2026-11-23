@@ -477,6 +477,17 @@ export async function findActivePromotoraInStaff(
  * Resuelve el perfil verificado desde la fuente única `public.profiles` (con respaldo a
  * `public.staff` para promotoras activas en `/portal`).
  */
+let profilesHasMustChangePasswordCol: boolean | null = null;
+
+interface IamProfileRow {
+  role?: unknown;
+  sucursal?: unknown;
+  region_id?: unknown;
+  full_name?: unknown;
+  is_active?: boolean | null;
+  must_change_password?: boolean | null;
+}
+
 export async function resolveVerifiedProfileWithStaffFallback(
   session: Session | null
 ): Promise<VerifiedAuthProfile | null> {
@@ -487,11 +498,22 @@ export async function resolveVerifiedProfileWithStaffFallback(
 
   try {
     const client = getSupabaseClient();
-    const { data: iamProfile, error: iamError } = await client
+    let iamProfile: IamProfileRow | null = null;
+    let iamError: { code?: string; message?: string } | null = null;
+
+    // Consultar `select('*')` evita HTTP 400 (42703) si columnas opcionales como `must_change_password` aún no existen
+    const res = await client
       .from('profiles')
-      .select('role, sucursal, region_id, full_name, is_active, must_change_password')
+      .select('*')
       .eq('id', base.userId)
       .maybeSingle();
+    iamProfile = (res.data as IamProfileRow | null) ?? null;
+    iamError = res.error;
+    if (!iamError && iamProfile && 'must_change_password' in iamProfile) {
+      profilesHasMustChangePasswordCol = true;
+    } else if (!iamError) {
+      profilesHasMustChangePasswordCol = false;
+    }
 
     if (!iamError && iamProfile) {
       if (iamProfile.is_active === false) {

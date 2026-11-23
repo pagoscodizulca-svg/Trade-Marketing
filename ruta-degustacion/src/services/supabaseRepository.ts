@@ -6,6 +6,12 @@ import { IMMEDIATE_TIMEOUT_MS, createSyncEngine, registerBackgroundSync } from '
 import { createRutaSupabaseClient, getRutaSupabaseClient } from './supabaseAuth';
 import { applyPayload, construirCuerpoServidor, type OutboxPayload } from '../lib/deliveryOps';
 import {
+  buildSafeEvidenceStoragePath,
+  EVIDENCIA_BUCKET_DEFAULT,
+  isSafeStorageObjectPath,
+  validateEvidenceImageFile,
+} from '../lib/evidenceValidation';
+import {
   enqueueOperation,
   getAllDeliveries,
   getMeta,
@@ -42,19 +48,50 @@ function normalizarFila(r: Record<string, unknown>): Entrega {
   const sucursal = (OPERATIVE_SUCURSALES as readonly string[]).includes(rawSuc)
     ? (rawSuc as OperativeSucursal)
     : undefined;
+  const completado = r.completado === true;
+  const horaSalida = typeof r.hora_salida === 'string' && r.hora_salida ? r.hora_salida : null;
+  const horaSalidaReal =
+    typeof r.hora_salida_real === 'string' && r.hora_salida_real ? r.hora_salida_real : null;
+  const horaEntrega =
+    typeof r.hora_entrega === 'string' && r.hora_entrega ? r.hora_entrega : null;
+  const horaLlegada =
+    typeof r.hora_llegada === 'string' && r.hora_llegada ? r.hora_llegada : horaEntrega;
+  const rawEstado = txt(r.estado_logistico).trim().toUpperCase();
+  const estadoLogistico: Entrega['estado_logistico'] =
+    rawEstado === 'ENTREGADO' || completado
+      ? 'ENTREGADO'
+      : rawEstado === 'EN_RUTA' || Boolean(horaSalida)
+        ? 'EN_RUTA'
+        : 'PENDIENTE';
   return {
     id: txt(r.id),
     fecha: txt(r.fecha),
     turno: txt(r.turno) as Entrega['turno'],
     numero_grupo_turno: txt(r.numero_grupo_turno),
     cliente: txt(r.cliente),
-    producto: txt(r.producto) as Entrega['producto'],
+    producto: txt(r.producto),
     vendedor: txt(r.vendedor),
     promotora: txt(r.promotora),
     stand_entregado: r.stand_entregado === true,
     producto_entregado: r.producto_entregado === true,
-    completado: r.completado === true,
-    hora_entrega: typeof r.hora_entrega === 'string' && r.hora_entrega ? r.hora_entrega : null,
+    completado,
+    estado_logistico: estadoLogistico,
+    hora_salida: horaSalida,
+    hora_salida_real: horaSalidaReal,
+    hora_llegada: horaLlegada,
+    hora_entrega: horaEntrega,
+    evidencia_path:
+      typeof r.evidencia_path === 'string' && r.evidencia_path ? r.evidencia_path : null,
+    evidencia_bucket:
+      typeof r.evidencia_bucket === 'string' && r.evidencia_bucket
+        ? r.evidencia_bucket
+        : EVIDENCIA_BUCKET_DEFAULT,
+    evidencia_subida_at:
+      typeof r.evidencia_subida_at === 'string' && r.evidencia_subida_at
+        ? r.evidencia_subida_at
+        : null,
+    cronograma_id:
+      typeof r.cronograma_id === 'string' && r.cronograma_id ? r.cronograma_id : null,
     notas_chofer: txt(r.notas_chofer),
     ...(sucursal ? { sucursal } : {}),
   };
@@ -377,8 +414,24 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       // Sin almacenamiento local: escritura directa (requiere red); se revierte si falla.
       try {
         const client = await getClient();
-        const { error } = await client.from(TABLE).update(construirCuerpoServidor(payload, createdAtIso, false)).eq('id', id);
-        if (error) throw new Error(error.message);
+        await syncSessionToken(client);
+        let res = await client
+          .from(TABLE)
+          .update(construirCuerpoServidor(payload, createdAtIso, true))
+          .eq('id', id)
+          .select('id');
+        if (res.error && /PGRST204|42703|does not exist/i.test(`${res.error.code || ''} ${res.error.message || ''}`)) {
+          res = await client
+            .from(TABLE)
+            .update(construirCuerpoServidor(payload, createdAtIso, false))
+            .eq('id', id)
+            .select('id');
+        }
+        if (res.error) throw new Error(res.error.message);
+        const rows = Array.isArray(res.data) ? res.data : res.data ? [res.data] : [];
+        if (rows.length === 0) {
+          throw new Error('0 filas actualizadas en entregas_degustacion (verifica permisos RLS).');
+        }
       } catch (err) {
         store.setEntregas(anterior);
         throw new Error(`No se pudo guardar: ${mensajeDe(err)}`);
@@ -464,10 +517,145 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
           completado: completar,
           stand_entregado: completar,
           producto_entregado: completar,
+          estado_logistico: completar ? 'ENTREGADO' : actual.hora_salida ? 'EN_RUTA' : 'PENDIENTE',
+          hora_llegada_real: completar ? ahoraIso : null,
           hora_entrega_real: completar ? ahoraIso : null,
         },
         ahoraIso,
       );
+    },
+    async confirmarSalida(id) {
+      const actual = store.getEntregas().find((e) => e.id === id);
+      if (!actual) return;
+      const ahoraIso = new Date().toISOString();
+      await aplicarAccion(
+        id,
+        {
+          estado_logistico: actual.completado ? 'ENTREGADO' : 'EN_RUTA',
+          hora_salida_real: ahoraIso,
+        },
+        ahoraIso,
+      );
+    },
+    async confirmarLlegada(id) {
+      const actual = store.getEntregas().find((e) => e.id === id);
+      if (!actual) return;
+      const ahoraIso = new Date().toISOString();
+      await aplicarAccion(
+        id,
+        {
+          estado_logistico: 'ENTREGADO',
+          completado: true,
+          stand_entregado: true,
+          producto_entregado: true,
+          hora_llegada_real: ahoraIso,
+          hora_entrega_real: ahoraIso,
+        },
+        ahoraIso,
+      );
+    },
+    async subirEvidencia(id, file) {
+      const validation = validateEvidenceImageFile(file);
+      if (!validation.ok) {
+        throw new Error(validation.error);
+      }
+      if (store.getState().offline) {
+        throw new Error(MENSAJE_REQUIERE_CONEXION);
+      }
+
+      const objectPath = buildSafeEvidenceStoragePath(id, validation.ext);
+      const bucket = EVIDENCIA_BUCKET_DEFAULT;
+      const nowIso = new Date().toISOString();
+      const client = await getClient();
+      await syncSessionToken(client);
+
+      const uploadRes = await client.storage.from(bucket).upload(objectPath, file, {
+        contentType: validation.mime,
+        upsert: false,
+        cacheControl: '3600',
+      });
+
+      if (uploadRes.error) {
+        console.error('[RutaDegustación] Error subiendo evidencia a Storage:', {
+          message: uploadRes.error.message,
+          bucket,
+          objectPath,
+        });
+        throw new Error(
+          uploadRes.error.message ||
+            'No se pudo subir la evidencia fotográfica al bucket de Supabase Storage.'
+        );
+      }
+
+      const updRes = await client
+        .from(TABLE)
+        .update({
+          evidencia_path: objectPath,
+          evidencia_bucket: bucket,
+          evidencia_subida_at: nowIso,
+          actualizado_chofer_at: nowIso,
+        })
+        .eq('id', id)
+        .select('id, evidencia_path, evidencia_bucket, evidencia_subida_at');
+
+      const updatedRows = Array.isArray(updRes.data)
+        ? updRes.data
+        : updRes.data
+          ? [updRes.data]
+          : [];
+
+      if (updRes.error || updatedRows.length === 0) {
+        // Rollback inmediato en Storage para no dejar archivos huérfanos
+        await client.storage.from(bucket).remove([objectPath]).catch(() => undefined);
+        console.error('[RutaDegustación] Error vinculando evidencia en entregas_degustacion (rollback ejecutado):', {
+          code: updRes.error?.code,
+          message: updRes.error?.message,
+          hint: updRes.error?.hint,
+          id,
+          rowsCount: updatedRows.length,
+        });
+        throw new Error(
+          updRes.error?.message ||
+            'No se pudo registrar la referencia de la evidencia en Supabase (0 filas afectadas). Verifica permisos RLS.'
+        );
+      }
+
+      const evidencePayload: OutboxPayload = {
+        evidencia_path: objectPath,
+        evidencia_bucket: bucket,
+        evidencia_subida_at: nowIso,
+      };
+      store.setEntregas(
+        store.getEntregas().map((e) => (e.id === id ? applyPayload(e, evidencePayload) : e))
+      );
+      if (idbOk) {
+        await serial(async () => {
+          await patchDelivery(id, (cur) => applyPayload(cur, evidencePayload));
+        }).catch(() => undefined);
+      }
+
+      const signed = await client.storage.from(bucket).createSignedUrl(objectPath, 3600);
+      return {
+        path: objectPath,
+        bucket,
+        signedUrl: signed.data?.signedUrl ?? null,
+      };
+    },
+    async obtenerUrlEvidencia(path, bucket) {
+      if (!isSafeStorageObjectPath(path)) return null;
+      try {
+        const client = await getClient();
+        await syncSessionToken(client);
+        const targetBucket =
+          typeof bucket === 'string' && bucket.trim() ? bucket.trim() : EVIDENCIA_BUCKET_DEFAULT;
+        const { data, error } = await client.storage
+          .from(targetBucket)
+          .createSignedUrl(path, 3600);
+        if (error || !data?.signedUrl) return null;
+        return data.signedUrl;
+      } catch {
+        return null;
+      }
     },
     async setNota(id, nota) {
       await aplicarAccion(id, { notas_chofer: nota }, new Date().toISOString());

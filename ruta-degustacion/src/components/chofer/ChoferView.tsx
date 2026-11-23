@@ -119,6 +119,10 @@ export function ChoferView({ entregas, repo, sync }: ChoferViewProps) {
               <EntregaCard
                 entrega={e}
                 onToggle={(id) => gestionar(() => repo.toggleEntrega(id))}
+                onConfirmarSalida={(id) => gestionar(() => repo.confirmarSalida(id))}
+                onConfirmarLlegada={(id) => gestionar(() => repo.confirmarLlegada(id))}
+                onSubirEvidencia={(id, file) => repo.subirEvidencia(id, file)}
+                onObtenerUrlEvidencia={(path, bucket) => repo.obtenerUrlEvidencia(path, bucket)}
                 onNota={(id, nota) => gestionar(() => repo.setNota(id, nota))}
               />
             </li>

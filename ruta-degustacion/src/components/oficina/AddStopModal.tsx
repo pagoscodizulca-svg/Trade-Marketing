@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { PRODUCTOS, TURNOS, type Entrega, type Producto, type Turno } from '../../types';
+import { PRODUCTOS, TURNOS, type Entrega, type Turno } from '../../types';
 import { PRODUCTO_LABEL } from '../../utils/format';
 import { Modal } from '../common/Modal';
 
@@ -12,12 +12,30 @@ interface AddStopModalProps {
 const INPUT =
   'w-full min-h-11 rounded-lg border-2 border-zinc-300 px-3 text-base font-semibold focus:outline-none focus:border-ink focus:ring-4 focus:ring-red-200';
 
+const DIAS_SEMANA_ES = ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'] as const;
+
+function normalizeStopDateInput(raw: string): string | null {
+  const clean = raw.trim().toUpperCase();
+  if (/^[A-ZÁÉÍÓÚÑ]+ \d{1,2}$/.test(clean)) {
+    return clean.replace(/(\d+)$/, (n) => n.padStart(2, '0'));
+  }
+  const isoMatch = clean.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const dt = new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
+    if (!Number.isNaN(dt.getTime())) {
+      const dayName = DIAS_SEMANA_ES[dt.getDay()] ?? 'DÍA';
+      return `${dayName} ${isoMatch[3]}`;
+    }
+  }
+  return null;
+}
+
 export function AddStopModal({ dias, onClose, onSave }: AddStopModalProps) {
   const [fecha, setFecha] = useState('');
   const [turno, setTurno] = useState<Turno | ''>('');
   const [grupo, setGrupo] = useState('');
   const [cliente, setCliente] = useState('');
-  const [producto, setProducto] = useState<Producto | ''>('');
+  const [producto, setProducto] = useState<string>('');
   const [vendedor, setVendedor] = useState('');
   const [promotora, setPromotora] = useState('');
   const [error, setError] = useState('');
@@ -25,25 +43,28 @@ export function AddStopModal({ dias, onClose, onSave }: AddStopModalProps) {
 
   const submit = async (ev: FormEvent) => {
     ev.preventDefault();
-    const f = fecha.trim().toUpperCase();
-    if (!/^[A-ZÁÉÍÓÚ]+ \d{1,2}$/.test(f)) return setError('La fecha debe tener el formato "JUEVES 12".');
+    const fechaNorm = normalizeStopDateInput(fecha);
+    if (!fechaNorm) {
+      return setError('La fecha debe tener el formato "JUEVES 12" o "YYYY-MM-DD".');
+    }
     if (!turno) return setError('Seleccione el turno.');
     if (!cliente.trim()) return setError('El cliente es obligatorio.');
-    if (!producto) return setError('Seleccione el producto.');
+    if (!producto.trim()) return setError('Seleccione o ingrese el producto.');
     setError('');
     setGuardando(true);
     try {
       await onSave({
-        fecha: f.replace(/(\d+)$/, (n) => n.padStart(2, '0')),
+        fecha: fechaNorm,
         turno,
         numero_grupo_turno: grupo.trim().toUpperCase() || turno,
         cliente: cliente.trim().toUpperCase(),
-        producto,
+        producto: producto.trim().toUpperCase(),
         vendedor: vendedor.trim().toUpperCase(),
         promotora: promotora.trim().toUpperCase(),
         stand_entregado: false,
         producto_entregado: false,
         completado: false,
+        estado_logistico: 'PENDIENTE',
         hora_entrega: null,
         notas_chofer: '',
       });
@@ -101,14 +122,23 @@ export function AddStopModal({ dias, onClose, onSave }: AddStopModalProps) {
         )}
         {campo(
           'Producto',
-          <select className={INPUT} value={producto} onChange={(e) => setProducto(e.target.value as Producto | '')} name="producto">
-            <option value="">Seleccione…</option>
-            {PRODUCTOS.map((p) => (
-              <option key={p} value={p}>
-                {PRODUCTO_LABEL[p]}
-              </option>
-            ))}
-          </select>,
+          <>
+            <input
+              className={INPUT}
+              list="productos-preset"
+              value={producto}
+              onChange={(e) => setProducto(e.target.value)}
+              placeholder="Ej: MORTADELA, VENCAMPO o producto del catálogo"
+              name="producto"
+            />
+            <datalist id="productos-preset">
+              {PRODUCTOS.map((p) => (
+                <option key={p} value={p}>
+                  {PRODUCTO_LABEL[p]}
+                </option>
+              ))}
+            </datalist>
+          </>,
         )}
         <div className="grid grid-cols-2 gap-3">
           {campo('Vendedor', <input className={INPUT} value={vendedor} onChange={(e) => setVendedor(e.target.value)} name="vendedor" />)}

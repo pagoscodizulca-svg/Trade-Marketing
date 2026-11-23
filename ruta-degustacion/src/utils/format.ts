@@ -1,9 +1,9 @@
 import type { Entrega, Producto } from '../types';
 import { safePct } from './safeMath';
 
-/** Minúsculas sin acentos, para búsquedas y comparaciones tolerantes. */
-export function normalizar(texto: string): string {
-  return texto
+/** Minúsculas sin acentos, tolerante a valores null/undefined, para búsquedas y comparaciones. */
+export function normalizar(texto: string | null | undefined): string {
+  return String(texto ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()

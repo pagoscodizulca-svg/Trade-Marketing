@@ -252,10 +252,54 @@ function createSupabaseAttendanceGateway(
 
   return {
     async lookupStaffProfile(promotoraId: string): Promise<StaffProfileLookupResult | null> {
+      const cleanId = String(promotoraId || '').trim();
+      if (!cleanId) return null;
+
+      // 1. Intentar padrón real de producción `public.promotoras` (ID entero o auth_user_id UUID)
+      const isNumericId = /^\d+$/.test(cleanId);
+      const promotoraQuery = client
+        .from('promotoras')
+        .select('id, nombre_completo, direccion, telefono, correo, activo, categoria, region, auth_user_id');
+      const { data: promData, error: promErr } = isNumericId
+        ? await promotoraQuery.eq('id', Number(cleanId)).maybeSingle()
+        : await promotoraQuery.eq('auth_user_id', cleanId).maybeSingle();
+
+      if (!promErr && promData) {
+        const rawCat = String((promData as { categoria?: unknown }).categoria || '')
+          .trim()
+          .toLowerCase();
+        const isMerchandising = rawCat.includes('merch');
+        const masterProfile: PerfilAsistencia = rawCat.includes('event') ? 'EVENTUAL' : 'FIJA';
+        const regionRaw = String((promData as { region?: unknown }).region || '').trim();
+        const direccion = sanitizeAttendanceText(
+          (promData as { direccion?: unknown }).direccion,
+          180
+        );
+        const isValencia =
+          regionRaw.toLowerCase() === 'valencia' ||
+          /valencia|carabobo|maracay|naguanagua|san diego|guacara/i.test(direccion);
+
+        return {
+          id: String((promData as { id: number | string }).id),
+          name: sanitizeAttendanceText(
+            (promData as { nombre_completo?: unknown }).nombre_completo,
+            160
+          ),
+          email: sanitizeAttendanceText((promData as { correo?: unknown }).correo, 160),
+          assignedStore: isValencia ? 'Valencia' : 'Occidente',
+          address: direccion,
+          sucursal: isValencia ? 'VALENCIA' : 'ZULIA',
+          active: (promData as { activo?: boolean | null }).activo !== false,
+          isMerchandising,
+          masterProfile,
+        };
+      }
+
+      // 2. Respaldo legacy `public.staff` (entornos con tabla `staff` UUID)
       const { data, error } = await client
         .from('staff')
         .select('id, name, role, email, status, sucursal')
-        .eq('id', promotoraId)
+        .eq('id', cleanId)
         .maybeSingle();
 
       if (error || !data) return null;

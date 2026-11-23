@@ -341,6 +341,7 @@ async function fetchCatalogFromBackendApi<T>(
     try {
       res = await fetch(url, {
         method: 'GET',
+        cache: 'no-store',
         headers: {
           Authorization: `Bearer ${bearer}`,
           ...(activeSucursal ? { 'x-sucursal-activa': activeSucursal } : {}),
@@ -975,6 +976,21 @@ export async function obtenerPromotorasMaestras(
   return rows;
 }
 
+function formatPromotoraWriteError(
+  error: { code?: string; message?: string; hint?: string; details?: string } | null | undefined,
+  fallbackMessage: string
+): Error {
+  const code = String(error?.code ?? '').trim().toUpperCase();
+  const message = String(error?.message ?? '').trim();
+  const lower = message.toLowerCase();
+  if (code === '42501' || lower.includes('permission denied') || lower.includes('row-level security')) {
+    return new Error(
+      `Permiso denegado por RLS al guardar en Supabase (${code || '42501'}). Aplica la migración de políticas para authenticated o verifica tu rol.`
+    );
+  }
+  return new Error(message || fallbackMessage);
+}
+
 export async function guardarPromotoraMaestra(
   input: PromotoraMaestraInput,
   customClient?: SupabaseClient | null
@@ -992,14 +1008,40 @@ export async function guardarPromotoraMaestra(
       ? PromotoraCategoriaStrictSchema.parse(input.categoria)
       : 'Fijas';
 
+  const rawId = input.id !== undefined && input.id !== null ? String(input.id).trim() : '';
+  const isUpdate = Boolean(rawId);
+  const isNumericId = isUpdate && /^\d+$/.test(rawId);
+  const eqId: string | number = isNumericId ? Number(rawId) : rawId;
+
   const emailClean = limpiarCeldaTexto(input.email).toLowerCase() || null;
-  const basePayload: Record<string, unknown> = {
+  const telefonoClean = normalizarTelefonoMaestro(input.telefono);
+  const direccionClean = asNullableString(input.direccion ?? input.ciudad);
+
+  // Esquema real de producción (`public.promotoras` ERP: id entero, correo, direccion, telefono, activo, categoria)
+  const erpProdPayload: Record<string, unknown> = {
+    nombre_completo: nombreCompleto,
+    correo: emailClean,
+    telefono: telefonoClean,
+    direccion: direccionClean,
+    activo: input.activo !== false,
+    categoria: validatedCategoria,
+  };
+  const erpProdMinimalPayload: Record<string, unknown> = {
+    nombre_completo: nombreCompleto,
+    correo: emailClean,
+    telefono: telefonoClean,
+    direccion: direccionClean,
+    activo: input.activo !== false,
+  };
+
+  // Esquema normalizado extendido (`email`, `ciudad`, `estado`, `supervisor_id`, `region_id`, `sucursal`)
+  const extendedBasePayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     email: emailClean,
-    telefono: normalizarTelefonoMaestro(input.telefono),
+    telefono: telefonoClean,
     ciudad: asNullableString(input.ciudad),
     estado: asNullableString(input.estado),
-    direccion: asNullableString(input.direccion),
+    direccion: direccionClean,
     supervisor_id: input.supervisor_id ? limpiarCeldaTexto(input.supervisor_id) : null,
     activo: input.activo !== false,
     ...(input.region_id ? { region_id: input.region_id } : {}),
@@ -1007,31 +1049,70 @@ export async function guardarPromotoraMaestra(
   };
 
   const executeWrite = async (payload: Record<string, unknown>) =>
-    input.id
-      ? await client.from('promotoras').update(payload).eq('id', input.id).select('*').single()
-      : await client.from('promotoras').insert(payload).select('*').single();
+    isUpdate
+      ? await client.from('promotoras').update(payload).eq('id', eqId).select('*')
+      : await client.from('promotoras').insert(payload).select('*');
 
-  const categoryPayloadAttempts: Record<string, unknown>[] = [
-    { ...basePayload, categoria: validatedCategoria },
+  const extendedAttempts: Record<string, unknown>[] = [
+    { ...extendedBasePayload, categoria: validatedCategoria },
     {
-      ...basePayload,
+      ...extendedBasePayload,
       tipo: input.tipo ?? formatPromotoraRoleForCategory(validatedCategoria),
     },
-    { ...basePayload, metadata: { categoria: validatedCategoria } },
-    basePayload,
+    { ...extendedBasePayload, metadata: { categoria: validatedCategoria } },
+    extendedBasePayload,
   ];
 
-  let result = await executeWrite(categoryPayloadAttempts[0]!);
-  for (let i = 1; i < categoryPayloadAttempts.length && result.error && isMissingColumnDbError(result.error); i++) {
-    result = await executeWrite(categoryPayloadAttempts[i]!);
+  // Si es actualización sobre ID numérico de producción (o alta sin region_id), intentar primero el esquema real ERP (`correo`)
+  const attempts: Record<string, unknown>[] =
+    isNumericId || (!isUpdate && !input.region_id)
+      ? [erpProdPayload, erpProdMinimalPayload, ...extendedAttempts]
+      : [...extendedAttempts, erpProdPayload, erpProdMinimalPayload];
+
+  let result = await executeWrite(attempts[0]!);
+  for (let i = 1; i < attempts.length && result.error && isMissingColumnDbError(result.error); i++) {
+    result = await executeWrite(attempts[i]!);
   }
 
-  if (result.error || !result.data) {
-    throw new Error(result.error?.message || 'No se pudo guardar la promotora.');
+  if (result.error) {
+    console.error('[guardarPromotoraMaestra] Error guardando en public.promotoras', {
+      code: result.error.code,
+      message: result.error.message,
+      hint: result.error.hint,
+      details: result.error.details,
+      id: rawId || null,
+      operation: isUpdate ? 'UPDATE' : 'INSERT',
+    });
+    throw formatPromotoraWriteError(result.error, 'No se pudo guardar el perfil de la promotora.');
+  }
+
+  const savedRows = Array.isArray(result.data)
+    ? (result.data as Record<string, unknown>[])
+    : result.data
+      ? [result.data as Record<string, unknown>]
+      : [];
+
+  if (savedRows.length === 0) {
+    console.error('[guardarPromotoraMaestra] 0 filas afectadas en public.promotoras (posible bloqueo RLS o ID inexistente)', {
+      id: rawId || null,
+      operation: isUpdate ? 'UPDATE' : 'INSERT',
+    });
+    throw new Error(
+      'No se guardaron los cambios en Supabase (0 filas afectadas). Verifica permisos RLS de UPDATE/INSERT o que el perfil exista.'
+    );
   }
 
   invalidateMasterCatalogCaches();
-  const normalized = normalizePromotoraMasterRow(result.data as Record<string, unknown>);
+  // Invalidar caché snapshot del servidor Express (60s) para que F5 inmediato refleje los cambios
+  if (!customClient) {
+    await fetchCatalogFromBackendApi<PromotoraMaestra>(
+      '/api/maestros/promotoras',
+      { forzarRefresco: '1' },
+      client
+    ).catch(() => undefined);
+  }
+
+  const normalized = normalizePromotoraMasterRow(savedRows[0]!);
   return { ...normalized, categoria: validatedCategoria };
 }
 
@@ -1043,19 +1124,53 @@ export async function cambiarEstadoPromotoraMaestra(
   const client = resolveClient(customClient);
   if (!client) throw new Error('Supabase no está configurado.');
 
+  const rawId = String(id || '').trim();
+  const eqId: string | number = /^\d+$/.test(rawId) ? Number(rawId) : rawId;
+
   const { data, error } = await client
     .from('promotoras')
     .update({ activo })
-    .eq('id', id)
-    .select('*')
-    .single();
+    .eq('id', eqId)
+    .select('*');
 
-  if (error || !data) {
-    throw new Error(error?.message || 'No se pudo actualizar el estado de la promotora.');
+  if (error) {
+    console.error('[cambiarEstadoPromotoraMaestra] Error actualizando estado en public.promotoras', {
+      code: error.code,
+      message: error.message,
+      hint: error.hint,
+      details: error.details,
+      id: rawId,
+      activo,
+    });
+    throw formatPromotoraWriteError(error, 'No se pudo actualizar el estado de la promotora.');
+  }
+
+  const rows = Array.isArray(data)
+    ? (data as Record<string, unknown>[])
+    : data
+      ? [data as Record<string, unknown>]
+      : [];
+
+  if (rows.length === 0) {
+    console.error('[cambiarEstadoPromotoraMaestra] 0 filas afectadas (posible bloqueo RLS o ID inexistente)', {
+      id: rawId,
+      activo,
+    });
+    throw new Error(
+      'No se actualizó el estado de la promotora en Supabase (0 filas afectadas). Verifica permisos RLS.'
+    );
   }
 
   invalidateMasterCatalogCaches();
-  return normalizePromotoraMasterRow(data as Record<string, unknown>);
+  if (!customClient) {
+    await fetchCatalogFromBackendApi<PromotoraMaestra>(
+      '/api/maestros/promotoras',
+      { forzarRefresco: '1' },
+      client
+    ).catch(() => undefined);
+  }
+
+  return normalizePromotoraMasterRow(rows[0]!);
 }
 
 export async function reasignarRegionPromotora(

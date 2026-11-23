@@ -28,7 +28,11 @@ import {
   getCachedAccessToken,
   getSupabaseRealtimeClient,
 } from './supabaseClient';
-import { obtenerPromotorasMaestras } from './masterCatalogSyncService';
+import {
+  cambiarEstadoPromotoraMaestra,
+  guardarPromotoraMaestra,
+  obtenerPromotorasMaestras,
+} from './masterCatalogSyncService';
 import {
   DEFAULT_FDV_RENDER_API_URL,
   fetchDegustacionSurveysViaSdk,
@@ -204,9 +208,15 @@ export interface RawSupabaseInventory {
   initialQuantity: number | string | null;
   finalQuantity: number | string | null;
   degustations: number | string | null;
+  sales_generated?: number | string | null;
   comments?: string | null;
   creatorId?: string | null;
   promoter?: string | null;
+  promotora_id?: string | null;
+  auth_user_id?: string | null;
+  region?: string | null;
+  zona?: string | null;
+  cronograma_id?: string | null;
   created_at?: string;
 }
 
@@ -266,6 +276,8 @@ export interface InventorySamplingRecord {
   isoDate: string;
   storeName: string;
   zone: string;
+  region?: 'Occidente' | 'Valencia';
+  promotoraId?: string;
   promotora: string;
   creatorEmail: string;
   productName: string;
@@ -1023,15 +1035,10 @@ async function fetchCronogramaDegustacionesSafe(): Promise<CronogramaDegustacion
   }
 }
 
-let asistenciaTablesSupport: boolean | null = null;
-
 async function fetchAsistenciaEvidenciasSafe(): Promise<{
   jornadas: AsistenciaJornadaDbRow[];
   evidencias: AsistenciaEvidenciaDbRow[];
 }> {
-  if (asistenciaTablesSupport === false) {
-    return { jornadas: [], evidencias: [] };
-  }
   try {
     const client = getSupabaseRealtimeClient();
     if (!client) return { jornadas: [], evidencias: [] };
@@ -1050,26 +1057,10 @@ async function fetchAsistenciaEvidenciasSafe(): Promise<{
     ]);
 
     if (jornadasRes.error) {
-      if (
-        isMissingTablePostgrestError(
-          jornadasRes.status || jornadasRes.error.code || '',
-          jornadasRes.error.message
-        )
-      ) {
-        asistenciaTablesSupport = false;
-      }
       return { jornadas: [], evidencias: [] };
     }
 
     if (evidenciasRes.error) {
-      if (
-        isMissingTablePostgrestError(
-          evidenciasRes.status || evidenciasRes.error.code || '',
-          evidenciasRes.error.message
-        )
-      ) {
-        asistenciaTablesSupport = false;
-      }
       return {
         jornadas: Array.isArray(jornadasRes.data)
           ? (jornadasRes.data as AsistenciaJornadaDbRow[])
@@ -1078,7 +1069,6 @@ async function fetchAsistenciaEvidenciasSafe(): Promise<{
       };
     }
 
-    asistenciaTablesSupport = true;
     return {
       jornadas: Array.isArray(jornadasRes.data)
         ? (jornadasRes.data as AsistenciaJornadaDbRow[])
@@ -1131,9 +1121,21 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     supabaseGet<RawSupabaseInventory[]>('inventory?select=*&order=date.desc&limit=1000').catch(
       () => [] as RawSupabaseInventory[]
     ),
-    fetchDegustacionSurveysViaSdk(),
+    fetchDegustacionSurveysViaSdk().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err ?? '');
+      if (isMissingTablePostgrestError('', msg)) {
+        return [] as RawSupabaseSurvey[];
+      }
+      throw err;
+    }),
     fetchNonDegustacionSurveysViaSdk(undefined, {
       includeConsumerSurveys: FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS,
+    }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err ?? '');
+      if (isMissingTablePostgrestError('', msg)) {
+        return [] as RawSupabaseSurvey[];
+      }
+      throw err;
     }),
     Promise.race([
       renderReconciliationPromise,
@@ -1809,6 +1811,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
           storeName,
           zone,
           productFocus: productName,
+          selectedProducts:
+            Array.isArray(cd.productos) && cd.productos.length > 0 ? cd.productos : [productName],
           fillProductSelection: supplies.fillProductSelection,
           fillQuantityInput: String(qty),
           promotoraId: resolvedPromotoraId,
@@ -1909,6 +1913,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         storeName,
         zone,
         productFocus: productName,
+        selectedProducts:
+          Array.isArray(cd.productos) && cd.productos.length > 0 ? cd.productos : [productName],
         fillProductSelection: supplies.fillProductSelection,
         fillQuantityInput: String(qty),
         promotoraId: resolvedPromotoraId,
@@ -2322,10 +2328,22 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
   });
 
   // --------------------------------------------------------------------------
-  // 4. INVENTARIO Y DEGUSTACIÓN (desde tabla `inventory` - SOLO PERSONAL ACTIVO)
+  // 4. INVENTARIO Y DEGUSTACIÓN (desde tabla `inventory` - PERSONAL ACTIVO + PORTAL)
   // --------------------------------------------------------------------------
+  const staffByIdMap = new Map<string, StaffMemberRecord>();
+  staffMembers.forEach((sm) => {
+    staffByIdMap.set(String(sm.id), sm);
+    if (sm.authUserId) staffByIdMap.set(String(sm.authUserId), sm);
+  });
+
   const cleanRawInventory = [...rawInventory]
-    .filter((row) => !isSyntheticPriceOrInventoryRow(row) && resolveActiveMember(row.promoter, row.creatorId) !== null)
+    .filter((row) => {
+      if (isSyntheticPriceOrInventoryRow(row)) return false;
+      if (resolveActiveMember(row.promoter, row.creatorId) !== null) return true;
+      if (row.promotora_id && staffByIdMap.has(String(row.promotora_id))) return true;
+      if (row.auth_user_id && String(row.promoter || '').trim().length > 0) return true;
+      return false;
+    })
     .sort((a, b) => toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at));
 
   const inventorySampling: InventorySamplingRecord[] = cleanRawInventory.map((inv, idx) => {
@@ -2344,11 +2362,17 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         : Number(Math.max(0, parsedRawFin).toFixed(2));
 
     const rawDiff = Number(Math.max(0, init - fin).toFixed(2));
-    // Resultado (ventas generadas / rotación neta) = Inicial - Final - Muestras degustadas
+    const explicitSales =
+      inv.sales_generated !== undefined && inv.sales_generated !== null && inv.sales_generated !== ''
+        ? Number(inv.sales_generated)
+        : null;
+    // Resultado (ventas generadas / rotación neta) = sales_generated explícito o Inicial - Final - Muestras degustadas
     const salesGenerated =
-      samples > 0 && rawDiff >= samples
-        ? Number((rawDiff - samples).toFixed(2))
-        : Math.max(0, rawDiff);
+      explicitSales !== null && Number.isFinite(explicitSales) && explicitSales >= 0
+        ? Number(explicitSales.toFixed(2))
+        : samples > 0 && rawDiff >= samples
+          ? Number((rawDiff - samples).toFixed(2))
+          : Math.max(0, rawDiff);
 
     const rotationPercent = init > 0 ? Math.round(((init - fin) / init) * 100) : 0;
     const conversionRate =
@@ -2368,9 +2392,26 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
         ? 'Kg'
         : 'Unid/Kg';
 
-    const activeMember = resolveActiveMember(inv.promoter, inv.creatorId);
-    const promoterName = activeMember ? activeMember.name : resolvePromoterNameFromRaw(inv.promoter, inv.creatorId, activeStaffByKey);
-    const promoterZone = activeMember?.address || resolvePromoterZone(promoterName, staffMembers);
+    const activeMember =
+      resolveActiveMember(inv.promoter, inv.creatorId) ||
+      (inv.promotora_id ? staffByIdMap.get(String(inv.promotora_id)) || null : null) ||
+      (inv.auth_user_id ? staffByIdMap.get(String(inv.auth_user_id)) || null : null);
+    const promoterName = activeMember
+      ? activeMember.name
+      : resolvePromoterNameFromRaw(inv.promoter, inv.creatorId, activeStaffByKey);
+    const promoterZone =
+      String(inv.zona || '').trim() ||
+      activeMember?.address ||
+      resolvePromoterZone(promoterName, staffMembers);
+    const rawRegion = String(inv.region || '').trim().toLowerCase();
+    const resolvedRegion: 'Occidente' | 'Valencia' =
+      rawRegion === 'valencia' || rawRegion === 'centro'
+        ? 'Valencia'
+        : rawRegion === 'occidente' || rawRegion === 'zulia'
+          ? 'Occidente'
+          : activeMember?.region === 'Valencia'
+            ? 'Valencia'
+            : 'Occidente';
     const dateIso = inv.date || inv.created_at || '';
 
     return {
@@ -2380,6 +2421,8 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
       isoDate: dateIso,
       storeName: String(inv.store || 'Punto de Venta').trim(),
       zone: promoterZone,
+      region: resolvedRegion,
+      promotoraId: activeMember?.id || (inv.promotora_id ? String(inv.promotora_id) : undefined),
       promotora: promoterName,
       creatorEmail: activeMember?.email || String(inv.creatorId || '').trim(),
       productName,
@@ -3922,6 +3965,14 @@ export async function deleteSupabaseMerchandisingRecord(surveyId: string): Promi
   }
 }
 
+function mapStaffCategoryToPromotoraCategoria(
+  category: StaffCategory
+): 'Fijas' | 'Eventuales' | 'Merchandising' {
+  if (category === 'merchandising') return 'Merchandising';
+  if (category === 'eventual') return 'Eventuales';
+  return 'Fijas';
+}
+
 export async function saveSupabaseStaffMember(params: {
   id?: string;
   name: string;
@@ -3935,46 +3986,97 @@ export async function saveSupabaseStaffMember(params: {
   password?: string;
   photoUrl?: string;
 }): Promise<{ id: string }> {
-  const isExistingRow = Boolean(params.id && !params.id.startsWith('stf_'));
+  const cleanId = String(params.id || '').trim();
+  const isExistingRow = Boolean(cleanId && !cleanId.startsWith('stf_'));
+  const isNumericPromotoraId = isExistingRow && /^\d+$/.test(cleanId);
   const cleanPassword = (params.password || '').trim();
   if (!cleanPassword && !isExistingRow) {
     throw new Error('Debe definir una contraseña inicial (mínimo 8 caracteres) para aprovisionar la cuenta en Supabase Auth.');
   }
+
+  const persistInPromotorasCatalog = async (): Promise<{ id: string }> => {
+    const saved = await guardarPromotoraMaestra({
+      id: isExistingRow ? cleanId : undefined,
+      nombre_completo: String(params.name || '').trim(),
+      email: String(params.email || '').trim().toLowerCase() || null,
+      telefono: String(params.phone || '').trim() || null,
+      direccion: String(params.address || '').trim() || null,
+      ciudad: String(params.address || '').trim() || null,
+      categoria: mapStaffCategoryToPromotoraCategoria(params.category),
+      activo: params.status === 'Activo',
+    });
+    return { id: String(saved.id) };
+  };
+
+  // Las tarjetas reales del padrón provienen de `public.promotoras` (IDs numéricos):
+  // actualizar directamente en `public.promotoras` evitando llamadas 404 a `public.staff`.
+  if (isNumericPromotoraId) {
+    return persistInPromotorasCatalog();
+  }
+
   // Seguridad Zero Trust: jamás persistir contraseñas en texto plano dentro de public.staff.status
   const statusPayload: Record<string, unknown> = {
     status: params.status,
     category: params.category,
-    phone: params.phone.trim(),
-    address: params.address.trim(),
-    assignedLocation: params.assignedStore.trim(),
+    phone: String(params.phone || '').trim(),
+    address: String(params.address || '').trim(),
+    assignedLocation: String(params.assignedStore || '').trim(),
     ...(params.photoUrl ? { photoUrl: params.photoUrl } : {}),
   };
 
   const bodyPayload = {
-    name: params.name.trim(),
-    role: params.category === 'merchandising' ? 'Promotor Merchandising' : params.role.trim() || 'Promotora',
-    email: params.email.trim(),
+    name: String(params.name || '').trim(),
+    role: params.category === 'merchandising' ? 'Promotor Merchandising' : String(params.role || '').trim() || 'Promotora',
+    email: String(params.email || '').trim(),
     status: JSON.stringify(statusPayload),
   };
 
-  const isExistingSupabaseRow = isExistingRow;
-  const endpoint = isExistingSupabaseRow
-    ? `${SUPABASE_REST_URL}/staff?id=eq.${encodeURIComponent(params.id!)}`
+  const endpoint = isExistingRow
+    ? `${SUPABASE_REST_URL}/staff?id=eq.${encodeURIComponent(cleanId)}`
     : `${SUPABASE_REST_URL}/staff`;
 
-  const res = await fetch(endpoint, {
-    method: isExistingSupabaseRow ? 'PATCH' : 'POST',
+  const res = await supabaseFetch(endpoint, {
+    method: isExistingRow ? 'PATCH' : 'POST',
     headers: supabaseHeaders({ Prefer: 'return=representation' }),
     body: JSON.stringify(bodyPayload),
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`No se pudo guardar el perfil de personal en Supabase (${res.status}): ${text}`);
+    if (res.status === 404 || isMissingTablePostgrestError(res.status, text)) {
+      return persistInPromotorasCatalog();
+    }
+    console.error('[saveSupabaseStaffMember] Error guardando en public.staff', {
+      status: res.status,
+      body: text,
+      id: cleanId || null,
+    });
+    throw new Error(
+      res.status === 403 || /42501|row-level security|permission denied/i.test(text)
+        ? 'Permiso denegado por RLS al guardar el perfil en Supabase. Verifica tu rol y políticas.'
+        : `No se pudo guardar el perfil de personal en Supabase (${res.status}): ${text}`
+    );
   }
 
   const rows = (await res.json().catch(() => [])) as Array<{ id?: string }>;
-  const savedId = String(rows?.[0]?.id || params.id || '').trim();
+  if (!Array.isArray(rows) || rows.length === 0) {
+    // Si la tabla `staff` devolvió 0 filas pero el registro existe en `promotoras`, intentar respaldo explícito
+    if (isExistingRow) {
+      try {
+        return await persistInPromotorasCatalog();
+      } catch {
+        // Reportar error real de 0 filas afectadas
+      }
+    }
+    console.error('[saveSupabaseStaffMember] 0 filas afectadas al guardar en public.staff (posible RLS)', {
+      id: cleanId || null,
+    });
+    throw new Error(
+      'No se guardaron los cambios en Supabase (0 filas afectadas). Verifica permisos RLS o que el perfil exista.'
+    );
+  }
+
+  const savedId = String(rows[0]?.id || cleanId || '').trim();
   return { id: savedId };
 }
 
@@ -3998,13 +4100,23 @@ export async function updateSupabaseStaffPhoto(
 }
 
 export async function deleteSupabaseStaffMember(staffId: string, staffName?: string): Promise<void> {
-  if (staffId && !staffId.startsWith('stf_')) {
-    const res = await supabaseFetch(`${SUPABASE_REST_URL}/staff?id=eq.${encodeURIComponent(staffId)}`, {
+  const cleanId = String(staffId || '').trim();
+  if (/^\d+$/.test(cleanId)) {
+    await cambiarEstadoPromotoraMaestra(cleanId, false);
+    return;
+  }
+
+  if (cleanId && !cleanId.startsWith('stf_')) {
+    const res = await supabaseFetch(`${SUPABASE_REST_URL}/staff?id=eq.${encodeURIComponent(cleanId)}`, {
       method: 'DELETE',
       headers: supabaseHeaders({ Prefer: 'return=minimal' }),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      if (res.status === 404 || isMissingTablePostgrestError(res.status, text)) {
+        await cambiarEstadoPromotoraMaestra(cleanId, false);
+        return;
+      }
       throw new Error(`No se pudo eliminar el perfil de personal en Supabase (${res.status}): ${text}`);
     }
   }

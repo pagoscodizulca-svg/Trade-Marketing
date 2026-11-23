@@ -347,7 +347,9 @@ export interface AppContextType {
     dayLabel: string;
     date?: string;
     promotoraName?: string;
+    promotoraEmail?: string;
     sellerName?: string;
+    notes?: string;
   }) => Promise<BatchFillClientsResult>;
   upsertVisitFromApprovedTasting: (
     params: UpsertVisitFromTastingParams
@@ -472,6 +474,10 @@ function sanitizeVisitsAgainstActiveStaff(
 
     const canonicalActive = canonicalizeActivePromoterOrNull(rawProm, undefined, activeStaff);
     if (!canonicalActive) {
+      // Preservar degustaciones ya persistidas en BD (`cronograma_degustaciones`) para evitar pérdida tras F5
+      if (v.cronogramaId) {
+        result.push(v);
+      }
       continue;
     }
 
@@ -940,6 +946,42 @@ export const AppProvider: React.FC<{
     scopeKey: `${verifiedProfile?.userId ?? 'local'}:${activeRegionScope ?? activeSucursal ?? 'ALL'}`,
     clientesSnapshot: rawMasterData.clientes,
   });
+
+  // Sincronizar catálogo real de promotoras (`public.promotoras`) hacia `users` para Módulo 2
+  useEffect(() => {
+    const activeProms = (masterEntities.promotoras || []).filter((p) => {
+      if (p.activo === false) return false;
+      const catLower = String(p.categoria || '').toLowerCase();
+      return !catLower.includes('merch');
+    });
+    if (activeProms.length === 0) return;
+
+    setUsers((prev) => {
+      const nonPromotoras = prev.filter((u) => u.role !== 'promotora');
+      const byKey = new Map<string, User>();
+      for (const existing of prev) {
+        if (existing.role !== 'promotora') continue;
+        const k = canonicalStaffKey(existing.name, existing.email);
+        if (k) byKey.set(k, existing);
+      }
+      for (const p of activeProms) {
+        const cleanName = String(p.nombre_completo || '').trim();
+        if (!cleanName) continue;
+        const cleanEmail = String(p.email || '').trim().toLowerCase();
+        const k = canonicalStaffKey(cleanName, cleanEmail);
+        if (!k) continue;
+        const existing = byKey.get(k);
+        byKey.set(k, {
+          id: existing?.id || String(p.id),
+          name: cleanName,
+          email: cleanEmail || existing?.email || '',
+          role: 'promotora',
+          assignedZone: String(p.direccion || p.ciudad || p.region || existing?.assignedZone || ''),
+        });
+      }
+      return [...Array.from(byKey.values()), ...nonPromotoras];
+    });
+  }, [masterEntities.promotoras]);
 
   useEffect(() => {
     if (rawMasterData.ultimaActualizacionIso && !requiresSucursalSelection) {
@@ -2215,9 +2257,28 @@ export const AppProvider: React.FC<{
     }
 
     try {
+      const resolvedPromEmail = (() => {
+        const key = canonicalStaffKey(mergedVisit.promotoraName);
+        if (!key) return '';
+        const u = users.find((x) => x.role === 'promotora' && canonicalStaffKey(x.name, x.email) === key);
+        if (u?.email) return u.email;
+        const p = (masterEntities.promotoras || []).find(
+          (x) => canonicalStaffKey(x.nombre_completo, x.email || undefined) === key
+        );
+        return p?.email || '';
+      })();
+      const resolvedSucursal =
+        activeSucursal ||
+        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
+          ? verifiedSucursal
+          : activeRegionScope === 'CENTRO'
+            ? 'VALENCIA'
+            : 'ZULIA');
       const payload = buildMatrixUpsertRowFromVisit(mergedVisit, {
         clientCode: lookupClientCode(mergedVisit.storeId, mergedVisit.storeName),
         clientTempId: mergedVisit.id,
+        promotoraEmail: resolvedPromEmail,
+        sucursal: resolvedSucursal,
       });
       const res = await persistMatrixUpsertBatch([payload]);
       applySavedRowsToState(res.filas);
@@ -2286,9 +2347,28 @@ export const AppProvider: React.FC<{
     }
 
     try {
+      const resolvedPromEmail = (() => {
+        const key = canonicalStaffKey(newVisit.promotoraName);
+        if (!key) return '';
+        const u = users.find((x) => x.role === 'promotora' && canonicalStaffKey(x.name, x.email) === key);
+        if (u?.email) return u.email;
+        const p = (masterEntities.promotoras || []).find(
+          (x) => canonicalStaffKey(x.nombre_completo, x.email || undefined) === key
+        );
+        return p?.email || '';
+      })();
+      const resolvedSucursal =
+        activeSucursal ||
+        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
+          ? verifiedSucursal
+          : activeRegionScope === 'CENTRO'
+            ? 'VALENCIA'
+            : 'ZULIA');
       const payload = buildMatrixUpsertRowFromVisit(newVisit, {
         clientCode: lookupClientCode(newVisit.storeId, newVisit.storeName),
         clientTempId: tempId,
+        promotoraEmail: resolvedPromEmail,
+        sucursal: resolvedSucursal,
       });
       const res = await persistMatrixUpsertBatch([payload]);
       applySavedRowsToState(res.filas);
@@ -2409,7 +2489,9 @@ export const AppProvider: React.FC<{
     dayLabel: string;
     date?: string;
     promotoraName?: string;
+    promotoraEmail?: string;
     sellerName?: string;
+    notes?: string;
   }): Promise<BatchFillClientsResult> => {
     const snapshot = visitsRef.current;
     const plan = buildBatchFillPlan({
@@ -2447,10 +2529,32 @@ export const AppProvider: React.FC<{
     }
 
     try {
+      const resolvedSucursal =
+        activeSucursal ||
+        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
+          ? verifiedSucursal
+          : activeRegionScope === 'CENTRO'
+            ? 'VALENCIA'
+            : 'ZULIA');
+      const resolveEmailForVisit = (promName: string): string => {
+        if (params.promotoraEmail && params.promotoraName && canonicalStaffKey(promName) === canonicalStaffKey(params.promotoraName)) {
+          return params.promotoraEmail;
+        }
+        const key = canonicalStaffKey(promName);
+        if (!key) return '';
+        const u = users.find((x) => x.role === 'promotora' && canonicalStaffKey(x.name, x.email) === key);
+        if (u?.email) return u.email;
+        const p = (masterEntities.promotoras || []).find(
+          (x) => canonicalStaffKey(x.nombre_completo, x.email || undefined) === key
+        );
+        return p?.email || '';
+      };
       const rowsPayload = plan.affectedVisits.map((v) =>
         buildMatrixUpsertRowFromVisit(v, {
           clientCode: lookupClientCode(v.storeId, v.storeName),
           clientTempId: v.id,
+          promotoraEmail: resolveEmailForVisit(v.promotoraName),
+          sucursal: resolvedSucursal,
         })
       );
       const rpcRes = await persistMatrixUpsertBatch(rowsPayload);

@@ -4,6 +4,8 @@ export type Producto = (typeof PRODUCTOS)[number];
 export const TURNOS = ['MAÑANA', 'TARDE'] as const;
 export type Turno = (typeof TURNOS)[number];
 
+export type EstadoLogistico = 'PENDIENTE' | 'EN_RUTA' | 'ENTREGADO';
+
 export type AppMode = 'chofer' | 'oficina';
 
 export const OPERATIVE_SUCURSALES = [
@@ -34,15 +36,29 @@ export interface Entrega {
   /** Ej. "MAÑANA 6", "TARDE 4" */
   numero_grupo_turno: string;
   cliente: string;
-  producto: Producto;
+  producto: string;
   vendedor: string;
   promotora: string;
   stand_entregado: boolean;
   producto_entregado: boolean;
   /** true cuando la entrega está lista */
   completado: boolean;
+  /** Estado logístico del viaje del chofer */
+  estado_logistico?: EstadoLogistico;
+  /** Hora local "HH:mm" de confirmación de salida o null */
+  hora_salida?: string | null;
+  /** Timestamp ISO exacto de salida o null */
+  hora_salida_real?: string | null;
+  /** Hora local "HH:mm" de llegada al PDV o null */
+  hora_llegada?: string | null;
   /** Hora local "HH:mm" o null */
   hora_entrega: string | null;
+  /** Path privado en Supabase Storage (bucket `entregas-evidencias`) */
+  evidencia_path?: string | null;
+  evidencia_bucket?: string | null;
+  evidencia_subida_at?: string | null;
+  /** Referencia opcional al registro origen en `cronograma_degustaciones` */
+  cronograma_id?: string | null;
   notas_chofer: string;
   /** Sucursal operativa propietaria del registro (usada para filtro global de Super Admin) */
   sucursal?: OperativeSucursal;

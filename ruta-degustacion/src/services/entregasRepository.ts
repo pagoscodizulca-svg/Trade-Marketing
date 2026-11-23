@@ -44,6 +44,17 @@ export interface EntregasRepository {
   flushNow(): Promise<void>;
   /** Alterna «Stand + Producto Entregado»; funciona sin conexión y registra la hora exacta del toque. */
   toggleEntrega(id: string): Promise<void>;
+  /** Confirma salida a ruta (`EN_RUTA` + `hora_salida` + `hora_salida_real`). */
+  confirmarSalida(id: string): Promise<void>;
+  /** Confirma llegada y entrega (`ENTREGADO` + `hora_llegada` + `hora_entrega` + `completado=true`). */
+  confirmarLlegada(id: string): Promise<void>;
+  /** Valida (MIME/5MB/path seguro), sube evidencia al bucket privado `entregas-evidencias` y persiste referencia en BD. */
+  subirEvidencia(
+    id: string,
+    file: File
+  ): Promise<{ path: string; bucket: string; signedUrl: string | null }>;
+  /** Obtiene una URL firmada temporal para visualizar una evidencia privada almacenada en Supabase Storage. */
+  obtenerUrlEvidencia(path: string, bucket?: string | null): Promise<string | null>;
   /** Guarda la nota/incidencia; funciona sin conexión. */
   setNota(id: string, nota: string): Promise<void>;
   /** Requieren conexión. */

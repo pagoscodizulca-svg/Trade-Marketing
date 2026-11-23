@@ -41,10 +41,13 @@ export class AttendanceFileSecurityError extends Error {
 
 const UUID_STRICT_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PROMOTORA_ID_SAFE_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
 const YMD_STRICT_REGEX = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const VALID_SLOTS_SET = new Set<string>(ALL_SLOTS_FOTO_ASISTENCIA);
 const SAFE_STORAGE_PATH_REGEX =
-  /^asistencia\/\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(JORNADA_INGRESO|JORNADA_SALIDA|MANANA_INGRESO|MANANA_SALIDA|TARDE_INGRESO|TARDE_SALIDA)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-\d{10,16})?\.(jpg|png|webp)$/;
+  /^asistencia\/\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\/[A-Za-z0-9_-]{1,64}\/(JORNADA_INGRESO|JORNADA_SALIDA|MANANA_INGRESO|MANANA_SALIDA|TARDE_INGRESO|TARDE_SALIDA)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-\d{10,16})?\.(jpg|png|webp)$/;
+const SAFE_PORTAL_MODULE_PATH_REGEX =
+  /^[A-Za-z0-9_-]{1,64}\/(asistencia|inventario|degustacion|precios|merchandising)\/[A-Za-z0-9_.-]{8,96}\.(jpg|jpeg|png|webp)$/;
 
 /**
  * Inspecciona los *magic bytes* reales del binario recibido en servidor:
@@ -177,7 +180,7 @@ export function assertSafeAttendanceStoragePath(storagePath: string): string {
     clean.includes('\0') ||
     clean.includes('//') ||
     clean.startsWith('/') ||
-    !SAFE_STORAGE_PATH_REGEX.test(clean)
+    (!SAFE_STORAGE_PATH_REGEX.test(clean) && !SAFE_PORTAL_MODULE_PATH_REGEX.test(clean))
   ) {
     throw new AttendanceFileSecurityError(
       400,
@@ -224,7 +227,7 @@ export function buildDeterministicAttendanceStoragePath(params: {
 
   if (
     !YMD_STRICT_REGEX.test(cleanDate) ||
-    !UUID_STRICT_REGEX.test(cleanPromotoraId) ||
+    !PROMOTORA_ID_SAFE_REGEX.test(cleanPromotoraId) ||
     !VALID_SLOTS_SET.has(cleanSlot) ||
     !UUID_STRICT_REGEX.test(generatedUuid) ||
     !['jpg', 'png', 'webp'].includes(params.extension)

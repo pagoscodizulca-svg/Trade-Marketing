@@ -16,6 +16,7 @@ import {
 } from '../types/attendanceEvidences';
 import { compressAttendancePhotoForMobileUpload } from '../utils/attendanceImageCompressor';
 import { getActiveAccessToken } from './authService';
+import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
 import {
   type AttendanceRecord,
   type AttendanceSlotEvent,
@@ -205,9 +206,12 @@ export async function uploadCompressedAttendanceEvidence(params: {
 /**
  * Obtiene por lote URLs firmadas temporales (`Signed URLs`) para evidencias almacenadas
  * en el bucket privado `asistencia-evidencias`.
+ * Usa primero `/api/asistencia/evidencias/signed-urls` y, ante ausencia de BFF o faltantes,
+ * firma directamente con la sesión autenticada de Supabase Storage (`createSignedUrls`).
  */
 export async function fetchBatchEvidenceSignedUrls(
-  evidenciaIds: string[]
+  evidenciaIds: string[],
+  storagePathByEvidenceId?: Record<string, string>
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
   const missingIds: string[] = [];
@@ -228,31 +232,63 @@ export async function fetchBatchEvidenceSignedUrls(
   }
 
   const token = await getActiveAccessToken();
-  if (!token) {
-    return result;
+  if (token) {
+    for (let idx = 0; idx < missingIds.length; idx += 60) {
+      const chunk = missingIds.slice(idx, idx + 60);
+      try {
+        const res = await fetch('/api/asistencia/evidencias/signed-urls', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ evidenciaIds: chunk }),
+        });
+
+        if (!res.ok) continue;
+        const payload = (await res.json().catch(() => ({}))) as {
+          signedUrls?: Record<string, { url: string; expiresAtIso: string }>;
+        };
+
+        for (const [evId, info] of Object.entries(payload.signedUrls || {})) {
+          if (info?.url) {
+            rememberEvidenceSignedUrl(evId, info.url, info.expiresAtIso);
+            result[evId] = info.url;
+          }
+        }
+      } catch {
+        // Respaldo directo con SDK autenticado abajo
+      }
+    }
   }
 
-  for (let idx = 0; idx < missingIds.length; idx += 60) {
-    const chunk = missingIds.slice(idx, idx + 60);
-    const res = await fetch('/api/asistencia/evidencias/signed-urls', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ evidenciaIds: chunk }),
-    });
+  // Respaldo autenticado directo contra Supabase Storage para cualquier evidencia aún sin URL
+  const unresolvedWithPaths = missingIds
+    .filter((id) => !result[id] && storagePathByEvidenceId?.[id])
+    .map((id) => ({ id, path: String(storagePathByEvidenceId![id] || '').trim() }))
+    .filter((item) => item.path.length > 0 && !item.path.includes('..'));
 
-    if (!res.ok) continue;
-    const payload = (await res.json().catch(() => ({}))) as {
-      signedUrls?: Record<string, { url: string; expiresAtIso: string }>;
-    };
-
-    for (const [evId, info] of Object.entries(payload.signedUrls || {})) {
-      if (info?.url) {
-        rememberEvidenceSignedUrl(evId, info.url, info.expiresAtIso);
-        result[evId] = info.url;
+  if (unresolvedWithPaths.length > 0 && isSupabaseConfigured) {
+    try {
+      const client = getSupabaseClient();
+      const { data, error } = await client.storage
+        .from('asistencia-evidencias')
+        .createSignedUrls(
+          unresolvedWithPaths.map((x) => x.path),
+          900
+        );
+      if (!error && Array.isArray(data)) {
+        const expiresAtIso = new Date(Date.now() + 900 * 1000).toISOString();
+        data.forEach((entry, index) => {
+          const target = unresolvedWithPaths[index];
+          if (target && entry?.signedUrl) {
+            rememberEvidenceSignedUrl(target.id, entry.signedUrl, expiresAtIso);
+            result[target.id] = entry.signedUrl;
+          }
+        });
       }
+    } catch {
+      // Silencioso si no hay sesión o Storage no está listo
     }
   }
 
@@ -362,10 +398,27 @@ export function buildDailyPromotoraAttendanceViewModels(params: {
   const cleanSelectedDate = String(params.selectedDateYmd || '').trim();
 
   // 1. Primero: cabeceras oficiales con `perfil_aplicado` histórico inmutable
+  const resolveRegionLabel = (
+    rawRegion?: string | null,
+    rawSucursal?: string | null,
+    staffRegion?: 'Occidente' | 'Valencia' | string | null
+  ): 'Occidente' | 'Valencia' => {
+    const cleanReg = String(rawRegion || '').trim().toLowerCase();
+    if (cleanReg === 'valencia' || cleanReg === 'centro') return 'Valencia';
+    if (cleanReg === 'occidente' || cleanReg === 'zulia') return 'Occidente';
+    const cleanSuc = String(rawSucursal || '').trim().toUpperCase();
+    if (cleanSuc === 'VALENCIA' || cleanSuc === 'CENTRO') return 'Valencia';
+    if (staffRegion === 'Valencia') return 'Valencia';
+    return 'Occidente';
+  };
+
   for (const j of params.asistenciaJornadas) {
     if (cleanSelectedDate && j.fecha_jornada !== cleanSelectedDate) continue;
 
-    const staff = staffById.get(j.promotora_id);
+    const staff =
+      staffById.get(j.promotora_id) ||
+      (j.promotora_ref_id != null ? staffById.get(String(j.promotora_ref_id)) : undefined) ||
+      staffByNameKey.get(normalizeStaffTextKey(j.promotora_nombre));
     const resolved = resolveEffectiveAttendanceProfile({
       historicalSnapshotProfile: j.perfil_aplicado,
       currentMasterCategory: staff?.category ?? null,
@@ -390,7 +443,8 @@ export function buildDailyPromotoraAttendanceViewModels(params: {
       sanitizeAttendanceText(j.promotora_nombre, 160) ||
       staff?.name ||
       'Promotora Verificada';
-    const key = `${j.fecha_jornada}__${j.promotora_id}`;
+    const canonicalPromotoraId = staff?.id || j.promotora_id;
+    const key = `${j.fecha_jornada}__${canonicalPromotoraId}`;
 
     byDateAndPromotoraKey.set(key, {
       key,
@@ -398,12 +452,13 @@ export function buildDailyPromotoraAttendanceViewModels(params: {
       fechaJornada: j.fecha_jornada,
       fechaSlash: formatYmdToSlash(j.fecha_jornada),
       fechaLongEs: formatYmdToLongEs(j.fecha_jornada),
-      promotoraId: j.promotora_id,
+      promotoraId: canonicalPromotoraId,
       promotoraNombre,
       promotoraInitials: getInitials(promotoraNombre),
       promotoraEmail: staff?.email || '',
       pdvNombre: j.pdv_nombre || staff?.assignedStore || 'PDV por definir',
       zona: j.zona || staff?.address || 'Zona operativa',
+      region: resolveRegionLabel(j.region, j.sucursal, staff?.region),
       perfilAplicado: resolved.perfilAplicado,
       perfilFuente: resolved.fuente,
       compliance,
@@ -489,6 +544,7 @@ export function buildDailyPromotoraAttendanceViewModels(params: {
       promotoraEmail: matchedStaff.email || legacy.email,
       pdvNombre: legacy.storeName || matchedStaff.assignedStore || 'PDV',
       zona: legacy.zone || matchedStaff.address || 'PDV Verificado',
+      region: matchedStaff.region === 'Valencia' ? 'Valencia' : 'Occidente',
       perfilAplicado: resolved.perfilAplicado,
       perfilFuente: resolved.fuente,
       compliance,
@@ -522,6 +578,7 @@ export function buildDailyPromotoraAttendanceViewModels(params: {
         promotoraEmail: staff.email,
         pdvNombre: staff.assignedStore || 'PDV por definir',
         zona: staff.address || 'Zona operativa',
+        region: staff.region === 'Valencia' ? 'Valencia' : 'Occidente',
         perfilAplicado: resolved.perfilAplicado,
         perfilFuente: resolved.fuente,
         compliance,

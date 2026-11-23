@@ -57,15 +57,35 @@ export function filterAttendanceViewModels(
   options: {
     searchQuery?: string | null;
     profileFilter?: 'TODOS' | PerfilAsistencia;
+    regionFilter?: 'TODAS' | 'Occidente' | 'Valencia';
+    promoterFilter?: string | null;
+    dateFrom?: string | null;
+    dateTo?: string | null;
     cardLimit?: number;
   } = {}
 ): DailyPromotoraAttendanceViewModel[] {
   const cleanQ = normalizeSearchText(options.searchQuery);
   const profileFilter = options.profileFilter ?? 'TODOS';
+  const regionFilter = options.regionFilter ?? 'TODAS';
+  const promoterFilter = String(options.promoterFilter || '').trim();
+  const dateFrom = String(options.dateFrom || '').trim();
+  const dateTo = String(options.dateTo || '').trim();
 
   const filtered = items.filter((item) => {
     if (!item) return false;
     if (profileFilter !== 'TODOS' && item.perfilAplicado !== profileFilter) {
+      return false;
+    }
+    if (regionFilter !== 'TODAS' && (item.region || 'Occidente') !== regionFilter) {
+      return false;
+    }
+    if (promoterFilter && promoterFilter !== 'TODAS' && item.promotoraId !== promoterFilter) {
+      return false;
+    }
+    if (dateFrom && item.fechaJornada && item.fechaJornada < dateFrom) {
+      return false;
+    }
+    if (dateTo && item.fechaJornada && item.fechaJornada > dateTo) {
       return false;
     }
     if (!cleanQ) return true;
@@ -78,6 +98,7 @@ export function filterAttendanceViewModels(
       normalizeSearchText(item.promotoraNombre).includes(cleanQ) ||
       normalizeSearchText(item.pdvNombre).includes(cleanQ) ||
       normalizeSearchText(item.zona).includes(cleanQ) ||
+      normalizeSearchText(item.region).includes(cleanQ) ||
       normalizeSearchText(item.fechaJornada).includes(cleanQ) ||
       normalizeSearchText(item.fechaSlash).includes(cleanQ) ||
       normalizeSearchText(item.fechaLongEs).includes(cleanQ) ||
@@ -194,6 +215,10 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   // Por defecto abrimos en la jornada de hoy (America/Caracas), con conmutador de 1 clic hacia Historial Registrado
   const [dateFilterMode, setDateFilterMode] = useState<'fecha' | 'historial'>('fecha');
   const [selectedDateYmd, setSelectedDateYmd] = useState<string>(todayCaracasYmd);
+  const [dateFrom, setDateFrom] = useState<string>('');
+  const [dateTo, setDateTo] = useState<string>('');
+  const [regionFilter, setRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
+  const [promoterFilter, setPromoterFilter] = useState<string>('TODAS');
   const [profileFilter, setProfileFilter] = useState<'TODOS' | PerfilAsistencia>('TODOS');
   const [cardLimit, setCardLimit] = useState<number>(30);
 
@@ -298,13 +323,39 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     };
   }, [allViewModels]);
 
+  const promoterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const vm of allViewModels) {
+      if (vm.promotoraId && !map.has(vm.promotoraId)) {
+        map.set(vm.promotoraId, vm.promotoraNombre);
+      }
+    }
+    return Array.from(map.entries())
+      .map(([id, nombre]) => ({ id, nombre }))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  }, [allViewModels]);
+
   const filteredViewModels = useMemo(() => {
     return filterAttendanceViewModels(allViewModels, {
       searchQuery,
       profileFilter,
+      regionFilter,
+      promoterFilter,
+      dateFrom: dateFilterMode === 'historial' ? dateFrom : '',
+      dateTo: dateFilterMode === 'historial' ? dateTo : '',
       cardLimit,
     });
-  }, [allViewModels, profileFilter, searchQuery, cardLimit]);
+  }, [
+    allViewModels,
+    profileFilter,
+    regionFilter,
+    promoterFilter,
+    dateFilterMode,
+    dateFrom,
+    dateTo,
+    searchQuery,
+    cardLimit,
+  ]);
 
   const groupedByDay = useMemo(() => {
     const groups: Array<{
@@ -339,12 +390,14 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   // Carga automática de Signed URLs (Storage privado) y fotos legacy por lote para las tarjetas visibles
   useEffect(() => {
     const privateIdsToFetch: string[] = [];
+    const storagePathByEvidenceId: Record<string, string> = {};
     const legacyIdsToFetch: string[] = [];
 
     for (const vm of filteredViewModels) {
       for (const ev of Object.values(vm.evidencesBySlot)) {
         if (!ev) continue;
         if (ev.source === 'storage_privado') {
+          if (ev.storagePath) storagePathByEvidenceId[ev.id] = ev.storagePath;
           if (!ev.signedUrl && signedUrlsByEvidenceId[ev.id] === undefined) {
             privateIdsToFetch.push(ev.id);
           }
@@ -366,7 +419,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
 
     Promise.all([
       privateIdsToFetch.length > 0
-        ? fetchBatchEvidenceSignedUrls(privateIdsToFetch).catch(
+        ? fetchBatchEvidenceSignedUrls(privateIdsToFetch, storagePathByEvidenceId).catch(
             (): Record<string, string> => ({})
           )
         : Promise.resolve<Record<string, string>>({}),
@@ -428,7 +481,10 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     async (ev: AttendanceSlotEvidenceItem) => {
       try {
         if (ev.source === 'storage_privado') {
-          const fresh = await fetchBatchEvidenceSignedUrls([ev.id]);
+          const fresh = await fetchBatchEvidenceSignedUrls(
+            [ev.id],
+            ev.storagePath ? { [ev.id]: ev.storagePath } : undefined
+          );
           if (fresh[ev.id]) {
             setSignedUrlsByEvidenceId((prev) => ({ ...prev, [ev.id]: fresh[ev.id] }));
             onNotifyToast('✓ URL firmada temporal renovada correctamente.');
@@ -465,9 +521,10 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
 
       if (!imageUrl) {
         if (ev.source === 'storage_privado') {
-          const fresh = await fetchBatchEvidenceSignedUrls([ev.id]).catch(
-            (): Record<string, string> => ({})
-          );
+          const fresh = await fetchBatchEvidenceSignedUrls(
+            [ev.id],
+            ev.storagePath ? { [ev.id]: ev.storagePath } : undefined
+          ).catch((): Record<string, string> => ({}));
           imageUrl = fresh[ev.id] || '';
           if (imageUrl) {
             setSignedUrlsByEvidenceId((prev) => ({ ...prev, [ev.id]: imageUrl }));
@@ -975,6 +1032,91 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
           </div>
         </div>
 
+        {/* Filtros de Región, Promotora y Rango de Fechas (en modo Historial) */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-zinc-900">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { id: 'TODAS', label: 'Todas las Regiones' },
+                { id: 'Occidente', label: 'Occidente' },
+                { id: 'Valencia', label: 'Valencia' },
+              ] as const
+            ).map((reg) => (
+              <button
+                key={reg.id}
+                type="button"
+                data-testid={`asistencia-region-${reg.id}`}
+                onClick={() => setRegionFilter(reg.id)}
+                className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  regionFilter === reg.id
+                    ? 'bg-red-600 text-white border-red-500 shadow'
+                    : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                }`}
+              >
+                {reg.label}
+              </button>
+            ))}
+
+            <select
+              value={promoterFilter}
+              onChange={(e) => setPromoterFilter(e.target.value)}
+              aria-label="Filtrar asistencia por promotora"
+              data-testid="asistencia-promotora-select"
+              className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-white text-xs font-medium focus:outline-none focus:border-red-600"
+            >
+              <option value="TODAS">Todas las promotoras ({promoterOptions.length})</option>
+              {promoterOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.nombre}
+                </option>
+              ))}
+            </select>
+
+            {dateFilterMode === 'historial' && (
+              <div className="flex items-center gap-1.5 text-xs">
+                <input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  aria-label="Fecha desde"
+                  className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white"
+                />
+                <span className="text-zinc-500">a</span>
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  aria-label="Fecha hasta"
+                  className="min-h-[34px] px-2.5 py-1 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white"
+                />
+              </div>
+            )}
+          </div>
+
+          {(regionFilter !== 'TODAS' ||
+            promoterFilter !== 'TODAS' ||
+            profileFilter !== 'TODOS' ||
+            searchQuery.trim() !== '' ||
+            dateFrom !== '' ||
+            dateTo !== '') && (
+            <button
+              type="button"
+              data-testid="asistencia-clear-filters"
+              onClick={() => {
+                setRegionFilter('TODAS');
+                setPromoterFilter('TODAS');
+                setProfileFilter('TODOS');
+                setDateFrom('');
+                setDateTo('');
+                onSearchQueryChange('');
+              }}
+              className="min-h-[34px] px-3 py-1 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-xs font-bold text-zinc-200 transition cursor-pointer"
+            >
+              Limpiar filtros
+            </button>
+          )}
+        </div>
+
         {/* Buscador y límite de visualización */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-zinc-900">
           <div className="relative flex-1 min-w-[240px] max-w-md">
@@ -1095,6 +1237,11 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
                             <h5 className="text-sm sm:text-base font-black text-white uppercase tracking-tight">
                               {vm.promotoraNombre}
                             </h5>
+
+                            {/* Insignia de Región */}
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider border bg-zinc-900 text-zinc-200 border-zinc-700">
+                              {vm.region || 'Occidente'}
+                            </span>
 
                             {/* Insignia de Perfil Aplicado */}
                             <span
