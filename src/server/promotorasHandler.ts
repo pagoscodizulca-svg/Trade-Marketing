@@ -78,17 +78,28 @@ export interface PromotorasGateway {
 }
 
 function normalizeServerPromotoraRow(raw: Record<string, unknown>): PromotoraServerRecord {
+  const emailRaw = raw.email ?? raw.correo;
+  const direccion = raw.direccion ? String(raw.direccion).trim() : null;
+  const ciudad = raw.ciudad ? String(raw.ciudad).trim() : direccion;
+  const estado = raw.estado ? String(raw.estado).trim() : null;
+  const sucursalRaw = raw.sucursal ? String(raw.sucursal).trim().toUpperCase() : null;
+  const inferredRegion =
+    mapLegacySucursalToAllowedRegion(sucursalRaw) ??
+    mapLegacySucursalToAllowedRegion(estado) ??
+    mapLegacySucursalToAllowedRegion(ciudad) ??
+    mapLegacySucursalToAllowedRegion(direccion);
+
   return {
     id: String(raw.id ?? ''),
     nombre_completo: String(raw.nombre_completo ?? raw.nombre ?? 'Sin nombre').trim(),
-    email: raw.email ? String(raw.email).trim().toLowerCase() : null,
+    email: emailRaw ? String(emailRaw).trim().toLowerCase() : null,
     telefono: raw.telefono ? String(raw.telefono).trim() : null,
-    ciudad: raw.ciudad ? String(raw.ciudad).trim() : null,
-    estado: raw.estado ? String(raw.estado).trim() : null,
-    direccion: raw.direccion ? String(raw.direccion).trim() : null,
+    ciudad,
+    estado,
+    direccion,
     categoria: classifyPromotoraCategoriaOficial(raw),
     region_id: raw.region_id ? String(raw.region_id).trim() : null,
-    sucursal: raw.sucursal ? String(raw.sucursal).trim().toUpperCase() : null,
+    sucursal: sucursalRaw ?? (inferredRegion ? mapAllowedRegionToLegacySucursal(inferredRegion) : null),
     supervisor_id: raw.supervisor_id ? String(raw.supervisor_id).trim() : null,
     activo: raw.activo !== false,
     created_at: raw.created_at ? String(raw.created_at) : undefined,
@@ -115,21 +126,49 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
     },
 
     async listPromotoras(filters) {
-      let query = client.from('promotoras').select('*').order('nombre_completo', { ascending: true });
-      if (filters.soloActivas) {
-        query = query.eq('activo', true);
+      const PAGE_SIZE = 1000;
+      const rows: PromotoraServerRecord[] = [];
+      let skipRegionIdFilter = false;
+
+      for (let from = 0; ; from += PAGE_SIZE) {
+        let query = client
+          .from('promotoras')
+          .select('*')
+          .order('nombre_completo', { ascending: true })
+          .range(from, from + PAGE_SIZE - 1);
+        if (filters.soloActivas) {
+          query = query.eq('activo', true);
+        }
+        if (filters.categoria) {
+          query = query.eq('categoria', filters.categoria);
+        }
+        if (filters.regionId && !skipRegionIdFilter) {
+          query = query.eq('region_id', filters.regionId);
+        }
+
+        let { data, error } = await query;
+        if (error && filters.regionId && !skipRegionIdFilter && /region_id/i.test(error.message)) {
+          skipRegionIdFilter = true;
+          let retryQuery = client
+            .from('promotoras')
+            .select('*')
+            .order('nombre_completo', { ascending: true })
+            .range(from, from + PAGE_SIZE - 1);
+          if (filters.soloActivas) retryQuery = retryQuery.eq('activo', true);
+          if (filters.categoria) retryQuery = retryQuery.eq('categoria', filters.categoria);
+          const retryRes = await retryQuery;
+          data = retryRes.data;
+          error = retryRes.error;
+        }
+
+        if (error) {
+          throw new Error(error.message);
+        }
+        const page = ((data ?? []) as Array<Record<string, unknown>>).map(normalizeServerPromotoraRow);
+        rows.push(...page);
+        if (page.length < PAGE_SIZE) break;
       }
-      if (filters.categoria) {
-        query = query.eq('categoria', filters.categoria);
-      }
-      if (filters.regionId) {
-        query = query.eq('region_id', filters.regionId);
-      }
-      const { data, error } = await query;
-      if (error) {
-        throw new Error(error.message);
-      }
-      return ((data ?? []) as Array<Record<string, unknown>>).map(normalizeServerPromotoraRow);
+      return rows;
     },
 
     async getPromotoraById(id) {

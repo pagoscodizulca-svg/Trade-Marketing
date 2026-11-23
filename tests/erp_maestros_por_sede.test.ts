@@ -3,7 +3,9 @@ import http from 'node:http';
 import test from 'node:test';
 import express from 'express';
 import {
+  buildAuditedErpVendedoresDataset,
   computeClientesSummaryBySede,
+  extractCanonicalSellerIdentity,
   filterNormalizedErpClientes,
   mapErpTerritoryToOperativeSucursal,
   normalizeErpClientesDataset,
@@ -284,11 +286,13 @@ test('masterDataSyncService: hace fallback automático a tablas ERP cuando publi
 
 test('API /api/maestros/*: exige auth, aplica rate-limit antes de auth y aisla estrictamente por sede', async () => {
   const clientes = normalizeErpClientesDataset(SAMPLE_ERP_DATASET);
-  const vendedores = normalizeErpVendedoresDataset(SAMPLE_ERP_DATASET);
+  const { vendedores, auditoria: vendedoresAuditoria } =
+    buildAuditedErpVendedoresDataset(SAMPLE_ERP_DATASET);
   const snapshot: MasterDataErpSnapshot = {
     clientes,
     vendedores,
-    sedesResumen: computeClientesSummaryBySede(clientes),
+    vendedoresAuditoria,
+    sedesResumen: computeClientesSummaryBySede(clientes, vendedores),
     fetchedAtMs: Date.now(),
     source: 'supabase_erp_clientes',
   };
@@ -402,4 +406,177 @@ test('API /api/maestros/*: exige auth, aplica rate-limit antes de auth y aisla e
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('Depuración y consolidación de Vendedores ERP: elimina oficinas/vacantes/inactivos/excluidos y unifica vendedores multi-ruta', () => {
+  assert.equal(extractCanonicalSellerIdentity('J PABLO ARAUJO - CAB/OJE').displayName, 'J PABLO ARAUJO');
+  assert.equal(extractCanonicalSellerIdentity('OSCAR ORTIZ- CORO').displayName, 'OSCAR ORTIZ');
+  assert.equal(extractCanonicalSellerIdentity('OSCAR ORTIZ- LA COSTA').displayName, 'OSCAR ORTIZ');
+  assert.equal(
+    extractCanonicalSellerIdentity('FOOD SERVICE SENIOR - JUAN HERNANDEZ').displayName,
+    'JUAN HERNANDEZ'
+  );
+  assert.notEqual(
+    extractCanonicalSellerIdentity('CUENTAS CLAVE 1 - MC').key,
+    extractCanonicalSellerIdentity('CUENTAS CLAVE 2 - SV').key
+  );
+
+  const noisyDataset: ErpMasterDataset = {
+    ...SAMPLE_ERP_DATASET,
+    vendedores: [
+      // 1. Vendedor con 2 rutas (ZULIA) -> debe consolidarse en 1 solo vendedor
+      {
+        id_vend: 'v-jpa-1',
+        vend_codi: '031',
+        vend_nomb: 'J PABLO ARAUJO',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      {
+        id_vend: 'v-jpa-2',
+        vend_codi: '015',
+        vend_nomb: 'J PABLO ARAUJO - CAB/OJE',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      // 2. Vendedor con 2 rutas (FALCON + ZULIA) -> consolidar en 1 solo vendedor
+      {
+        id_vend: 'v-oo-1',
+        vend_codi: '011',
+        vend_nomb: 'OSCAR ORTIZ- CORO',
+        vend_acti: true,
+        id_sucu: 'sucu-fal',
+        id_supe: 'sup-ali',
+      },
+      {
+        id_vend: 'v-oo-2',
+        vend_codi: '009',
+        vend_nomb: 'OSCAR ORTIZ- LA COSTA',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-ali',
+      },
+      // 3. Vendedor tradicional + Food Service Senior (misma persona) -> consolidar en 1
+      {
+        id_vend: 'v-jh-1',
+        vend_codi: '024',
+        vend_nomb: 'JUAN HERNANDEZ',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      {
+        id_vend: 'v-jh-2',
+        vend_codi: '057',
+        vend_nomb: 'FOOD SERVICE SENIOR - JUAN HERNANDEZ',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      // 4. Food Service activo con supervisor -> conservar
+      {
+        id_vend: 'v-fs-sur',
+        vend_codi: '019',
+        vend_nomb: 'FOOD SERVICE SUR',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      // 5. Cuentas que DEBEN excluirse
+      {
+        id_vend: 'v-excl-inact',
+        vend_codi: '204',
+        vend_nomb: 'MARIA DIAZ',
+        vend_acti: false,
+        id_sucu: 'sucu-cap',
+        id_supe: 'sup-gre',
+      },
+      {
+        id_vend: 'v-excl-nullcod',
+        vend_codi: null,
+        vend_nomb: 'HERNANDEZ GREIDY KARINA',
+        vend_acti: true,
+        id_sucu: 'sucu-cap',
+        id_supe: 'sup-gre',
+      },
+      {
+        id_vend: 'v-excl-oficina',
+        vend_codi: '010',
+        vend_nomb: 'OFICINA',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: null,
+      },
+      {
+        id_vend: 'v-excl-vacante',
+        vend_codi: '008',
+        vend_nomb: 'VACANTE - OFICINA',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: null,
+      },
+      {
+        id_vend: 'v-excl-gerencia',
+        vend_codi: '000',
+        vend_nomb: 'GERENCIA LC',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+      {
+        id_vend: 'v-excl-sin-supe',
+        vend_codi: '026',
+        vend_nomb: 'SAIRU VALLES',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: null,
+      },
+      {
+        id_vend: 'v-excl-forecast',
+        vend_codi: '032',
+        vend_nomb: 'CARLOS MACHADO',
+        vend_acti: true,
+        id_sucu: 'sucu-zul',
+        id_supe: 'sup-nel',
+      },
+    ],
+    vendedoresExcluidos: [
+      {
+        id_fove: 'fove-latest',
+        id_regi: 'reg-occ',
+        updated_at: '2026-11-04T16:27:44Z',
+        fove_vend: ['v-excl-forecast', 'v-jh-2', 'v-fs-sur', 'v-excl-oficina'],
+      },
+    ],
+    clientes: [
+      { id_clie: 'c1', clie_rif: '000001', clie_nomb: 'C1', id_vend: 'v-jpa-1', clie_acti: true },
+      { id_clie: 'c2', clie_rif: '000002', clie_nomb: 'C2', id_vend: 'v-jpa-1', clie_acti: true },
+      { id_clie: 'c3', clie_rif: '000003', clie_nomb: 'C3', id_vend: 'v-jpa-2', clie_acti: true },
+      { id_clie: 'c4', clie_rif: '000004', clie_nomb: 'C4', id_vend: 'v-oo-1', clie_acti: true },
+    ],
+  };
+
+  const { vendedores, auditoria } = buildAuditedErpVendedoresDataset(noisyDataset);
+  assert.equal(auditoria.totalErpRaw, 14);
+  assert.equal(auditoria.excluidosTotal, 7);
+  assert.equal(auditoria.rutasComercialesActivas, 7);
+  assert.equal(auditoria.consolidadosDuplicados, 3);
+  assert.equal(auditoria.activosRealesUnicos, 4);
+  assert.equal(vendedores.length, 4);
+
+  const jpa = vendedores.find((v) => v.nombre_completo === 'J PABLO ARAUJO');
+  assert.ok(jpa);
+  assert.equal(jpa.codigo_vendedor, '031 / 015');
+  assert.equal(jpa.metadata.rutas_consolidadas, 2);
+  assert.equal(jpa.metadata.clientes_activos, 3);
+
+  const oscar = vendedores.find((v) => v.nombre_completo === 'OSCAR ORTIZ');
+  assert.ok(oscar);
+  assert.equal(oscar.zona, 'FALCON / ZULIA');
+
+  const juan = vendedores.find((v) => v.nombre_completo === 'JUAN HERNANDEZ');
+  assert.ok(juan);
+  assert.equal(juan.codigo_vendedor, '024 / 057');
 });

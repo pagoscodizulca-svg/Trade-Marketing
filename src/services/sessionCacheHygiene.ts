@@ -121,6 +121,59 @@ async function purgeSensitiveIndexedDbs(idb: IDBFactory | null | undefined): Pro
   return deleted;
 }
 
+const LEGACY_REGIONAL_TOKENS_REGEX = /\b(ZULIA|VALENCIA|ORIENTE|CAPITAL)\b/i;
+
+/**
+ * Purga claves corruptas o desactualizadas en `localStorage` / `sessionStorage` que
+ * conserven referencias legadas de 5 sedes (`ZULIA`, `VALENCIA`, `ORIENTE`, `CAPITAL`)
+ * o snapshots vacíos obsoletos, preservando siempre el tema visual y los tokens Auth activos.
+ */
+export function sanitizeLegacyRegionalStorage(options?: {
+  localStorageImpl?: Storage | null;
+  sessionStorageImpl?: Storage | null;
+}): { removedKeys: string[] } {
+  const removedKeys: string[] = [];
+  const stores: Array<Storage | null | undefined> = [
+    options?.localStorageImpl !== undefined
+      ? options.localStorageImpl
+      : typeof window !== 'undefined'
+        ? window.localStorage
+        : null,
+    options?.sessionStorageImpl !== undefined
+      ? options.sessionStorageImpl
+      : typeof window !== 'undefined'
+        ? window.sessionStorage
+        : null,
+  ];
+
+  for (const store of stores) {
+    if (!store) continue;
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < store.length; i += 1) {
+        const k = store.key(i);
+        if (k) keys.push(k);
+      }
+      for (const k of keys) {
+        if (shouldPreserveLocalStorageKey(k, true)) continue;
+        const val = store.getItem(k) ?? '';
+        const looksRegionalOrMasterCache =
+          /(sucursal|region|sede|master|maestro|clientes|productos|promotoras)/i.test(k);
+        if (
+          looksRegionalOrMasterCache &&
+          (LEGACY_REGIONAL_TOKENS_REGEX.test(val) || val.trim() === '[]' || val.trim() === '{}')
+        ) {
+          store.removeItem(k);
+          removedKeys.push(k);
+        }
+      }
+    } catch {
+      // Almacenamiento restringido
+    }
+  }
+  return { removedKeys };
+}
+
 export async function purgeAllSessionCaches(
   options: PurgeSessionCachesOptions = {}
 ): Promise<PurgeSessionCachesReport> {

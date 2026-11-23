@@ -33,6 +33,7 @@ import {
   guardarZonaComercial,
 } from '../../services/masterDataSyncService';
 import { normalizeSearchText } from '../../services/scheduleMatrixService';
+import { normalizeRegionName } from '../../utils/regionalSyncClassifier';
 import type {
   CadenaComercial,
   ClienteConVendedor,
@@ -44,15 +45,51 @@ import type {
 
 type MasterSubTab = 'clientes' | 'cadenas' | 'zonas' | 'vendedores';
 
+function matchesCommercialSearch(haystack: string, rawQuery: string): boolean {
+  const q = rawQuery.trim();
+  if (!q) return true;
+  const norm = (s: string) =>
+    normalizeSearchText(s)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+  if (norm(haystack).includes(norm(q))) return true;
+  const compact = (s: string) => norm(s).replace(/[^A-Z0-9Ñ]+/g, '');
+  const cq = compact(q);
+  return cq.length >= 2 && compact(haystack).includes(cq);
+}
+
+function resolveClientOfficialRegionLabel(c: {
+  sucursal?: string | null;
+  estado?: string | null;
+  metadata?: Record<string, unknown>;
+}): string {
+  return (
+    normalizeRegionName(c.metadata?.region_codigo) ??
+    normalizeRegionName(c.sucursal) ??
+    normalizeRegionName(c.estado) ??
+    'SIN REGIÓN'
+  );
+}
+
+const CLIENTES_PAGE_SIZE = 100;
+
 export const MasterDataManagementView: React.FC = () => {
-  const { masterData, verifiedSucursal, activeSucursal } = useApp();
+  const { masterData, verifiedSucursal, activeSucursal, activeRegionScope } = useApp();
   const isGlobalUser = verifiedSucursal === 'GLOBAL';
   const defaultRegionalBranch: SucursalMaestro =
     activeSucursal ??
     (verifiedSucursal && verifiedSucursal !== 'GLOBAL' ? verifiedSucursal : 'ZULIA');
+  const activeRegionBadgeLabel: string =
+    activeRegionScope === 'ALL'
+      ? 'Todas las Regiones'
+      : activeRegionScope
+        ? activeRegionScope
+        : normalizeRegionName(activeSucursal ?? verifiedSucursal) ?? 'Todas las Regiones';
 
   const [subTab, setSubTab] = useState<MasterSubTab>('clientes');
   const [searchTerm, setSearchTerm] = useState('');
+  const [clientesPage, setClientesPage] = useState(0);
   const [showInactive, setShowInactive] = useState(false);
   const [filterCadenaId, setFilterCadenaId] = useState('TODAS');
   const [filterZonaId, setFilterZonaId] = useState('TODAS');
@@ -133,8 +170,6 @@ export const MasterDataManagementView: React.FC = () => {
     [masterData.zonas]
   );
 
-  const normQuery = normalizeSearchText(searchTerm);
-
   const filteredClientes = useMemo(() => {
     return masterData.clientes.filter((c) => {
       if (!showInactive && !c.activo) return false;
@@ -143,13 +178,11 @@ export const MasterDataManagementView: React.FC = () => {
       if (filterCanal !== 'TODOS' && (c.canal || '').toLowerCase() !== filterCanal.toLowerCase()) {
         return false;
       }
-      if (!normQuery) return true;
+      if (!searchTerm.trim()) return true;
       const cadName = c.cadena_id ? cadenasById.get(c.cadena_id)?.nombre || '' : '';
       const zonName = c.zona_id ? zonasById.get(c.zona_id)?.nombre || '' : '';
-      const hay = normalizeSearchText(
-        `${c.codigo_cliente} ${c.razon_social} ${c.nombre_comercial || ''} ${c.rif || ''} ${c.zona || ''} ${zonName} ${cadName} ${c.ruta || ''} ${c.codigo_vendedor || ''} ${c.vendedor?.nombre_completo || ''}`
-      );
-      return hay.includes(normQuery);
+      const hay = `${c.codigo_cliente} ${c.razon_social} ${c.nombre_comercial || ''} ${c.rif || ''} ${c.zona || ''} ${zonName} ${cadName} ${c.ruta || ''} ${c.codigo_vendedor || ''} ${c.vendedor?.nombre_completo || ''}`;
+      return matchesCommercialSearch(hay, searchTerm);
     });
   }, [
     masterData.clientes,
@@ -157,7 +190,7 @@ export const MasterDataManagementView: React.FC = () => {
     filterCadenaId,
     filterZonaId,
     filterCanal,
-    normQuery,
+    searchTerm,
     cadenasById,
     zonasById,
   ]);
@@ -165,30 +198,46 @@ export const MasterDataManagementView: React.FC = () => {
   const filteredCadenas = useMemo(() => {
     return masterData.cadenas.filter((c) => {
       if (!showInactive && !c.activo) return false;
-      if (!normQuery) return true;
-      return normalizeSearchText(`${c.codigo} ${c.nombre} ${c.tipo_canal}`).includes(normQuery);
+      if (!searchTerm.trim()) return true;
+      return matchesCommercialSearch(`${c.codigo} ${c.nombre} ${c.tipo_canal}`, searchTerm);
     });
-  }, [masterData.cadenas, showInactive, normQuery]);
+  }, [masterData.cadenas, showInactive, searchTerm]);
 
   const filteredZonas = useMemo(() => {
     return masterData.zonas.filter((z) => {
       if (!showInactive && !z.activo) return false;
-      if (!normQuery) return true;
-      return normalizeSearchText(
-        `${z.codigo} ${z.nombre} ${z.ciudad || ''} ${z.estado || ''}`
-      ).includes(normQuery);
+      if (!searchTerm.trim()) return true;
+      return matchesCommercialSearch(
+        `${z.codigo} ${z.nombre} ${z.ciudad || ''} ${z.estado || ''}`,
+        searchTerm
+      );
     });
-  }, [masterData.zonas, showInactive, normQuery]);
+  }, [masterData.zonas, showInactive, searchTerm]);
 
   const filteredVendedores = useMemo(() => {
     return masterData.vendedores.filter((v) => {
       if (!showInactive && !v.activo) return false;
-      if (!normQuery) return true;
-      return normalizeSearchText(
-        `${v.codigo_vendedor} ${v.nombre_completo} ${v.zona || ''} ${v.supervisor || ''} ${v.email || ''}`
-      ).includes(normQuery);
+      if (!searchTerm.trim()) return true;
+      return matchesCommercialSearch(
+        `${v.codigo_vendedor} ${v.nombre_completo} ${v.zona || ''} ${v.supervisor || ''} ${v.email || ''}`,
+        searchTerm
+      );
     });
-  }, [masterData.vendedores, showInactive, normQuery]);
+  }, [masterData.vendedores, showInactive, searchTerm]);
+
+  const pagedClientes = useMemo(() => {
+    const start = clientesPage * CLIENTES_PAGE_SIZE;
+    return filteredClientes.slice(start, start + CLIENTES_PAGE_SIZE);
+  }, [filteredClientes, clientesPage]);
+
+  const handleRefreshMasterData = async () => {
+    const res = await masterData.refrescar();
+    if (res && !res.ok) {
+      notify('error', res.error || 'No se pudo actualizar Data Maestra desde Supabase.');
+    } else {
+      notify('ok', 'Data Maestra actualizada desde Supabase.');
+    }
+  };
 
   const geofencedCount = useMemo(
     () => masterData.clientes.filter((c) => c.activo && c.latitud !== null && c.longitud !== null).length,
@@ -440,8 +489,11 @@ export const MasterDataManagementView: React.FC = () => {
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-red-600/20 text-red-400 uppercase tracking-wider border border-red-500/30">
                 FUENTE ÚNICA DE VERDAD · DATA MAESTRA
               </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-300 border border-white/10">
-                Sede activa: {activeSucursal || verifiedSucursal || 'GLOBAL'}
+              <span
+                data-testid="master-active-region-badge"
+                className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-300 border border-white/10"
+              >
+                Región activa: {activeRegionBadgeLabel}
               </span>
             </div>
             <h2 className="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
@@ -450,19 +502,20 @@ export const MasterDataManagementView: React.FC = () => {
             </h2>
             <p className="text-xs text-zinc-400 mt-1 max-w-3xl">
               Administra la cartera real de clientes en PostgreSQL/Supabase con geocercas GPS configurables,
-              cadenas comerciales (con Co-Branding B2B) y zonas territoriales aisladas por región (Zulia, Valencia, Centro, Oriente y Capital).
+              cadenas comerciales (con Co-Branding B2B) y zonas territoriales aisladas por región oficial (OCCIDENTE, CENTRO y ANDES).
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => void masterData.refrescar()}
+              data-testid="btn-actualizar-maestros"
+              onClick={() => void handleRefreshMasterData()}
               disabled={masterData.cargando}
               className="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-bold text-zinc-200 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${masterData.cargando ? 'animate-spin' : ''}`} />
-              <span>Actualizar</span>
+              <span>{masterData.cargando ? 'Actualizando...' : 'Actualizar'}</span>
             </button>
 
             <button
@@ -485,27 +538,49 @@ export const MasterDataManagementView: React.FC = () => {
           </div>
         </div>
 
+        {/* Banner de error real de Data Maestra con Reintento (cero silencios) */}
+        {masterData.error && (
+          <div
+            role="alert"
+            data-testid="master-data-error-banner"
+            className="rounded-xl px-4 py-3 text-xs font-semibold flex flex-wrap items-center justify-between gap-3 border bg-red-950/75 border-red-500 text-red-100"
+          >
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <span className="break-words">{masterData.error}</span>
+            </div>
+            <button
+              type="button"
+              data-testid="btn-retry-master-data"
+              onClick={() => void handleRefreshMasterData()}
+              className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[11px] font-extrabold shrink-0 cursor-pointer"
+            >
+              Reintentar
+            </button>
+          </div>
+        )}
+
         {/* KPIs rápidos */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 border-t border-white/[0.08]">
-          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5">
+          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5" data-testid="kpi-clientes-pdvs">
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Clientes / PDVs</div>
             <div className="text-2xl font-black text-white mt-1 font-mono">{masterData.clientes.length}</div>
             <div className="text-[11px] text-emerald-400 mt-0.5">{geofencedCount} con coordenadas GPS</div>
           </div>
-          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5">
+          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5" data-testid="kpi-cadenas-comerciales">
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Cadenas Comerciales</div>
             <div className="text-2xl font-black text-white mt-1 font-mono">{masterData.cadenas.length}</div>
             <div className="text-[11px] text-zinc-400 mt-0.5">Catálogo relacional normalizado</div>
           </div>
-          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5">
+          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5" data-testid="kpi-zonas-geograficas">
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Zonas Geográficas</div>
             <div className="text-2xl font-black text-white mt-1 font-mono">{masterData.zonas.length}</div>
-            <div className="text-[11px] text-zinc-400 mt-0.5">Territorios por sucursal</div>
+            <div className="text-[11px] text-zinc-400 mt-0.5">Territorios por región oficial</div>
           </div>
-          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5">
+          <div className="rounded-xl bg-zinc-950/90 border border-white/10 p-3.5" data-testid="kpi-fuerza-ventas">
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Fuerza de Ventas</div>
             <div className="text-2xl font-black text-white mt-1 font-mono">{masterData.vendedores.length}</div>
-            <div className="text-[11px] text-zinc-400 mt-0.5">Vendedores activos en catálogo</div>
+            <div className="text-[11px] text-zinc-400 mt-0.5">Vendedores activos auditados</div>
           </div>
         </div>
 
@@ -696,7 +771,7 @@ export const MasterDataManagementView: React.FC = () => {
                   <th className="p-3">Zona / Ruta</th>
                   <th className="p-3">Geocerca GPS</th>
                   <th className="p-3">Vendedor</th>
-                  <th className="p-3">Sede</th>
+                  <th className="p-3">Región</th>
                   <th className="p-3 text-center">Estado</th>
                   <th className="p-3 text-right">Acciones</th>
                 </tr>
@@ -709,7 +784,7 @@ export const MasterDataManagementView: React.FC = () => {
                     </td>
                   </tr>
                 )}
-                {filteredClientes.slice(0, 200).map((c) => {
+                {pagedClientes.map((c) => {
                   const cadena = c.cadena_id ? cadenasById.get(c.cadena_id) : null;
                   const zonaCat = c.zona_id ? zonasById.get(c.zona_id) : null;
                   const busy = busyAction === `clientes:${c.id}`;
@@ -747,7 +822,7 @@ export const MasterDataManagementView: React.FC = () => {
                       </td>
                       <td className="p-3 font-mono text-[10px]">
                         <span className="px-2 py-0.5 rounded bg-zinc-900 border border-white/10 text-zinc-200">
-                          {c.sucursal || 'SIN SEDE'}
+                          {resolveClientOfficialRegionLabel(c)}
                         </span>
                       </td>
                       <td className="p-3 text-center">
@@ -787,6 +862,33 @@ export const MasterDataManagementView: React.FC = () => {
                 })}
               </tbody>
             </table>
+          )}
+          {subTab === 'clientes' && filteredClientes.length > CLIENTES_PAGE_SIZE && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-t border-zinc-800 bg-black text-[11px] font-mono text-zinc-400">
+              <span>
+                Mostrando {clientesPage * CLIENTES_PAGE_SIZE + 1}–
+                {Math.min((clientesPage + 1) * CLIENTES_PAGE_SIZE, filteredClientes.length)} de{' '}
+                {filteredClientes.length} clientes / PDVs
+              </span>
+              <div className="inline-flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={clientesPage === 0}
+                  onClick={() => setClientesPage((p) => Math.max(0, p - 1))}
+                  className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-700 text-white disabled:opacity-40 cursor-pointer"
+                >
+                  Anterior
+                </button>
+                <button
+                  type="button"
+                  disabled={(clientesPage + 1) * CLIENTES_PAGE_SIZE >= filteredClientes.length}
+                  onClick={() => setClientesPage((p) => p + 1)}
+                  className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-700 text-white disabled:opacity-40 cursor-pointer"
+                >
+                  Siguiente
+                </button>
+              </div>
+            </div>
           )}
 
           {subTab === 'cadenas' && (
@@ -887,7 +989,7 @@ export const MasterDataManagementView: React.FC = () => {
                   <th className="p-3">Código</th>
                   <th className="p-3">Zona</th>
                   <th className="p-3">Ciudad / Estado</th>
-                  <th className="p-3">Sede</th>
+                  <th className="p-3">Región</th>
                   <th className="p-3 text-center">Estado</th>
                   <th className="p-3 text-right">Acciones</th>
                 </tr>
@@ -909,7 +1011,9 @@ export const MasterDataManagementView: React.FC = () => {
                       <td className="p-3 text-zinc-300">
                         {[z.ciudad, z.estado].filter(Boolean).join(' · ') || '—'}
                       </td>
-                      <td className="p-3 font-mono text-[10px]">{z.sucursal || 'SIN SEDE'}</td>
+                      <td className="p-3 font-mono text-[10px]">
+                        {resolveClientOfficialRegionLabel(z)}
+                      </td>
                       <td className="p-3 text-center">
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
@@ -955,7 +1059,7 @@ export const MasterDataManagementView: React.FC = () => {
                   <th className="p-3">Nombre Completo</th>
                   <th className="p-3">Contacto</th>
                   <th className="p-3">Zona / Supervisor</th>
-                  <th className="p-3">Sede</th>
+                  <th className="p-3">Región</th>
                   <th className="p-3 text-center">Estado</th>
                   <th className="p-3 text-right">Acciones</th>
                 </tr>
@@ -972,8 +1076,24 @@ export const MasterDataManagementView: React.FC = () => {
                   const busy = busyAction === `vendedores:${v.id}`;
                   return (
                     <tr key={v.id} className="hover:bg-zinc-900/50 transition">
-                      <td className="p-3 font-mono font-bold text-white">{v.codigo_vendedor}</td>
-                      <td className="p-3 font-bold text-white">{v.nombre_completo}</td>
+                      <td className="p-3 font-mono font-bold text-white">
+                        <div>{v.codigo_vendedor}</div>
+                        {typeof v.metadata?.rutas_consolidadas === 'number' &&
+                          v.metadata.rutas_consolidadas > 1 && (
+                            <div className="text-[10px] text-amber-400 font-normal">
+                              {v.metadata.rutas_consolidadas} rutas consolidadas
+                            </div>
+                          )}
+                      </td>
+                      <td className="p-3 font-bold text-white">
+                        <div>{v.nombre_completo}</div>
+                        {typeof v.metadata?.clientes_activos === 'number' &&
+                          v.metadata.clientes_activos > 0 && (
+                            <div className="text-[10px] text-zinc-400 font-mono font-normal">
+                              {v.metadata.clientes_activos} PDVs activos
+                            </div>
+                          )}
+                      </td>
                       <td className="p-3 text-zinc-300">
                         <div>{v.email || '—'}</div>
                         <div className="text-[10px] text-zinc-500 font-mono">{v.telefono || ''}</div>
@@ -982,7 +1102,9 @@ export const MasterDataManagementView: React.FC = () => {
                         <div>{v.zona || '—'}</div>
                         <div className="text-[10px] text-zinc-500">{v.supervisor || ''}</div>
                       </td>
-                      <td className="p-3 font-mono text-[10px]">{v.sucursal || 'SIN SEDE'}</td>
+                      <td className="p-3 font-mono text-[10px]">
+                        {resolveClientOfficialRegionLabel(v)}
+                      </td>
                       <td className="p-3 text-center">
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
@@ -1215,11 +1337,9 @@ export const MasterDataManagementView: React.FC = () => {
                     onChange={(e) => setCliSucursal(e.target.value as SucursalMaestro)}
                     className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white"
                   >
-                    <option value="ZULIA">ZULIA</option>
-                    <option value="VALENCIA">VALENCIA</option>
-                    <option value="CENTRO">CENTRO</option>
-                    <option value="ORIENTE">ORIENTE</option>
-                    <option value="CAPITAL">CAPITAL</option>
+                  <option value="ZULIA">OCCIDENTE (Zulia · Falcón)</option>
+                  <option value="CENTRO">CENTRO (Carabobo · Aragua · Capital)</option>
+                  <option value="VALENCIA">ANDES / Eje Occidental</option>
                   </select>
                 </div>
               )}
@@ -1303,11 +1423,9 @@ export const MasterDataManagementView: React.FC = () => {
                   onChange={(e) => setCadSucursal(e.target.value as SucursalMaestro)}
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white"
                 >
-                  <option value="ZULIA">ZULIA</option>
-                  <option value="VALENCIA">VALENCIA</option>
-                  <option value="CENTRO">CENTRO</option>
-                  <option value="ORIENTE">ORIENTE</option>
-                  <option value="CAPITAL">CAPITAL</option>
+                  <option value="ZULIA">OCCIDENTE (Zulia · Falcón)</option>
+                  <option value="CENTRO">CENTRO (Carabobo · Aragua · Capital)</option>
+                  <option value="VALENCIA">ANDES / Eje Occidental</option>
                 </select>
               </div>
             )}
@@ -1393,11 +1511,9 @@ export const MasterDataManagementView: React.FC = () => {
                   onChange={(e) => setZonSucursal(e.target.value as SucursalMaestro)}
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white"
                 >
-                  <option value="ZULIA">ZULIA</option>
-                  <option value="VALENCIA">VALENCIA</option>
-                  <option value="CENTRO">CENTRO</option>
-                  <option value="ORIENTE">ORIENTE</option>
-                  <option value="CAPITAL">CAPITAL</option>
+                  <option value="ZULIA">OCCIDENTE (Zulia · Falcón)</option>
+                  <option value="CENTRO">CENTRO (Carabobo · Aragua · Capital)</option>
+                  <option value="VALENCIA">ANDES / Eje Occidental</option>
                 </select>
               </div>
             )}
@@ -1501,11 +1617,9 @@ export const MasterDataManagementView: React.FC = () => {
                   onChange={(e) => setVendSucursal(e.target.value as SucursalMaestro)}
                   className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white"
                 >
-                  <option value="ZULIA">ZULIA</option>
-                  <option value="VALENCIA">VALENCIA</option>
-                  <option value="CENTRO">CENTRO</option>
-                  <option value="ORIENTE">ORIENTE</option>
-                  <option value="CAPITAL">CAPITAL</option>
+                  <option value="ZULIA">OCCIDENTE (Zulia · Falcón)</option>
+                  <option value="CENTRO">CENTRO (Carabobo · Aragua · Capital)</option>
+                  <option value="VALENCIA">ANDES / Eje Occidental</option>
                 </select>
               </div>
             )}

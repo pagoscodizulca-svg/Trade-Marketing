@@ -215,12 +215,12 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     assert.ok(!fallbackHtml.includes('No debe mostrarse'));
   });
 
-  await t.test('b) RegionGateSelector: modo gate (5 hubs + Comparativo) para super_admin/contraloria y modo bar bloqueado para coordinacion', () => {
+  await t.test('b) RegionGateSelector: modo gate (3 regiones reales OCCIDENTE/CENTRO/ANDES + Todas + Comparativo) para super_admin/contraloria y modo bar bloqueado para coordinacion', () => {
     const gateHtml = renderToStaticMarkup(
       <RegionGateSelector
         mode="gate"
         canSwitchSucursal={true}
-        activeSucursal="ZULIA"
+        activeSucursal="OCCIDENTE"
         userRoleLabel="Contraloría"
         userEmail="contraloria@codizulca.com"
         onSelectSucursal={() => undefined}
@@ -229,18 +229,13 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     );
 
     assert.match(gateHtml, /data-testid="region-gate-selector"/);
+    assert.match(gateHtml, /data-testid="region-gate-card-ALL"/);
     assert.match(gateHtml, /data-testid="region-gate-comparativo-btn"/);
     assert.match(gateHtml, /Comparativo/);
 
-    for (const [code, label] of [
-      ['ZULIA', 'Zulia'],
-      ['VALENCIA', 'Valencia'],
-      ['CENTRO', 'Centro'],
-      ['ORIENTE', 'Oriente'],
-      ['CAPITAL', 'Capital'],
-    ] as const) {
+    for (const code of ['OCCIDENTE', 'CENTRO', 'ANDES'] as const) {
       assert.match(gateHtml, new RegExp(`data-testid="region-gate-card-${code}"`));
-      assert.ok(gateHtml.includes(`Sucursal ${label}`), `Falta tarjeta para Sucursal ${label}`);
+      assert.ok(gateHtml.includes(`Región ${code}`), `Falta tarjeta para Región ${code}`);
     }
 
     const lockedBarHtml = renderToStaticMarkup(
@@ -254,7 +249,7 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     );
 
     assert.match(lockedBarHtml, /data-testid="region-bar-locked-badge"/);
-    assert.match(lockedBarHtml, /Sucursal asignada por correo: Sucursal Zulia/);
+    assert.match(lockedBarHtml, /Región asignada por correo: Región OCCIDENTE/);
     assert.ok(
       !lockedBarHtml.includes('data-testid="region-bar-select"'),
       'Sin selector desplegable en modo bloqueado'

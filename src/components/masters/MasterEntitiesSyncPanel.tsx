@@ -8,7 +8,7 @@
  *
  * Estética corporativa estricta: Negro Obsidiana (#09090B / #121215), Rojo (#DC2626) y Blanco (#FFFFFF).
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -71,6 +71,9 @@ import {
   PROMOTORA_CATEGORIAS,
   classifyPromotoraCategoriaOficial,
   computePromotorasCategoryStats,
+  isAllowedRegionCode,
+  normalizeRegionName,
+  type AllowedRegionCode,
 } from '../../utils/regionalSyncClassifier';
 
 export type FiveMasterEntityTab =
@@ -114,12 +117,30 @@ export interface MasterEntitiesSyncPanelProps {
   qaOverride?: MasterEntitiesSyncPanelQaOverride;
 }
 
+function matchesCommercialSearchText(haystack: string, query: string): boolean {
+  const q = query.trim();
+  if (!q) return true;
+  const norm = (s: string) =>
+    s
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+  if (norm(haystack).includes(norm(q))) return true;
+  const compact = (s: string) => norm(s).replace(/[^A-Z0-9Ñ]+/g, '');
+  const cq = compact(q);
+  return cq.length >= 2 && compact(haystack).includes(cq);
+}
+
 function resolveRegionLabel(
-  row: { region_id?: string | null; sucursal?: string | null },
+  row: { region_id?: string | null; sucursal?: string | null; metadata?: Record<string, unknown> },
   regionesById: Map<string, RegionMaestra>
 ): string {
   if (row.region_id && regionesById.has(row.region_id)) {
     return regionesById.get(row.region_id)!.nombre;
+  }
+  const metaRegion = normalizeRegionName(row.metadata?.region_codigo);
+  if (metaRegion) {
+    return metaRegion;
   }
   if (row.sucursal && isOperativeSucursal(row.sucursal)) {
     return SUCURSAL_LABELS[row.sucursal];
@@ -128,18 +149,24 @@ function resolveRegionLabel(
 }
 
 function resolveRegionCode(
-  row: { region_id?: string | null; sucursal?: string | null },
+  row: { region_id?: string | null; sucursal?: string | null; metadata?: Record<string, unknown> },
   regionesById: Map<string, RegionMaestra>
-): SucursalMaestro | null {
+): AllowedRegionCode | SucursalMaestro | null {
+  if (row.region_id && regionesById.has(row.region_id)) {
+    const rawCode = regionesById.get(row.region_id)!.codigo.trim().toUpperCase();
+    if (isAllowedRegionCode(rawCode)) return rawCode;
+    const norm = normalizeSucursalCodigo(rawCode);
+    if (norm && isOperativeSucursal(norm)) return norm;
+  }
+  const metaRegion = normalizeRegionName(row.metadata?.region_codigo);
+  if (metaRegion) return metaRegion;
   if (row.sucursal && isOperativeSucursal(row.sucursal)) {
     return row.sucursal;
   }
-  if (row.region_id && regionesById.has(row.region_id)) {
-    const norm = normalizeSucursalCodigo(regionesById.get(row.region_id)!.codigo);
-    if (norm && isOperativeSucursal(norm)) return norm;
-  }
   return null;
 }
+
+const MASTER_TABLE_PAGE_SIZE = 100;
 
 export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = ({ qaOverride }) => {
   const appCtx = useOptionalApp();
@@ -167,17 +194,43 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     qaOverride?.clientes ?? appCtx?.masterData.clientes ?? [];
   const isRealtimeConnected: boolean =
     qaOverride?.isRealtimeConnected ?? appCtx?.masterEntities.isRealtimeConnected ?? false;
+  const syncError: string | null =
+    qaOverride !== undefined
+      ? null
+      : appCtx?.masterEntities.error || appCtx?.masterData.error || null;
+  const isSyncLoading: boolean =
+    qaOverride !== undefined
+      ? false
+      : Boolean(appCtx?.masterEntities.isLoading || appCtx?.masterData.cargando);
 
   const [activeTab, setActiveTab] = useState<FiveMasterEntityTab>(
     qaOverride?.initialTab ?? 'productos'
   );
-  const [scopeFilter, setScopeFilter] = useState<MasterRegionScopeFilter>(
-    qaOverride?.initialScope ?? (isSuperAdmin ? 'ALL' : ((verifiedSucursal as SucursalMaestro) || 'ZULIA'))
-  );
+  const [scopeFilter, setScopeFilter] = useState<MasterRegionScopeFilter>(() => {
+    if (qaOverride?.initialScope) return qaOverride.initialScope;
+    if (isSuperAdmin) {
+      return appCtx?.activeRegionScope ?? 'ALL';
+    }
+    const official = normalizeRegionName(verifiedSucursal);
+    return official ?? ((verifiedSucursal as SucursalMaestro) || 'OCCIDENTE');
+  });
   const [search, setSearch] = useState('');
+  const [tablePage, setTablePage] = useState(0);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [assignDrafts, setAssignDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (qaOverride !== undefined || !isSuperAdmin) return;
+    if (appCtx?.activeRegionScope && scopeFilter !== 'UNASSIGNED') {
+      setScopeFilter(appCtx.activeRegionScope);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appCtx?.activeRegionScope, isSuperAdmin, qaOverride]);
+
+  useEffect(() => {
+    setTablePage(0);
+  }, [activeTab, scopeFilter, search]);
 
   // Modal Producto Nacional (solo super_admin)
   const [prodModalOpen, setProdModalOpen] = useState(false);
@@ -248,6 +301,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
   const matchesRegionalScope = (row: {
     region_id?: string | null;
     sucursal?: string | null;
+    metadata?: Record<string, unknown>;
   }): boolean => {
     // Regla fail-closed en defensa en profundidad: un usuario no-super_admin jamás ve filas sin región
     if (!isSuperAdmin) {
@@ -257,7 +311,10 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
       }
       if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
         const code = resolveRegionCode(row, regionesById);
-        return code === verifiedSucursal;
+        if (code === verifiedSucursal) return true;
+        const verifiedOfficial = normalizeRegionName(verifiedSucursal);
+        const rowOfficial = normalizeRegionName(code);
+        return Boolean(verifiedOfficial && rowOfficial && verifiedOfficial === rowOfficial);
       }
       return false;
     }
@@ -265,17 +322,21 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     if (scopeFilter === 'ALL') return true;
     if (scopeFilter === 'UNASSIGNED') return isRecordQuarantined(row);
     const code = resolveRegionCode(row, regionesById);
-    return code === scopeFilter;
+    if (code === scopeFilter) return true;
+    const targetOfficial = normalizeRegionName(scopeFilter);
+    const rowOfficial = normalizeRegionName(code);
+    return Boolean(targetOfficial && rowOfficial && targetOfficial === rowOfficial);
   };
 
-  const q = search.trim().toLowerCase();
+  const q = search.trim();
 
   const visibleProductos = useMemo(() => {
     return productos.filter((p) => {
       if (!q) return true;
-      return `${p.codigo} ${p.nombre} ${p.categoria || ''} ${p.marca || ''}`
-        .toLowerCase()
-        .includes(q);
+      return matchesCommercialSearchText(
+        `${p.codigo} ${p.nombre} ${p.categoria || ''} ${p.marca || ''} ${String(p.metadata?.regiones ?? '')}`,
+        q
+      );
     });
   }, [productos, q]);
 
@@ -283,9 +344,10 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     return clientes.filter((c) => {
       if (!matchesRegionalScope(c)) return false;
       if (!q) return true;
-      return `${c.codigo_cliente} ${c.razon_social} ${c.nombre_comercial || ''} ${c.ciudad || ''} ${c.zona || ''}`
-        .toLowerCase()
-        .includes(q);
+      return matchesCommercialSearchText(
+        `${c.codigo_cliente} ${c.razon_social} ${c.nombre_comercial || ''} ${c.rif || ''} ${c.ciudad || ''} ${c.zona || ''} ${c.vendedor?.nombre_completo || ''}`,
+        q
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientes, q, scopeFilter, isSuperAdmin, verifiedRegionId, verifiedSucursal, regionesById]);
@@ -295,9 +357,10 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
       if (!matchesRegionalScope(p)) return false;
       if (!q) return true;
       const cat = classifyPromotoraCategoriaOficial(p as unknown as Record<string, unknown>);
-      return `${p.nombre_completo} ${p.email || ''} ${p.ciudad || ''} ${p.estado || ''} ${cat}`
-        .toLowerCase()
-        .includes(q);
+      return matchesCommercialSearchText(
+        `${p.nombre_completo} ${p.email || ''} ${p.ciudad || ''} ${p.estado || ''} ${p.direccion || ''} ${cat}`,
+        q
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [promotoras, q, scopeFilter, isSuperAdmin, verifiedRegionId, verifiedSucursal, regionesById]);
@@ -323,23 +386,50 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     return supervisores.filter((s) => {
       if (!matchesRegionalScope(s)) return false;
       if (!q) return true;
-      return `${s.codigo || ''} ${s.nombre} ${s.email || ''} ${s.zona || ''}`
-        .toLowerCase()
-        .includes(q);
+      return matchesCommercialSearchText(
+        `${s.codigo || ''} ${s.nombre} ${s.email || ''} ${s.telefono || ''} ${s.zona || ''}`,
+        q
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supervisores, q, scopeFilter, isSuperAdmin, verifiedRegionId, verifiedSucursal, regionesById]);
 
   const visibleRegiones = useMemo(() => {
-    if (isSuperAdmin) return regiones;
-    return regiones.filter((r) => {
-      if (verifiedRegionId) return r.id === verifiedRegionId;
-      if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
-        return normalizeSucursalCodigo(r.codigo) === verifiedSucursal;
-      }
-      return false;
-    });
-  }, [isSuperAdmin, regiones, verifiedRegionId, verifiedSucursal]);
+    const base = isSuperAdmin
+      ? regiones
+      : regiones.filter((r) => {
+          if (verifiedRegionId) return r.id === verifiedRegionId;
+          if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
+            const officialReg = normalizeRegionName(r.codigo);
+            const officialVer = normalizeRegionName(verifiedSucursal);
+            return (
+              normalizeSucursalCodigo(r.codigo) === verifiedSucursal ||
+              Boolean(officialReg && officialVer && officialReg === officialVer)
+            );
+          }
+          return false;
+        });
+    if (!q) return base;
+    return base.filter((r) => matchesCommercialSearchText(`${r.codigo} ${r.nombre}`, q));
+  }, [isSuperAdmin, regiones, verifiedRegionId, verifiedSucursal, q]);
+
+  const pagedProductos = useMemo(
+    () =>
+      visibleProductos.slice(
+        tablePage * MASTER_TABLE_PAGE_SIZE,
+        (tablePage + 1) * MASTER_TABLE_PAGE_SIZE
+      ),
+    [visibleProductos, tablePage]
+  );
+
+  const pagedClientes = useMemo(
+    () =>
+      visibleClientes.slice(
+        tablePage * MASTER_TABLE_PAGE_SIZE,
+        (tablePage + 1) * MASTER_TABLE_PAGE_SIZE
+      ),
+    [visibleClientes, tablePage]
+  );
 
   // Supervisores compatibles con la región elegida en el modal de Promotora (evita cruce en UI)
   const sameRegionSupervisores = useMemo(() => {
@@ -363,8 +453,16 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
   const handleRefreshNow = async () => {
     setBusyKey('refresh');
     try {
-      await Promise.all([appCtx?.masterEntities.refresh(true), appCtx?.masterData.refrescar()]);
-      flashNotice('ok', 'Entidades maestras sincronizadas en vivo desde PostgreSQL.');
+      const [entRes, dataRes] = await Promise.all([
+        appCtx?.masterEntities.refresh(true),
+        appCtx?.masterData.refrescar(),
+      ]);
+      const errors = [entRes?.error, dataRes?.error].filter(Boolean);
+      if (errors.length > 0) {
+        flashNotice('err', `Error revalidando Data Maestra: ${errors.join(' · ')}`);
+      } else {
+        flashNotice('ok', 'Entidades maestras sincronizadas en vivo desde Supabase.');
+      }
     } catch (err) {
       flashNotice('err', err instanceof Error ? err.message : 'No se pudo refrescar.');
     } finally {
@@ -583,14 +681,39 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
 
         <button
           type="button"
+          data-testid="btn-revalidar-bd"
           onClick={() => void handleRefreshNow()}
-          disabled={busyKey === 'refresh'}
+          disabled={busyKey === 'refresh' || isSyncLoading}
           className="px-3 py-2 rounded-xl bg-[#09090B] hover:bg-zinc-900 border border-zinc-700 text-xs font-bold text-white inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
         >
-          <RefreshCw className={`w-3.5 h-3.5 text-red-500 ${busyKey === 'refresh' ? 'animate-spin' : ''}`} />
-          <span>Revalidar BD</span>
+          <RefreshCw
+            className={`w-3.5 h-3.5 text-red-500 ${busyKey === 'refresh' || isSyncLoading ? 'animate-spin' : ''}`}
+          />
+          <span>{busyKey === 'refresh' || isSyncLoading ? 'Sincronizando...' : 'Revalidar BD'}</span>
         </button>
       </div>
+
+      {/* Banner persistente de error real con botón Reintentar (cero silencios) */}
+      {syncError && (
+        <div
+          role="alert"
+          data-testid="master-sync-error-banner"
+          className="rounded-xl px-3.5 py-3 text-xs font-semibold flex flex-wrap items-center justify-between gap-3 border bg-red-950/75 border-red-500 text-red-100"
+        >
+          <div className="flex items-start gap-2 min-w-0 flex-1">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <span className="break-words">{syncError}</span>
+          </div>
+          <button
+            type="button"
+            data-testid="btn-retry-master-sync"
+            onClick={() => void handleRefreshNow()}
+            className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[11px] font-extrabold shrink-0 cursor-pointer"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Aviso de feedback */}
       {notice && (
@@ -624,16 +747,35 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
               data-testid="master-scope-select"
               aria-label="Filtrar entidades maestras por región"
               value={scopeFilter}
-              onChange={(e) => setScopeFilter(e.target.value as MasterRegionScopeFilter)}
+              onChange={(e) => {
+                const next = e.target.value as MasterRegionScopeFilter;
+                setScopeFilter(next);
+                if (qaOverride === undefined && appCtx?.setActiveRegionScope) {
+                  if (next === 'ALL' || isAllowedRegionCode(next)) {
+                    appCtx.setActiveRegionScope(next);
+                  } else if (next !== 'UNASSIGNED') {
+                    const mapped = normalizeRegionName(next);
+                    if (mapped) appCtx.setActiveRegionScope(mapped);
+                  }
+                }
+              }}
               className="px-3 py-1.5 rounded-lg bg-[#121215] border border-zinc-700 text-xs font-bold text-white focus:outline-none focus:border-red-500 cursor-pointer"
             >
               <option value="ALL">Todas las Regiones</option>
               {regiones.map((reg) => {
+                const rawUpper = reg.codigo.trim().toUpperCase();
                 const norm = normalizeSucursalCodigo(reg.codigo);
-                const val = norm && isOperativeSucursal(norm) ? norm : reg.codigo;
+                const val = isAllowedRegionCode(rawUpper)
+                  ? rawUpper
+                  : norm && isOperativeSucursal(norm)
+                    ? norm
+                    : reg.codigo;
+                const optionLabel = isAllowedRegionCode(rawUpper)
+                  ? `Región ${reg.nombre}`
+                  : `Sucursal ${reg.nombre}`;
                 return (
                   <option key={reg.id} value={val}>
-                    Sucursal {reg.nombre}
+                    {optionLabel}
                   </option>
                 );
               })}
@@ -839,7 +981,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                   </td>
                 </tr>
               ) : (
-                visibleProductos.map((prod) => (
+                pagedProductos.map((prod) => (
                   <tr key={prod.id} className="hover:bg-[#121215]">
                     <td className="px-3 py-2.5 font-mono font-bold text-red-400">{prod.codigo || '—'}</td>
                     <td className="px-3 py-2.5 font-bold text-white">{prod.nombre}</td>
@@ -907,7 +1049,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
                   </td>
                 </tr>
               ) : (
-                visibleClientes.map((cli) => {
+                pagedClientes.map((cli) => {
                   const quarantined = isRecordQuarantined(cli);
                   const draftKey = `clientes:${cli.id}`;
                   return (
@@ -1297,6 +1439,43 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
             </tbody>
           </table>
         )}
+
+        {(activeTab === 'productos' || activeTab === 'clientes') &&
+          (activeTab === 'productos' ? visibleProductos.length : visibleClientes.length) >
+            MASTER_TABLE_PAGE_SIZE && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 border-t border-zinc-800 bg-[#121215] text-[11px] font-mono text-zinc-400">
+              <span>
+                Mostrando {tablePage * MASTER_TABLE_PAGE_SIZE + 1}–
+                {Math.min(
+                  (tablePage + 1) * MASTER_TABLE_PAGE_SIZE,
+                  activeTab === 'productos' ? visibleProductos.length : visibleClientes.length
+                )}{' '}
+                de {activeTab === 'productos' ? visibleProductos.length : visibleClientes.length}{' '}
+                registros
+              </span>
+              <div className="inline-flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={tablePage === 0}
+                  onClick={() => setTablePage((p) => Math.max(0, p - 1))}
+                  className="px-2.5 py-1 rounded-lg bg-[#09090B] border border-zinc-700 text-white disabled:opacity-40 cursor-pointer"
+                >
+                  Anterior
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    (tablePage + 1) * MASTER_TABLE_PAGE_SIZE >=
+                    (activeTab === 'productos' ? visibleProductos.length : visibleClientes.length)
+                  }
+                  onClick={() => setTablePage((p) => p + 1)}
+                  className="px-2.5 py-1 rounded-lg bg-[#09090B] border border-zinc-700 text-white disabled:opacity-40 cursor-pointer"
+                >
+                  Siguiente
+                </button>
+              </div>
+            </div>
+          )}
       </div>
 
       {/* Modal Producto Nacional (solo super_admin) */}
@@ -1407,14 +1586,14 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
               required
               value={regCodigo}
               onChange={(e) => setRegCodigo(e.target.value)}
-              placeholder="Código (ej. ZULIA)"
+              placeholder="Código (ej. OCCIDENTE)"
               className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
             />
             <input
               required
               value={regNombre}
               onChange={(e) => setRegNombre(e.target.value)}
-              placeholder="Nombre (ej. Zulia)"
+              placeholder="Nombre (ej. OCCIDENTE)"
               className="w-full px-3 py-2 rounded-xl bg-[#09090B] border border-zinc-700 text-xs text-white"
             />
             <div className="flex justify-end gap-2 pt-2">

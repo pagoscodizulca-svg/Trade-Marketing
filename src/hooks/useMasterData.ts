@@ -36,6 +36,10 @@ export interface UseMasterDataOptions {
   deshabilitado?: boolean;
 }
 
+export type MasterDataEntityErrors = Partial<
+  Record<'clientes' | 'vendedores' | 'cadenas' | 'zonas', string>
+>;
+
 export interface UseMasterDataResult {
   vendedores: Vendedor[];
   clientes: ClienteConVendedor[];
@@ -45,8 +49,9 @@ export interface UseMasterDataResult {
   cargando: boolean;
   sincronizando: boolean;
   error: string | null;
+  entityErrors: MasterDataEntityErrors;
   ultimaActualizacionIso: string | null;
-  refrescar: () => Promise<void>;
+  refrescar: () => Promise<{ ok: boolean; error: string | null }>;
   sincronizarArchivo: (
     archivo: File | string | ArrayBuffer,
     opciones?: Omit<OpcionesSincronizacionMaestra, 'nombreArchivo'> & { nombreArchivo?: string }
@@ -76,21 +81,25 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
   const [cargando, setCargando] = useState<boolean>(false);
   const [sincronizando, setSincronizando] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [entityErrors, setEntityErrors] = useState<MasterDataEntityErrors>({});
   const [ultimaActualizacionIso, setUltimaActualizacionIso] = useState<string | null>(null);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeqRef = useRef<number>(0);
 
   const claveFiltrosClientes = JSON.stringify(filtrosClientes ?? {});
   const claveFiltrosVendedores = JSON.stringify(filtrosVendedores ?? {});
 
   const ejecutarCarga = useCallback(
-    async (forzarRefresco = false) => {
+    async (forzarRefresco = false): Promise<{ ok: boolean; error: string | null }> => {
       if (deshabilitado || !isMasterDataSupabaseConfigured) {
-        return;
+        return { ok: true, error: null };
       }
 
+      const seq = ++requestSeqRef.current;
       setCargando(true);
       setError(null);
+      setEntityErrors({});
       try {
         const [vendSettled, cliSettled, cadSettled, zonSettled] = await Promise.allSettled([
           cargarVendedores
@@ -100,36 +109,91 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
             ? obtenerClientesMaestros({ ...(filtrosClientes ?? {}), forzarRefresco })
             : Promise.resolve([]),
           cargarCadenas
-            ? obtenerCadenasComerciales({ soloActivos: false, forzarRefresco })
+            ? obtenerCadenasComerciales({
+                soloActivos: false,
+                region: filtrosClientes?.region,
+                forzarRefresco,
+              })
             : Promise.resolve([]),
           cargarZonas
-            ? obtenerZonasComerciales({ soloActivos: false, forzarRefresco })
+            ? obtenerZonasComerciales({
+                soloActivos: false,
+                region: filtrosClientes?.region,
+                forzarRefresco,
+              })
             : Promise.resolve([]),
         ]);
-        if (cargarVendedores && vendSettled.status === 'fulfilled') {
-          setVendedores(vendSettled.value);
+
+        // Descartar respuestas obsoletas si el usuario cambió de región mientras la petición volaba
+        if (seq !== requestSeqRef.current) {
+          return { ok: true, error: null };
         }
-        if (cargarClientes && cliSettled.status === 'fulfilled') {
-          setClientes(cliSettled.value);
+
+        const nextErrors: MasterDataEntityErrors = {};
+
+        if (cargarVendedores) {
+          if (vendSettled.status === 'fulfilled') {
+            setVendedores(vendSettled.value);
+          } else {
+            nextErrors.vendedores =
+              vendSettled.reason instanceof Error
+                ? vendSettled.reason.message
+                : 'Error consultando vendedores maestros.';
+          }
         }
-        if (cargarCadenas && cadSettled.status === 'fulfilled') {
-          setCadenas(cadSettled.value);
+        if (cargarClientes) {
+          if (cliSettled.status === 'fulfilled') {
+            setClientes(cliSettled.value);
+          } else {
+            nextErrors.clientes =
+              cliSettled.reason instanceof Error
+                ? cliSettled.reason.message
+                : 'Error consultando clientes maestros.';
+          }
         }
-        if (cargarZonas && zonSettled.status === 'fulfilled') {
-          setZonas(zonSettled.value);
+        if (cargarCadenas) {
+          if (cadSettled.status === 'fulfilled') {
+            setCadenas(cadSettled.value);
+          } else {
+            nextErrors.cadenas =
+              cadSettled.reason instanceof Error
+                ? cadSettled.reason.message
+                : 'Error consultando cadenas comerciales.';
+          }
         }
-        if (cliSettled.status === 'rejected') {
-          const reason = cliSettled.reason;
-          setError(reason instanceof Error ? reason.message : 'Error consultando clientes maestros.');
-        } else if (vendSettled.status === 'rejected' && !cargarClientes) {
-          const reason = vendSettled.reason;
-          setError(reason instanceof Error ? reason.message : 'Error consultando vendedores maestros.');
+        if (cargarZonas) {
+          if (zonSettled.status === 'fulfilled') {
+            setZonas(zonSettled.value);
+          } else {
+            nextErrors.zonas =
+              zonSettled.reason instanceof Error
+                ? zonSettled.reason.message
+                : 'Error consultando zonas geográficas.';
+          }
         }
+
+        const errorList = Object.entries(nextErrors);
+        if (errorList.length > 0) {
+          const summary = errorList
+            .map(([k, msg]) => `${k.toUpperCase()}: ${msg}`)
+            .join(' · ');
+          setEntityErrors(nextErrors);
+          setError(summary);
+          console.error('[useMasterData] Error cargando Data Maestra:', nextErrors);
+          return { ok: false, error: summary };
+        }
+
         setUltimaActualizacionIso(new Date().toISOString());
+        return { ok: true, error: null };
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Error consultando Data Maestra.');
+        const msg = err instanceof Error ? err.message : 'Error consultando Data Maestra.';
+        setError(msg);
+        console.error('[useMasterData] Excepción:', msg);
+        return { ok: false, error: msg };
       } finally {
-        setCargando(false);
+        if (seq === requestSeqRef.current) {
+          setCargando(false);
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -195,7 +259,8 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
   }, [deshabilitado, suscribirCambiosRealtime]);
 
   const refrescar = useCallback(async () => {
-    await ejecutarCarga(true);
+    invalidarCacheMaestros();
+    return ejecutarCarga(true);
   }, [ejecutarCarga]);
 
   const sincronizarArchivo = useCallback(
@@ -253,6 +318,7 @@ export function useMasterData(options: UseMasterDataOptions = {}): UseMasterData
     cargando,
     sincronizando,
     error,
+    entityErrors,
     ultimaActualizacionIso,
     refrescar,
     sincronizarArchivo,

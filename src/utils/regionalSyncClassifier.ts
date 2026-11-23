@@ -58,9 +58,66 @@ export function normalizeAllowedRegionStrict(raw: unknown): AllowedRegionCode | 
 }
 
 /**
+ * Fuente Única de Verdad para normalización regional del sistema Trade Marketing:
+ * Mapea exclusivamente al catálogo oficial de `public."Regiones"` (`OCCIDENTE`, `CENTRO`, `ANDES`)
+ * traduciendo de forma segura alias legados o direcciones territoriales:
+ *   - `OCCIDENTE` (Prioridad 1): Zulia, Maracaibo, San Francisco, Cabimas, Falcón, Coro, Punto Fijo, etc.
+ *   - `CENTRO`    (Prioridad 2): Valencia, Carabobo, Aragua, Maracay, Distrito Capital, Caracas, Guárico, Cojedes.
+ *   - `ANDES`     (Prioridad 3): Andes, Mérida, Táchira, Trujillo, San Cristóbal, Valera, Barinas.
+ * Cualquier otro valor (`GLOBAL`, `TODAS`, `ORIENTE`, vacío, etc.) devuelve `null`.
+ */
+export function normalizeRegionName(raw: unknown): AllowedRegionCode | null {
+  const strict = normalizeAllowedRegionStrict(raw);
+  if (strict) return strict;
+
+  const norm = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+  if (!norm) return null;
+
+  const stripped = norm.replace(/^(REGION|SUCURSAL|SEDE|HUB|ESTADO|ZONA|OFICINA)\s+/, '').trim();
+  if (isAllowedRegionCode(stripped)) {
+    return stripped;
+  }
+
+  // Prioridad 1: OCCIDENTE (Zulia + Falcón + eje occidental, incluyendo zonas locales de Maracaibo/COL)
+  if (
+    stripped === 'ZULIA' ||
+    /\b(OCCIDENTE|ZULIA|MARACAIBO|SAN FRANCISCO|CABIMAS|CIUDAD OJEDA|LAGUNILLAS|MACHIQUES|LA VILLA|MARA|MOJAN|CUATRICENTENARIO|VARILLAL|LA LIMPIA|LA POPULAR|EL SILENCIO|EL BAJO|SANTA MARIA|PLAZA DE LAS MADRES|DIA DE LAS MADRES|C2|FALCON|CORO|PUNTO FIJO|PARAGUANA|LARA|BARQUISIMETO)\b/.test(
+      norm
+    )
+  ) {
+    return 'OCCIDENTE';
+  }
+
+  // Prioridad 2: CENTRO (Carabobo/Valencia + Aragua/Maracay + Distrito Capital/Caracas según "Sucursales")
+  if (
+    stripped === 'VALENCIA' ||
+    stripped === 'CENTRO' ||
+    stripped === 'CAPITAL' ||
+    /\b(CENTRO|VALENCIA|CARABOBO|NAGUANAGUA|SAN DIEGO|GUACARA|TOCUYITO|LOS GUAYOS|PARAPARAL|PUERTO CABELLO|LIBERTADOR|ARAGUA|MARACAY|TURMERO|CAGUA|LA VICTORIA|LA BARRACA|DISTRITO CAPITAL|CARACAS|MIRANDA|LA GUAIRA|EL PARAISO|MONTALBAN|PLAZA VENEZUELA|COJEDES|GUARICO)\b/.test(
+      norm
+    )
+  ) {
+    return 'CENTRO';
+  }
+
+  // Prioridad 3: ANDES
+  if (/\b(ANDES|MERIDA|TACHIRA|TRUJILLO|SAN CRISTOBAL|VALERA|BARINAS)\b/.test(norm)) {
+    return 'ANDES';
+  }
+
+  return null;
+}
+
+/**
  * Puente explícito desde nombres de sucursal o territorio legado hacia las 3 regiones reales
  * de `"Regiones"` (`ZULIA -> OCCIDENTE`, `VALENCIA / CENTRO -> CENTRO`, `ANDES -> ANDES`).
- * Cualquier región fuera del catálogo (`ORIENTE`, `CAPITAL`, `GLOBAL`, etc.) devuelve `null`.
+ * Nota: Mantiene el contrato estricto donde `ORIENTE` / `GLOBAL` devuelven `null`.
  */
 export function mapLegacySucursalToAllowedRegion(raw: unknown): AllowedRegionCode | null {
   const strict = normalizeAllowedRegionStrict(raw);
@@ -73,22 +130,11 @@ export function mapLegacySucursalToAllowedRegion(raw: unknown): AllowedRegionCod
     .toUpperCase();
   if (!norm) return null;
 
-  if (
-    norm === 'ZULIA' ||
-    /\b(OCCIDENTE|ZULIA|MARACAIBO|SAN FRANCISCO|CABIMAS|CIUDAD OJEDA|FALCON|LARA)\b/.test(norm)
-  ) {
-    return 'OCCIDENTE';
+  if (norm === 'CAPITAL' || norm === 'ORIENTE' || norm === 'GLOBAL') {
+    return null;
   }
-  if (
-    norm === 'VALENCIA' ||
-    /\b(CENTRO|VALENCIA|CARABOBO|ARAGUA|MARACAY|NAGUANAGUA|SAN DIEGO|GUACARA)\b/.test(norm)
-  ) {
-    return 'CENTRO';
-  }
-  if (/\b(ANDES|MERIDA|TACHIRA|TRUJILLO|SAN CRISTOBAL|VALERA|BARINAS)\b/.test(norm)) {
-    return 'ANDES';
-  }
-  return null;
+
+  return normalizeRegionName(norm);
 }
 
 export function mapAllowedRegionToLegacySucursal(

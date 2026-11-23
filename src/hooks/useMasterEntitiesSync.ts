@@ -1,13 +1,14 @@
 /**
  * Hook reactivo unificado de sincronización BD <-> Pantallas para las 5 entidades maestras:
- *   1. `public.regiones`
- *   2. `public.productos` (Catálogo Nacional Compartido)
- *   3. `public.supervisores`
- *   4. `public.promotoras`
- *   5. `public.clientes` (enlazado vía `invalidarCacheMaestros` + conteo de cuarentena)
+ *   1. `public."Regiones"` (`OCCIDENTE`, `CENTRO`, `ANDES`)
+ *   2. `public."Productos"` / `vw_productos_detalle` (Catálogo Nacional Compartido)
+ *   3. `public."Supervisores"`
+ *   4. `public.promotoras` (`Fijas` / `Eventuales` / `Merchandising`)
+ *   5. `public."Clientes"` (enlazado vía `invalidarCacheMaestros` + conteo de cuarentena)
  *
- * Usa suscripciones nativas de Supabase Realtime (`postgres_changes`) con debounce
- * anti-ráfagas y limpieza estricta (`removeChannel` + `clearTimeout`) en `useEffect`.
+ * REGLA CERO ERRORES SILENCIADOS:
+ *  - Prohibido tragar fallos HTTP/RLS/esquema devolviendo `[]` en silencio.
+ *  - Cada entidad reporta su propio error en `entityErrors` y se consolida en `error`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -18,6 +19,7 @@ import type {
   SupervisorMaestro,
 } from '../types/masterData';
 import {
+  clearMasterCatalogCaches,
   invalidateMasterCatalogCaches,
   obtenerProductosMaestros,
   obtenerPromotorasMaestras,
@@ -35,10 +37,20 @@ export interface QuarantinedMasterCounts {
   total: number;
 }
 
+export type MasterEntityErrorMap = Partial<
+  Record<'regiones' | 'productos' | 'supervisores' | 'promotoras', string>
+>;
+
+export interface MasterEntitiesRefreshResult {
+  ok: boolean;
+  error: string | null;
+  entityErrors: MasterEntityErrorMap;
+}
+
 export interface UseMasterEntitiesSyncOptions {
   /** Deshabilita cualquier consulta (ej. usuario sin región asignada o sesión pendiente). */
   disabled?: boolean;
-  /** Activa suscripción WebSocket Supabase Realtime sobre las 5 tablas maestras. */
+  /** Activa suscripción WebSocket Supabase Realtime sobre las tablas maestras. */
   enableRealtime?: boolean;
   /** Identificador de sesión/contexto para reiniciar canales y revalidar limpiamente. */
   scopeKey?: string;
@@ -55,8 +67,9 @@ export interface UseMasterEntitiesSyncResult {
   isLoading: boolean;
   isRealtimeConnected: boolean;
   error: string | null;
+  entityErrors: MasterEntityErrorMap;
   lastSyncedAtIso: string | null;
-  refresh: (force?: boolean) => Promise<void>;
+  refresh: (force?: boolean) => Promise<MasterEntitiesRefreshResult>;
 }
 
 const REALTIME_DEBOUNCE_MS = 350;
@@ -64,10 +77,23 @@ const REALTIME_DEBOUNCE_MS = 350;
 export function isRecordQuarantined(row: {
   region_id?: string | null;
   sucursal?: string | null;
+  metadata?: Record<string, unknown>;
 }): boolean {
   const hasRegionId = Boolean(row.region_id && String(row.region_id).trim().length > 0);
   const hasSucursal = Boolean(row.sucursal && String(row.sucursal).trim().length > 0);
-  return !hasRegionId && !hasSucursal;
+  const hasMetaRegion = Boolean(
+    row.metadata?.region_codigo && String(row.metadata.region_codigo).trim().length > 0
+  );
+  return !hasRegionId && !hasSucursal && !hasMetaRegion;
+}
+
+function sanitizeSyncErrorMessage(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '').trim();
+  const clean = raw
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[TOKEN_REDACTADO]')
+    .replace(/sb_secret_[A-Za-z0-9_-]+/gi, '[SECRETO_REDACTADO]')
+    .trim();
+  return clean || fallback;
 }
 
 export function useMasterEntitiesSync(
@@ -87,12 +113,13 @@ export function useMasterEntitiesSync(
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [entityErrors, setEntityErrors] = useState<MasterEntityErrorMap>({});
   const [lastSyncedAtIso, setLastSyncedAtIso] = useState<string | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(
-    async (force = false) => {
+    async (force = false): Promise<MasterEntitiesRefreshResult> => {
       if (disabled || !isSupabaseConfigured) {
         if (disabled) {
           setRegiones([]);
@@ -100,27 +127,84 @@ export function useMasterEntitiesSync(
           setSupervisores([]);
           setPromotoras([]);
         }
-        return;
+        return { ok: true, error: null, entityErrors: {} };
+      }
+
+      if (force) {
+        clearMasterCatalogCaches();
       }
 
       setIsLoading(true);
       setError(null);
+      setEntityErrors({});
+
       try {
-        const [regRows, prodRows, supRows, promRows] = await Promise.all([
-          obtenerRegionesMaestras({ forzarRefresco: force }).catch(() => []),
-          obtenerProductosMaestros({ forzarRefresco: force }).catch(() => []),
-          obtenerSupervisoresMaestros({ forzarRefresco: force }).catch(() => []),
-          obtenerPromotorasMaestras({ forzarRefresco: force }).catch(() => []),
+        const [regSettled, prodSettled, supSettled, promSettled] = await Promise.allSettled([
+          obtenerRegionesMaestras({ forzarRefresco: force }),
+          obtenerProductosMaestros({ forzarRefresco: force }),
+          obtenerSupervisoresMaestros({ forzarRefresco: force }),
+          obtenerPromotorasMaestras({ forzarRefresco: force }),
         ]);
-        setRegiones(regRows);
-        setProductos(prodRows);
-        setSupervisores(supRows);
-        setPromotoras(promRows);
+
+        const nextErrors: MasterEntityErrorMap = {};
+
+        if (regSettled.status === 'fulfilled') {
+          setRegiones(regSettled.value);
+        } else {
+          nextErrors.regiones = sanitizeSyncErrorMessage(
+            regSettled.reason,
+            'No se pudo cargar el catálogo de Regiones.'
+          );
+        }
+
+        if (prodSettled.status === 'fulfilled') {
+          setProductos(prodSettled.value);
+        } else {
+          nextErrors.productos = sanitizeSyncErrorMessage(
+            prodSettled.reason,
+            'No se pudo cargar el catálogo de Productos.'
+          );
+        }
+
+        if (supSettled.status === 'fulfilled') {
+          setSupervisores(supSettled.value);
+        } else {
+          nextErrors.supervisores = sanitizeSyncErrorMessage(
+            supSettled.reason,
+            'No se pudo cargar el catálogo de Supervisores.'
+          );
+        }
+
+        if (promSettled.status === 'fulfilled') {
+          setPromotoras(promSettled.value);
+        } else {
+          nextErrors.promotoras = sanitizeSyncErrorMessage(
+            promSettled.reason,
+            'No se pudo cargar el catálogo de Promotoras.'
+          );
+        }
+
+        const errorEntries = Object.entries(nextErrors);
+        if (errorEntries.length > 0) {
+          const summary = errorEntries
+            .map(([entity, msg]) => `${entity.toUpperCase()}: ${msg}`)
+            .join(' · ');
+          setEntityErrors(nextErrors);
+          setError(summary);
+          console.error('[useMasterEntitiesSync] Fallo de sincronización:', nextErrors);
+          return { ok: false, error: summary, entityErrors: nextErrors };
+        }
+
         setLastSyncedAtIso(new Date().toISOString());
+        return { ok: true, error: null, entityErrors: {} };
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : 'No se pudieron sincronizar las entidades maestras.'
+        const msg = sanitizeSyncErrorMessage(
+          err,
+          'No se pudieron sincronizar las entidades maestras.'
         );
+        setError(msg);
+        console.error('[useMasterEntitiesSync] Excepción al sincronizar:', msg);
+        return { ok: false, error: msg, entityErrors: {} };
       } finally {
         setIsLoading(false);
       }
@@ -141,7 +225,7 @@ export function useMasterEntitiesSync(
     });
   }, [disabled, refresh]);
 
-  // Suscripción nativa Supabase Realtime con cleanup garantizado en `useEffect`
+  // Suscripción nativa Supabase Realtime sobre las tablas reales ERP y Trade Marketing
   useEffect(() => {
     if (disabled || !enableRealtime || !isSupabaseConfigured) {
       setIsRealtimeConnected(false);
@@ -162,12 +246,15 @@ export function useMasterEntitiesSync(
     const channelName = `master-entities-5-sync-${scopeKey}`;
     const channel = client
       .channel(channelName)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Regiones' }, scheduleSync)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Productos' }, scheduleSync)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Supervisores' }, scheduleSync)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'Clientes' }, scheduleSync)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'promotoras' }, scheduleSync)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'regiones' }, scheduleSync)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'productos' }, scheduleSync)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'supervisores' }, scheduleSync)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'promotoras' }, scheduleSync)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clientes' }, scheduleSync)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff' }, scheduleSync)
       .subscribe((status) => {
         setIsRealtimeConnected(status === 'SUBSCRIBED');
       });
@@ -201,8 +288,9 @@ export function useMasterEntitiesSync(
     promotoras,
     quarantinedCounts,
     isLoading,
-    isRealtimeConnected,
+    isRealtimeConnected: isRealtimeConnected && !error,
     error,
+    entityErrors,
     lastSyncedAtIso,
     refresh,
   };

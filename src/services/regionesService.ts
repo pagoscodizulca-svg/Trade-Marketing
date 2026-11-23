@@ -1,5 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
+import {
+  getCachedAccessToken,
+  getSupabaseClient,
+  isSupabaseConfigured,
+} from './supabaseClient';
 import {
   OPERATIVE_SUCURSALES,
   SUCURSAL_LABELS,
@@ -7,13 +11,20 @@ import {
   normalizeSucursalCodigo,
   type OperativeSucursal,
 } from './userManagementService';
+import {
+  REGIONAL_PRIORITY_RANK,
+  normalizeRegionName,
+  type AllowedRegionCode,
+} from '../utils/regionalSyncClassifier';
 
 export interface ActiveRegionItem {
   id: string;
-  codigo: OperativeSucursal;
+  codigo: AllowedRegionCode | OperativeSucursal;
   rawCodigo: string;
   nombre: string;
   label: string;
+  regi_saba?: boolean;
+  priority?: 1 | 2 | 3;
   activo: boolean;
 }
 
@@ -53,53 +64,54 @@ export interface RegionalComparisonRow {
   cumplimiento_sla_pct: number;
 }
 
-export const DEFAULT_FIVE_REGIONES: readonly ActiveRegionItem[] = [
+export const DEFAULT_OFFICIAL_REGIONES: readonly ActiveRegionItem[] = [
   {
-    id: 'reg-default-zulia',
-    codigo: 'ZULIA',
-    rawCodigo: 'ZULIA',
-    nombre: 'Zulia',
-    label: SUCURSAL_LABELS.ZULIA,
+    id: 'reg-official-occidente',
+    codigo: 'OCCIDENTE',
+    rawCodigo: 'OCCIDENTE',
+    nombre: 'OCCIDENTE',
+    label: 'Región Occidente (Zulia · Falcón)',
+    regi_saba: true,
+    priority: 1,
     activo: true,
   },
   {
-    id: 'reg-default-valencia',
-    codigo: 'VALENCIA',
-    rawCodigo: 'VALENCIA',
-    nombre: 'Valencia',
-    label: SUCURSAL_LABELS.VALENCIA,
-    activo: true,
-  },
-  {
-    id: 'reg-default-centro',
+    id: 'reg-official-centro',
     codigo: 'CENTRO',
     rawCodigo: 'CENTRO',
-    nombre: 'Centro',
-    label: SUCURSAL_LABELS.CENTRO,
+    nombre: 'CENTRO',
+    label: 'Región Centro (Carabobo · Aragua · Capital)',
+    regi_saba: false,
+    priority: 2,
     activo: true,
   },
   {
-    id: 'reg-default-oriente',
-    codigo: 'ORIENTE',
-    rawCodigo: 'ORIENTE',
-    nombre: 'Oriente',
-    label: SUCURSAL_LABELS.ORIENTE,
-    activo: true,
-  },
-  {
-    id: 'reg-default-capital',
-    codigo: 'CAPITAL',
-    rawCodigo: 'CAPITAL',
-    nombre: 'Capital',
-    label: SUCURSAL_LABELS.CAPITAL,
+    id: 'reg-official-andes',
+    codigo: 'ANDES',
+    rawCodigo: 'ANDES',
+    nombre: 'ANDES',
+    label: 'Región Andes',
+    regi_saba: false,
+    priority: 3,
     activo: true,
   },
 ] as const;
 
+/** Alias mantenido por compatibilidad de importación; refleja estrictamente las 3 regiones reales de `"Regiones"`. */
+export const DEFAULT_FIVE_REGIONES: readonly ActiveRegionItem[] = DEFAULT_OFFICIAL_REGIONES;
+
+const OFFICIAL_REGION_LABELS: Record<AllowedRegionCode, string> = {
+  OCCIDENTE: 'Región Occidente (Zulia · Falcón)',
+  CENTRO: 'Región Centro (Carabobo · Aragua · Capital)',
+  ANDES: 'Región Andes',
+};
+
 const CANONICAL_SORT_RANK: Record<string, number> = {
+  OCCIDENTE: 1,
+  CENTRO: 2,
+  ANDES: 3,
   ZULIA: 1,
   VALENCIA: 2,
-  CENTRO: 3,
   ORIENTE: 4,
   CAPITAL: 5,
 };
@@ -134,10 +146,27 @@ function normalizeDateParam(raw?: string | null): string | null {
 function resolveRegionCodeAndMeta(rawRow: Record<string, unknown>): ActiveRegionItem | null {
   if (rawRow.activo === false) return null;
 
-  const rawId = String(rawRow.id ?? '').trim();
-  const rawCodigo = String(rawRow.codigo ?? '').trim();
-  const rawNombre = String(rawRow.nombre ?? '').trim();
+  const rawId = String(rawRow.id ?? rawRow.id_regi ?? '').trim();
+  const rawCodigo = String(rawRow.regi_desd ?? rawRow.codigo ?? '').trim();
+  const rawNombre = String(rawRow.regi_desd ?? rawRow.nombre ?? '').trim();
   if (!rawCodigo && !rawNombre) return null;
+
+  const officialRegion = normalizeRegionName(rawCodigo || rawNombre);
+  if (officialRegion) {
+    return {
+      id: rawId || `reg-${officialRegion.toLowerCase()}`,
+      codigo: officialRegion,
+      rawCodigo: rawCodigo || officialRegion,
+      nombre: officialRegion,
+      label: OFFICIAL_REGION_LABELS[officialRegion],
+      regi_saba:
+        typeof rawRow.regi_saba === 'boolean'
+          ? rawRow.regi_saba
+          : officialRegion === 'OCCIDENTE',
+      priority: REGIONAL_PRIORITY_RANK[officialRegion],
+      activo: true,
+    };
+  }
 
   const normFromCodigo = rawCodigo ? normalizeSucursalCodigo(rawCodigo) : null;
   const normFromNombre = rawNombre ? normalizeSucursalCodigo(rawNombre) : null;
@@ -159,39 +188,14 @@ function resolveRegionCodeAndMeta(rawRow: Record<string, unknown>): ActiveRegion
     };
   }
 
-  // Preservar filas dinámicas adicionales provenientes de `public.regiones`
-  const dynamicCode = (rawCodigo || rawNombre)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-
-  if (!dynamicCode) return null;
-
-  const displayNombre = rawNombre || rawCodigo;
-  const displayLabel = /^sucursal\b/i.test(displayNombre)
-    ? displayNombre
-    : `Sucursal ${displayNombre}`;
-
-  return {
-    id: rawId || `reg-dyn-${dynamicCode.toLowerCase()}`,
-    codigo: dynamicCode as OperativeSucursal,
-    rawCodigo: rawCodigo || dynamicCode,
-    nombre: displayNombre,
-    label: displayLabel,
-    activo: true,
-  };
+  return null;
 }
 
 function sortAndDedupeRegiones(items: ActiveRegionItem[]): ActiveRegionItem[] {
   const byCode = new Map<string, ActiveRegionItem>();
   for (const item of items) {
-    const key = `${item.codigo}::${item.id}`;
     if (!byCode.has(item.codigo)) {
       byCode.set(item.codigo, item);
-    } else if (!OPERATIVE_SUCURSALES.includes(item.codigo) && !byCode.has(key)) {
-      byCode.set(key, item);
     }
   }
 
@@ -204,12 +208,12 @@ function sortAndDedupeRegiones(items: ActiveRegionItem[]): ActiveRegionItem[] {
 }
 
 function cloneDefaultRegiones(): ActiveRegionItem[] {
-  return DEFAULT_FIVE_REGIONES.map((item) => ({ ...item }));
+  return DEFAULT_OFFICIAL_REGIONES.map((item) => ({ ...item }));
 }
 
 /**
- * Consulta las regiones activas desde `rpc_listar_regiones_activas()`, con respaldo
- * automático a `public.regiones` y a las 5 regiones oficiales si está sin conexión.
+ * Consulta las 3 regiones reales de `public."Regiones"` (`OCCIDENTE`, `CENTRO`, `ANDES`)
+ * priorizando el endpoint autenticado `/api/maestros/regiones` y luego lectura directa a `"Regiones"`.
  */
 export async function fetchActiveRegiones(
   customClient?: SupabaseClient | null
@@ -219,26 +223,43 @@ export async function fetchActiveRegiones(
     return cloneDefaultRegiones();
   }
 
-  try {
-    const rpcRes = await client.rpc('rpc_listar_regiones_activas');
-    if (!rpcRes.error && Array.isArray(rpcRes.data) && rpcRes.data.length > 0) {
-      const parsed = (rpcRes.data as Record<string, unknown>[])
-        .map(resolveRegionCodeAndMeta)
-        .filter((r): r is ActiveRegionItem => r !== null);
-      if (parsed.length > 0) {
-        return sortAndDedupeRegiones(parsed);
+  // 1. Priorizar endpoint BFF autenticado `/api/maestros/regiones` (cero 404 en PostgREST)
+  if (!customClient && typeof window !== 'undefined' && typeof fetch === 'function') {
+    try {
+      let token = getCachedAccessToken() || '';
+      if (!token) {
+        const { data } = await client.auth.getSession();
+        token = data?.session?.access_token?.trim() || '';
       }
+      if (token) {
+        const res = await fetch('/api/maestros/regiones', {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const body = (await res.json()) as { data?: unknown };
+          if (Array.isArray(body?.data) && body.data.length > 0) {
+            const parsed = (body.data as Record<string, unknown>[])
+              .map(resolveRegionCodeAndMeta)
+              .filter((r): r is ActiveRegionItem => r !== null);
+            if (parsed.length > 0) {
+              return sortAndDedupeRegiones(parsed);
+            }
+          }
+        }
+      }
+    } catch {
+      // Continúa a consulta directa en Supabase
     }
-  } catch {
-    // Continúa al respaldo sobre tabla `public.regiones`
   }
 
+  // 2. Consulta directa a la tabla real `public."Regiones"`
   try {
-    const tableRes = await client
-      .from('regiones')
-      .select('id, codigo, nombre, activo');
-    if (!tableRes.error && Array.isArray(tableRes.data) && tableRes.data.length > 0) {
-      const parsed = (tableRes.data as Record<string, unknown>[])
+    const erpRes = await client
+      .from('Regiones')
+      .select('id_regi, created_at, regi_desd, regi_saba');
+    if (!erpRes.error && Array.isArray(erpRes.data) && erpRes.data.length > 0) {
+      const parsed = (erpRes.data as Record<string, unknown>[])
         .map(resolveRegionCodeAndMeta)
         .filter((r): r is ActiveRegionItem => r !== null);
       if (parsed.length > 0) {
@@ -246,7 +267,38 @@ export async function fetchActiveRegiones(
       }
     }
   } catch {
-    // Continúa al respaldo estático de las 5 regiones oficiales
+    // Continúa a respaldo compatible
+  }
+
+  // 3. Compatibilidad con proyectos/tests que exponen `rpc_listar_regiones_activas` o `public.regiones`
+  if (customClient) {
+    try {
+      const rpcRes = await client.rpc('rpc_listar_regiones_activas');
+      if (!rpcRes.error && Array.isArray(rpcRes.data) && rpcRes.data.length > 0) {
+        const parsed = (rpcRes.data as Record<string, unknown>[])
+          .map(resolveRegionCodeAndMeta)
+          .filter((r): r is ActiveRegionItem => r !== null);
+        if (parsed.length > 0) {
+          return sortAndDedupeRegiones(parsed);
+        }
+      }
+    } catch {
+      // Continúa a tabla `regiones`
+    }
+
+    try {
+      const tableRes = await client.from('regiones').select('id, codigo, nombre, activo');
+      if (!tableRes.error && Array.isArray(tableRes.data) && tableRes.data.length > 0) {
+        const parsed = (tableRes.data as Record<string, unknown>[])
+          .map(resolveRegionCodeAndMeta)
+          .filter((r): r is ActiveRegionItem => r !== null);
+        if (parsed.length > 0) {
+          return sortAndDedupeRegiones(parsed);
+        }
+      }
+    } catch {
+      // Respaldo oficial
+    }
   }
 
   return cloneDefaultRegiones();

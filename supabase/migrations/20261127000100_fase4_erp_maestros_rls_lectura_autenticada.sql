@@ -27,6 +27,7 @@ DECLARE
     'Municipios',
     'Supervisores',
     'Tipificacion_Clientes',
+    'Forecast_Vendedores_Excluidos',
     'Vendedores',
     'Clientes'
   ];

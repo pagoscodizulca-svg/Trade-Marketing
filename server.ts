@@ -630,6 +630,13 @@ export interface MasterDataErpRouteDeps {
   listClientesHandler: express.RequestHandler;
   listVendedoresHandler: express.RequestHandler;
   sedesResumenHandler: express.RequestHandler;
+  bootstrapHandler?: express.RequestHandler;
+  listRegionesHandler?: express.RequestHandler;
+  listProductosHandler?: express.RequestHandler;
+  listSupervisoresHandler?: express.RequestHandler;
+  listPromotorasHandler?: express.RequestHandler;
+  listCadenasHandler?: express.RequestHandler;
+  listZonasHandler?: express.RequestHandler;
 }
 
 export function registerMasterDataErpRoutes(
@@ -640,22 +647,41 @@ export function registerMasterDataErpRoutes(
     listClientesHandler: defaultMasterDataErpHandlers.handleListClientesMaestros,
     listVendedoresHandler: defaultMasterDataErpHandlers.handleListVendedoresMaestros,
     sedesResumenHandler: defaultMasterDataErpHandlers.handleGetSedesClientesResumen,
+    bootstrapHandler: defaultMasterDataErpHandlers.handleBootstrapMaestros,
+    listRegionesHandler: defaultMasterDataErpHandlers.handleListRegionesMaestras,
+    listProductosHandler: defaultMasterDataErpHandlers.handleListProductosMaestros,
+    listSupervisoresHandler: defaultMasterDataErpHandlers.handleListSupervisoresMaestros,
+    listPromotorasHandler: defaultMasterDataErpHandlers.handleListPromotorasMaestras,
+    listCadenasHandler: defaultMasterDataErpHandlers.handleListCadenasComerciales,
+    listZonasHandler: defaultMasterDataErpHandlers.handleListZonasComerciales,
   }
 ): void {
+  const bootstrapHandler =
+    deps.bootstrapHandler ?? defaultMasterDataErpHandlers.handleBootstrapMaestros;
+  const listRegionesHandler =
+    deps.listRegionesHandler ?? defaultMasterDataErpHandlers.handleListRegionesMaestras;
+  const listProductosHandler =
+    deps.listProductosHandler ?? defaultMasterDataErpHandlers.handleListProductosMaestros;
+  const listSupervisoresHandler =
+    deps.listSupervisoresHandler ?? defaultMasterDataErpHandlers.handleListSupervisoresMaestros;
+  const listPromotorasHandler =
+    deps.listPromotorasHandler ?? defaultMasterDataErpHandlers.handleListPromotorasMaestras;
+  const listCadenasHandler =
+    deps.listCadenasHandler ?? defaultMasterDataErpHandlers.handleListCadenasComerciales;
+  const listZonasHandler =
+    deps.listZonasHandler ?? defaultMasterDataErpHandlers.handleListZonasComerciales;
+
+  targetApp.get('/api/maestros/bootstrap', deps.rateLimiter, deps.authMiddleware, bootstrapHandler);
+  targetApp.get('/api/maestros/regiones', deps.rateLimiter, deps.authMiddleware, listRegionesHandler);
+  targetApp.get('/api/maestros/productos', deps.rateLimiter, deps.authMiddleware, listProductosHandler);
+  targetApp.get('/api/maestros/supervisores', deps.rateLimiter, deps.authMiddleware, listSupervisoresHandler);
+  targetApp.get('/api/maestros/promotoras', deps.rateLimiter, deps.authMiddleware, listPromotorasHandler);
+  targetApp.get('/api/maestros/cadenas', deps.rateLimiter, deps.authMiddleware, listCadenasHandler);
+  targetApp.get('/api/maestros/zonas', deps.rateLimiter, deps.authMiddleware, listZonasHandler);
+  targetApp.get('/api/maestros/clientes', deps.rateLimiter, deps.authMiddleware, deps.listClientesHandler);
+  targetApp.get('/api/maestros/vendedores', deps.rateLimiter, deps.authMiddleware, deps.listVendedoresHandler);
   targetApp.get(
-    '/api/maestros/clientes',
-    deps.rateLimiter,
-    deps.authMiddleware,
-    deps.listClientesHandler
-  );
-  targetApp.get(
-    '/api/maestros/vendedores',
-    deps.rateLimiter,
-    deps.authMiddleware,
-    deps.listVendedoresHandler
-  );
-  targetApp.get(
-    '/api/maestros/sedes-resumen',
+    ['/api/maestros/resumen', '/api/maestros/sedes-resumen'],
     deps.rateLimiter,
     deps.authMiddleware,
     deps.sedesResumenHandler

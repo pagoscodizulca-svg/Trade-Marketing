@@ -27,6 +27,7 @@ import type {
 } from '../types/masterData';
 import {
   getActiveClientSucursalHeader,
+  getCachedAccessToken,
   getSupabaseClient,
   isSupabaseConfigured,
   registerSupabaseSessionResetCallback,
@@ -44,10 +45,23 @@ import {
   PromotoraCategoriaStrictSchema,
   classifyPromotoraCategoriaOficial,
   formatPromotoraRoleForCategory,
+  normalizeRegionName,
   type PromotoraCategoriaOficial,
 } from '../utils/regionalSyncClassifier';
+import {
+  normalizeErpProductosDataset,
+  normalizeErpPromotorasDataset,
+  normalizeErpRegionesDataset,
+  normalizeErpSupervisoresDataset,
+  type ErpProductoRow,
+  type ErpPromotoraRow,
+  type ErpRegionRow,
+  type ErpSupervisorRow,
+  type ErpVwProductoDetalleRow,
+} from '../utils/erpMasterAdapter';
 
 const CATALOG_CACHE_TTL_MS = 90_000;
+const CATALOG_PAGE_SIZE = 1000;
 
 interface TimedEntry<T> {
   value: T;
@@ -129,33 +143,48 @@ function asObject(raw: unknown): Record<string, unknown> {
 }
 
 export function normalizeRegionMasterRow(raw: Record<string, unknown>): RegionMaestra {
-  const codigo = normalizarCodigoMaestro(raw.codigo ?? raw.nombre ?? '');
-  const nombre = limpiarCeldaTexto(raw.nombre ?? raw.codigo ?? '') || codigo;
+  const codigo = normalizarCodigoMaestro(raw.regi_desd ?? raw.codigo ?? raw.nombre ?? '');
+  const nombre = limpiarCeldaTexto(raw.regi_desd ?? raw.nombre ?? raw.codigo ?? '') || codigo;
+  const priority =
+    codigo === 'OCCIDENTE' ? 1 : codigo === 'CENTRO' ? 2 : codigo === 'ANDES' ? 3 : undefined;
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw.id_regi ?? ''),
     codigo,
     nombre,
     activo: raw.activo !== false,
+    ...(typeof raw.regi_saba === 'boolean' ? { regi_saba: raw.regi_saba } : {}),
+    ...(priority ? { priority } : {}),
     created_at: String(raw.created_at ?? ''),
-    updated_at: String(raw.updated_at ?? ''),
+    updated_at: String(raw.updated_at ?? raw.created_at ?? ''),
   };
 }
 
 export function normalizeProductoMasterRow(raw: Record<string, unknown>): ProductoMaestro {
-  const codigo = normalizarCodigoMaestro(raw.codigo ?? raw.sku ?? raw.codigo_producto ?? '');
+  const codigo = normalizarCodigoMaestro(
+    raw.codigo ?? raw.prod_codi ?? raw.sku ?? raw.codigo_producto ?? ''
+  );
   const nombre =
-    limpiarCeldaTexto(raw.nombre ?? raw.descripcion ?? raw.producto ?? '') || codigo || 'Sin nombre';
+    limpiarCeldaTexto(raw.nombre ?? raw.producto ?? raw.prod_desc ?? raw.descripcion ?? '') ||
+    codigo ||
+    'Sin nombre';
+  const categoriaParts = [
+    asNullableString(raw.categoria ?? raw.linea),
+    !raw.categoria && !raw.linea ? asNullableString(raw.grupo) : null,
+    !raw.categoria && !raw.linea ? asNullableString(raw.familia) : null,
+  ].filter(Boolean);
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw.id_prod ?? ''),
     codigo,
     nombre,
-    categoria: asNullableString(raw.categoria ?? raw.linea),
+    categoria: categoriaParts.length > 0 ? categoriaParts.join(' · ') : null,
     marca: asNullableString(raw.marca),
-    unidad_medida: limpiarCeldaTexto(raw.unidad_medida ?? raw.unidad ?? 'KG').toUpperCase() || 'KG',
-    activo: raw.activo !== false,
+    unidad_medida:
+      limpiarCeldaTexto(raw.unidad_medida ?? raw.prod_unid ?? raw.unidad ?? 'KG').toUpperCase() ||
+      'KG',
+    activo: raw.activo !== false && raw.prod_acti !== false,
     metadata: asObject(raw.metadata),
     created_at: String(raw.created_at ?? ''),
-    updated_at: String(raw.updated_at ?? ''),
+    updated_at: String(raw.updated_at ?? raw.created_at ?? ''),
   };
 }
 
@@ -171,23 +200,40 @@ function isMissingColumnDbError(err: { code?: string; message?: string } | null 
   );
 }
 
+function isMissingRelationDbError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  const msg = String(err.message ?? '').toLowerCase();
+  return (
+    code === 'PGRST205' ||
+    code === '42P01' ||
+    msg.includes('could not find the table') ||
+    (msg.includes('relation') && msg.includes('does not exist'))
+  );
+}
+
 export function normalizeSupervisorMasterRow(raw: Record<string, unknown>): SupervisorMaestro {
   const nombre =
-    limpiarCeldaTexto(raw.nombre ?? raw.nombre_completo ?? raw.full_name ?? '') || 'Sin nombre';
+    limpiarCeldaTexto(raw.nombre ?? raw.supe_nomb ?? raw.nombre_completo ?? raw.full_name ?? '') ||
+    'Sin nombre';
   const emailRaw = limpiarCeldaTexto(raw.email ?? raw.correo ?? '').toLowerCase();
+  const metadata = asObject(raw.metadata);
+  const regionCode = normalizeRegionName(
+    metadata.region_codigo ?? raw.region ?? raw.region_codigo ?? raw.zona ?? raw.sucursal
+  );
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw.id_supe ?? ''),
     codigo: asNullableString(raw.codigo),
     nombre,
     email: emailRaw || null,
-    telefono: asNullableString(raw.telefono),
-    zona: asNullableString(raw.zona),
+    telefono: asNullableString(raw.telefono ?? raw.supe_cont),
+    zona: asNullableString(raw.zona) ?? regionCode,
     sucursal: asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede),
-    region_id: asNullableString(raw.region_id),
-    activo: raw.activo !== false,
-    metadata: asObject(raw.metadata),
+    region_id: asNullableString(raw.region_id ?? raw.id_regi),
+    activo: raw.activo !== false && raw.supe_acti !== false,
+    metadata: regionCode ? { ...metadata, region_codigo: regionCode } : metadata,
     created_at: String(raw.created_at ?? ''),
-    updated_at: String(raw.updated_at ?? ''),
+    updated_at: String(raw.updated_at ?? raw.created_at ?? ''),
   };
 }
 
@@ -197,15 +243,25 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
     'Sin nombre';
   const emailRaw = limpiarCeldaTexto(raw.email ?? raw.correo ?? '').toLowerCase();
   const categoria = classifyPromotoraCategoriaOficial(raw);
+  const metadata = asObject(raw.metadata);
+  const direccion = asNullableString(raw.direccion ?? raw.address);
+  const ciudad = asNullableString(raw.ciudad) ?? direccion;
+  const estado = asNullableString(raw.estado);
+  const regionCode =
+    normalizeRegionName(metadata.region_codigo) ??
+    normalizeRegionName(raw.region ?? raw.region_codigo ?? raw.sucursal ?? estado ?? ciudad ?? direccion);
+  const compatSucursal =
+    asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede) ??
+    (regionCode === 'OCCIDENTE' ? 'ZULIA' : regionCode === 'CENTRO' ? 'CENTRO' : null);
   return {
     id: String(raw.id ?? ''),
     nombre_completo: nombre,
     email: emailRaw || null,
     telefono: asNullableString(raw.telefono ?? raw.phone),
-    ciudad: asNullableString(raw.ciudad),
-    estado: asNullableString(raw.estado),
-    direccion: asNullableString(raw.direccion ?? raw.address),
-    sucursal: asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede),
+    ciudad,
+    estado,
+    direccion,
+    sucursal: compatSucursal,
     region_id: asNullableString(raw.region_id),
     supervisor_id: asNullableString(raw.supervisor_id),
     categoria,
@@ -214,10 +270,10 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
         raw.tipo ?? raw.tipo_promotora ?? raw.modalidad ?? raw.categoria ?? raw.perfil
       ) ?? formatPromotoraRoleForCategory(categoria),
     rol: asNullableString(raw.rol ?? raw.role ?? raw.cargo),
-    metadata: asObject(raw.metadata),
+    metadata: regionCode ? { ...metadata, region_codigo: regionCode } : metadata,
     activo: raw.activo !== false,
     created_at: String(raw.created_at ?? ''),
-    updated_at: String(raw.updated_at ?? ''),
+    updated_at: String(raw.updated_at ?? raw.created_at ?? ''),
   };
 }
 
@@ -227,8 +283,100 @@ function resolveClient(customClient?: SupabaseClient | null): SupabaseClient | n
   return getSupabaseClient();
 }
 
+async function resolveBearerTokenForCatalogApi(client: SupabaseClient): Promise<string> {
+  const cached = getCachedAccessToken();
+  if (cached && cached.length >= 20) return cached;
+  try {
+    const { data } = await client.auth.getSession();
+    return data?.session?.access_token?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+async function fetchCatalogFromBackendApi<T>(
+  endpoint: '/api/maestros/regiones' | '/api/maestros/productos' | '/api/maestros/supervisores' | '/api/maestros/promotoras',
+  params: Record<string, string | boolean | undefined>,
+  client: SupabaseClient
+): Promise<{ status: 'ok'; data: T[] } | { status: 'no_token' } | { status: 'unavailable' }> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') {
+    return { status: 'unavailable' };
+  }
+  const token = await resolveBearerTokenForCatalogApi(client);
+  if (!token) {
+    return { status: 'no_token' };
+  }
+
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === '') continue;
+    qs.set(k, typeof v === 'boolean' ? (v ? 'true' : 'false') : v);
+  }
+  const url = `${endpoint}${qs.toString() ? `?${qs.toString()}` : ''}`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (res.status === 404) {
+    return { status: 'unavailable' };
+  }
+
+  if (!res.ok) {
+    let serverMsg = '';
+    try {
+      const errBody = (await res.json()) as { error?: string };
+      serverMsg = errBody?.error ? String(errBody.error) : '';
+    } catch {
+      // Sin cuerpo JSON
+    }
+    throw new Error(
+      serverMsg ||
+        `Error HTTP ${res.status} consultando ${endpoint.replace('/api/maestros/', '')} en el servidor.`
+    );
+  }
+
+  const payload = (await res.json()) as { data?: unknown };
+  if (!Array.isArray(payload?.data)) {
+    throw new Error(`Respuesta inválida recibida desde ${endpoint}.`);
+  }
+  return { status: 'ok', data: payload.data as T[] };
+}
+
+async function fetchPaginatedDirectTable<T>(
+  client: SupabaseClient,
+  table: string,
+  selectExpr: string,
+  options: { orderBy?: string; eqFilters?: Record<string, unknown> } = {}
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += CATALOG_PAGE_SIZE) {
+    let query = client.from(table).select(selectExpr);
+    if (options.orderBy) {
+      query = query.order(options.orderBy, { ascending: true });
+    }
+    if (options.eqFilters) {
+      for (const [col, val] of Object.entries(options.eqFilters)) {
+        query = query.eq(col, val);
+      }
+    }
+    query = query.range(from, from + CATALOG_PAGE_SIZE - 1);
+    const { data, error } = await query;
+    if (error) {
+      throw error;
+    }
+    const page = Array.isArray(data) ? (data as unknown as T[]) : [];
+    rows.push(...page);
+    if (page.length < CATALOG_PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 // =============================================================================
-// 1. REGIONES (`public.regiones`)
+// 1. REGIONES (`public."Regiones"` / `/api/maestros/regiones`)
 // =============================================================================
 
 export async function obtenerRegionesMaestras(
@@ -243,17 +391,56 @@ export async function obtenerRegionesMaestras(
     if (cached) return cached;
   }
 
-  let query = client.from('regiones').select('*').order('nombre', { ascending: true });
-  if (options.soloActivas) {
-    query = query.eq('activo', true);
+  if (!options.client) {
+    const apiRes = await fetchCatalogFromBackendApi<RegionMaestra>(
+      '/api/maestros/regiones',
+      {
+        soloActivas: options.soloActivas ? true : undefined,
+        forzarRefresco: options.forzarRefresco ? '1' : undefined,
+      },
+      client
+    );
+    if (apiRes.status === 'ok') {
+      const normalized = apiRes.data.map((r) =>
+        normalizeRegionMasterRow(r as unknown as Record<string, unknown>)
+      );
+      writeTimedCache(regionesCache, cacheKey, normalized);
+      return normalized;
+    }
   }
 
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(error.message || 'No se pudieron consultar las regiones en Supabase.');
+  try {
+    let query = client.from('regiones').select('*').order('nombre', { ascending: true });
+    if (options.soloActivas) {
+      query = query.eq('activo', true);
+    }
+    const { data, error } = await query;
+    if (!error) {
+      const rows = ((data as Record<string, unknown>[] | null) ?? []).map(normalizeRegionMasterRow);
+      writeTimedCache(regionesCache, cacheKey, rows);
+      return rows;
+    }
+    if (!isMissingRelationDbError(error)) {
+      throw new Error(error.message || 'No se pudieron consultar las regiones en Supabase.');
+    }
+  } catch (err) {
+    if (!isMissingRelationDbError(err as { code?: string; message?: string })) {
+      throw err instanceof Error
+        ? err
+        : new Error('No se pudieron consultar las regiones en Supabase.');
+    }
   }
 
-  const rows = ((data as Record<string, unknown>[] | null) ?? []).map(normalizeRegionMasterRow);
+  // Fallback directo al esquema real ERP `public."Regiones"`
+  const { data: erpData, error: erpError } = await client
+    .from('Regiones')
+    .select('id_regi,created_at,regi_desd,regi_saba');
+  if (erpError) {
+    throw new Error(
+      `No se pudo leer public."Regiones" en Supabase (requiere sesión autenticada y política RLS SELECT): ${erpError.message}`
+    );
+  }
+  const rows = normalizeErpRegionesDataset((erpData ?? []) as unknown as ErpRegionRow[]);
   writeTimedCache(regionesCache, cacheKey, rows);
   return rows;
 }
@@ -330,19 +517,70 @@ export async function obtenerProductosMaestros(
     if (cached) return cached;
   }
 
-  let query = client.from('productos').select('*').order('nombre', { ascending: true });
+  if (!options.client) {
+    const apiRes = await fetchCatalogFromBackendApi<ProductoMaestro>(
+      '/api/maestros/productos',
+      {
+        soloActivos: options.soloActivos ? true : undefined,
+        forzarRefresco: options.forzarRefresco ? '1' : undefined,
+      },
+      client
+    );
+    if (apiRes.status === 'ok') {
+      const normalized = apiRes.data.map((r) =>
+        normalizeProductoMasterRow(r as unknown as Record<string, unknown>)
+      );
+      writeTimedCache(productosCache, cacheKey, normalized);
+      return normalized;
+    }
+  }
+
+  try {
+    const rowsRaw = await fetchPaginatedDirectTable<Record<string, unknown>>(
+      client,
+      'productos',
+      '*',
+      {
+        orderBy: 'nombre',
+        ...(options.soloActivos ? { eqFilters: { activo: true } } : {}),
+      }
+    );
+    const rows = rowsRaw.map(normalizeProductoMasterRow);
+    writeTimedCache(productosCache, cacheKey, rows);
+    return rows;
+  } catch (err) {
+    if (!isMissingRelationDbError(err as { code?: string; message?: string })) {
+      const msg =
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message?: unknown }).message)
+          : 'No se pudo consultar el catálogo nacional de productos.';
+      throw new Error(msg);
+    }
+  }
+
+  // Fallback directo al esquema real ERP `"vw_productos_detalle"` + `"Productos"` (paginado)
+  const [vwRows, prodRows] = await Promise.all([
+    fetchPaginatedDirectTable<ErpVwProductoDetalleRow>(
+      client,
+      'vw_productos_detalle',
+      'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at'
+    ).catch((err) => {
+      if (isMissingRelationDbError(err as { code?: string; message?: string })) return [];
+      throw err;
+    }),
+    fetchPaginatedDirectTable<ErpProductoRow>(
+      client,
+      'Productos',
+      'id_prod,created_at,prod_codi,prod_desc,prod_unid,prod_acti'
+    ),
+  ]);
+
+  let normalized = normalizeErpProductosDataset(prodRows, vwRows);
   if (options.soloActivos) {
-    query = query.eq('activo', true);
+    normalized = normalized.filter((p) => p.activo);
   }
-
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(error.message || 'No se pudo consultar el catálogo nacional de productos.');
-  }
-
-  const rows = ((data as Record<string, unknown>[] | null) ?? []).map(normalizeProductoMasterRow);
-  writeTimedCache(productosCache, cacheKey, rows);
-  return rows;
+  writeTimedCache(productosCache, cacheKey, normalized);
+  return normalized;
 }
 
 export async function guardarProductoMaestro(
@@ -423,19 +661,67 @@ export async function obtenerSupervisoresMaestros(
     if (cached) return cached;
   }
 
-  let query = client.from('supervisores').select('*').order('nombre', { ascending: true });
+  if (!options.client) {
+    const apiRes = await fetchCatalogFromBackendApi<SupervisorMaestro>(
+      '/api/maestros/supervisores',
+      {
+        soloActivos: options.soloActivos ? true : undefined,
+        forzarRefresco: options.forzarRefresco ? '1' : undefined,
+      },
+      client
+    );
+    if (apiRes.status === 'ok') {
+      const normalized = apiRes.data.map((r) =>
+        normalizeSupervisorMasterRow(r as unknown as Record<string, unknown>)
+      );
+      writeTimedCache(supervisoresCache, cacheKey, normalized);
+      return normalized;
+    }
+  }
+
+  try {
+    const rowsRaw = await fetchPaginatedDirectTable<Record<string, unknown>>(
+      client,
+      'supervisores',
+      '*',
+      {
+        orderBy: 'nombre',
+        ...(options.soloActivos ? { eqFilters: { activo: true } } : {}),
+      }
+    );
+    const rows = rowsRaw.map(normalizeSupervisorMasterRow);
+    writeTimedCache(supervisoresCache, cacheKey, rows);
+    return rows;
+  } catch (err) {
+    if (!isMissingRelationDbError(err as { code?: string; message?: string })) {
+      const msg =
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message?: unknown }).message)
+          : 'No se pudieron consultar los supervisores en Supabase.';
+      throw new Error(msg);
+    }
+  }
+
+  // Fallback directo al esquema real ERP `"Supervisores"` + `"Regiones"`
+  const [supRaw, regRaw] = await Promise.all([
+    fetchPaginatedDirectTable<ErpSupervisorRow>(
+      client,
+      'Supervisores',
+      'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont'
+    ),
+    fetchPaginatedDirectTable<ErpRegionRow>(
+      client,
+      'Regiones',
+      'id_regi,created_at,regi_desd,regi_saba'
+    ).catch(() => [] as ErpRegionRow[]),
+  ]);
+
+  let normalized = normalizeErpSupervisoresDataset(supRaw, regRaw);
   if (options.soloActivos) {
-    query = query.eq('activo', true);
+    normalized = normalized.filter((s) => s.activo);
   }
-
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(error.message || 'No se pudieron consultar los supervisores en Supabase.');
-  }
-
-  const rows = ((data as Record<string, unknown>[] | null) ?? []).map(normalizeSupervisorMasterRow);
-  writeTimedCache(supervisoresCache, cacheKey, rows);
-  return rows;
+  writeTimedCache(supervisoresCache, cacheKey, normalized);
+  return normalized;
 }
 
 export async function guardarSupervisorMaestro(
@@ -548,38 +834,85 @@ export async function obtenerPromotorasMaestras(
     if (cached) return cached;
   }
 
-  let query = client.from('promotoras').select('*').order('nombre_completo', { ascending: true });
-  if (options.soloActivas) {
-    query = query.eq('activo', true);
-  }
-  if (options.regionId) {
-    query = query.eq('region_id', options.regionId);
-  }
-  if (parsedCategoria !== 'TODAS') {
-    query = query.eq('categoria', parsedCategoria);
+  if (!options.client) {
+    const apiRes = await fetchCatalogFromBackendApi<PromotoraMaestra>(
+      '/api/maestros/promotoras',
+      {
+        soloActivas: options.soloActivas ? true : undefined,
+        categoria: parsedCategoria !== 'TODAS' ? parsedCategoria : undefined,
+        regionId: options.regionId || undefined,
+        forzarRefresco: options.forzarRefresco ? '1' : undefined,
+      },
+      client
+    );
+    if (apiRes.status === 'ok') {
+      const normalized = apiRes.data.map((r) =>
+        normalizePromotoraMasterRow(r as unknown as Record<string, unknown>)
+      );
+      writeTimedCache(promotorasCache, cacheKey, normalized);
+      return normalized;
+    }
   }
 
-  let { data, error } = await query;
-  if (error && isMissingColumnDbError(error)) {
-    let fallbackQuery = client.from('promotoras').select('*');
+  const rawRows: Record<string, unknown>[] = [];
+  let useMinimalFallback = false;
+  for (let from = 0; ; from += CATALOG_PAGE_SIZE) {
+    let query = client
+      .from('promotoras')
+      .select('*')
+      .range(from, from + CATALOG_PAGE_SIZE - 1);
+    if (!useMinimalFallback) {
+      query = query.order('nombre_completo', { ascending: true });
+    }
     if (options.soloActivas) {
-      fallbackQuery = fallbackQuery.eq('activo', true);
+      query = query.eq('activo', true);
     }
-    if (options.regionId) {
-      fallbackQuery = fallbackQuery.eq('region_id', options.regionId);
+    if (options.regionId && !useMinimalFallback) {
+      query = query.eq('region_id', options.regionId);
     }
-    const fallbackRes = await fallbackQuery;
-    data = fallbackRes.data;
-    error = fallbackRes.error;
-  }
-  if (error) {
-    throw new Error(error.message || 'No se pudieron consultar las promotoras en Supabase.');
+    if (parsedCategoria !== 'TODAS' && !useMinimalFallback) {
+      query = query.eq('categoria', parsedCategoria);
+    }
+
+    let { data, error } = await query;
+    if (error && !useMinimalFallback && isMissingColumnDbError(error)) {
+      useMinimalFallback = true;
+      let fallbackQuery = client
+        .from('promotoras')
+        .select('*')
+        .range(from, from + CATALOG_PAGE_SIZE - 1);
+      if (options.soloActivas) {
+        fallbackQuery = fallbackQuery.eq('activo', true);
+      }
+      const fallbackRes = await fallbackQuery;
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
+    if (error) {
+      throw new Error(error.message || 'No se pudieron consultar las promotoras en Supabase.');
+    }
+
+    const page = (data as Record<string, unknown>[] | null) ?? [];
+    rawRows.push(...page);
+    if (page.length < CATALOG_PAGE_SIZE) break;
   }
 
-  let rows = ((data as Record<string, unknown>[] | null) ?? [])
-    .map(normalizePromotoraMasterRow)
-    .sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'));
+  const regRaw = await fetchPaginatedDirectTable<ErpRegionRow>(
+    client,
+    'Regiones',
+    'id_regi,created_at,regi_desd,regi_saba'
+  ).catch(() => [] as ErpRegionRow[]);
 
+  let rows =
+    regRaw.length > 0
+      ? normalizeErpPromotorasDataset(rawRows as unknown as ErpPromotoraRow[], regRaw)
+      : rawRows
+          .map(normalizePromotoraMasterRow)
+          .sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'));
+
+  if (options.regionId) {
+    rows = rows.filter((r) => r.region_id === options.regionId);
+  }
   if (parsedCategoria !== 'TODAS') {
     rows = rows.filter((r) => r.categoria === parsedCategoria);
   }

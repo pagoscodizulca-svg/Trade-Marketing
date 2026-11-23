@@ -189,13 +189,17 @@ export interface ClienteCrudInput extends ClienteSincronizacionInput {
   activo?: boolean;
 }
 
-export type MasterRegionScopeFilter = 'ALL' | 'UNASSIGNED' | SucursalMaestro;
+export type MasterRegionScopeFilter = 'ALL' | 'UNASSIGNED' | AllowedRegionCode | SucursalMaestro;
 
 export interface RegionMaestra {
   id: string;
   codigo: string;
   nombre: string;
   activo: boolean;
+  /** Indicador real `regi_saba` de `public."Regiones"` (OCCIDENTE = true, CENTRO/ANDES = false) */
+  regi_saba?: boolean;
+  /** Prioridad operativa: OCCIDENTE = 1, CENTRO = 2, ANDES = 3 */
+  priority?: 1 | 2 | 3;
   created_at: string;
   updated_at: string;
 }
@@ -403,6 +407,8 @@ export interface ResultadoSincronizacion {
 export interface FiltrosConsultaVendedores {
   soloActivos?: boolean;
   sucursal?: SucursalMaestro | null;
+  region?: AllowedRegionCode;
+  regionId?: string;
   zona?: string;
   supervisor?: string;
   busqueda?: string;
@@ -566,6 +572,48 @@ export type MasterDataDatabase = {
           created_at?: string;
           tipi_desc?: string;
           id_cave?: string | null;
+        };
+        Relationships: [];
+      };
+      Canal_Comercializacion: {
+        Row: {
+          id_cana: string;
+          created_at: string;
+          cana_desc: string;
+        };
+        Insert: {
+          id_cana?: string;
+          created_at?: string;
+          cana_desc: string;
+        };
+        Update: {
+          id_cana?: string;
+          created_at?: string;
+          cana_desc?: string;
+        };
+        Relationships: [];
+      };
+      Forecast_Vendedores_Excluidos: {
+        Row: {
+          id_fove: string;
+          created_at: string;
+          updated_at: string | null;
+          id_regi: string | null;
+          fove_vend: string[] | null;
+        };
+        Insert: {
+          id_fove?: string;
+          created_at?: string;
+          updated_at?: string | null;
+          id_regi?: string | null;
+          fove_vend?: string[] | null;
+        };
+        Update: {
+          id_fove?: string;
+          created_at?: string;
+          updated_at?: string | null;
+          id_regi?: string | null;
+          fove_vend?: string[] | null;
         };
         Relationships: [];
       };
