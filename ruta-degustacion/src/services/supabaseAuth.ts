@@ -146,6 +146,8 @@ export function normalizeRutaRole(raw: unknown): RutaAppRole | null {
     role === 'coordinacion' ||
     role === 'coordinadora' ||
     role === 'coordinadora_trade' ||
+    role === 'coordinador_trade' ||
+    role === 'coordinador_regional' ||
     role === 'jefe_trade' ||
     role === 'supervisor'
   ) {
@@ -181,14 +183,14 @@ function normalizeRutaTerritory(raw: unknown): SucursalCodigo | null {
     /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
     ''
   );
-  if (strippedPrefix === 'zulia') return 'ZULIA';
-  if (strippedPrefix === 'valencia') return 'VALENCIA';
+  if (strippedPrefix === 'zulia' || strippedPrefix === 'occidente') return 'ZULIA';
+  if (strippedPrefix === 'valencia' || strippedPrefix === 'andes') return 'VALENCIA';
   if (strippedPrefix === 'centro') return 'CENTRO';
   if (strippedPrefix === 'oriente') return 'ORIENTE';
   if (strippedPrefix === 'capital') return 'CAPITAL';
 
   if (
-    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+    /\b(occidente|zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
       tokensText
     ) ||
     tokensText === 'col'
@@ -197,7 +199,7 @@ function normalizeRutaTerritory(raw: unknown): SucursalCodigo | null {
   }
 
   if (
-    /\b(valencia|carabobo|naguanagua|san diego|guacara|tocuyito|puerto cabello|los guayos|mariara|bejuma)\b/.test(
+    /\b(valencia|carabobo|naguanagua|san diego|guacara|tocuyito|puerto cabello|los guayos|mariara|bejuma|andes|merida|tachira|san cristobal|barinas|el vigia)\b/.test(
       tokensText
     )
   ) {

@@ -48,6 +48,16 @@ function normalizarFila(r: Record<string, unknown>): Entrega {
   const sucursal = (OPERATIVE_SUCURSALES as readonly string[]).includes(rawSuc)
     ? (rawSuc as OperativeSucursal)
     : undefined;
+  const rawRegion = txt(r.region).trim();
+  const rawSede = txt(r.chofer_sede).trim().toUpperCase();
+  const choferSede: Entrega['chofer_sede'] =
+    rawSede === 'VALENCIA' || rawSede === 'OCCIDENTE'
+      ? rawSede
+      : sucursal === 'VALENCIA' || sucursal === 'CENTRO'
+        ? 'VALENCIA'
+        : sucursal === 'ZULIA'
+          ? 'OCCIDENTE'
+          : undefined;
   const completado = r.completado === true;
   const horaSalida = typeof r.hora_salida === 'string' && r.hora_salida ? r.hora_salida : null;
   const horaSalidaReal =
@@ -94,6 +104,8 @@ function normalizarFila(r: Record<string, unknown>): Entrega {
       typeof r.cronograma_id === 'string' && r.cronograma_id ? r.cronograma_id : null,
     notas_chofer: txt(r.notas_chofer),
     ...(sucursal ? { sucursal } : {}),
+    ...(rawRegion ? { region: rawRegion } : {}),
+    ...(choferSede ? { chofer_sede: choferSede } : {}),
   };
 }
 

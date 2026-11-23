@@ -59,7 +59,16 @@ export default function App() {
 
   const visibleEntregas = useMemo(() => {
     if (!isSuperAdmin || superAdminSucursalFilter === 'TODAS') return entregas;
-    return entregas.filter((e) => !e.sucursal || e.sucursal === superAdminSucursalFilter);
+    return entregas.filter((e) => {
+      if (!e.sucursal && !e.chofer_sede) return true;
+      if (superAdminSucursalFilter === 'VALENCIA') {
+        return e.sucursal === 'VALENCIA' || e.chofer_sede === 'VALENCIA';
+      }
+      if (superAdminSucursalFilter === 'ZULIA') {
+        return e.sucursal === 'ZULIA' || e.chofer_sede === 'OCCIDENTE';
+      }
+      return e.sucursal === superAdminSucursalFilter;
+    });
   }, [entregas, isSuperAdmin, superAdminSucursalFilter]);
 
   const scopedRepo = useMemo(() => {

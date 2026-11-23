@@ -56,7 +56,9 @@ import {
   mergeMasterStoresWithFallback,
   persistMatrixLogicalCancel,
   persistMatrixUpsertBatch,
+  resolveMatrixRoutingFromRegion,
   resolveRealPromotoraForMatrix,
+  type ResolvedMatrixRouting,
 } from '../services/scheduleMatrixService';
 import { isSupabaseConfigured, setActiveClientSucursalHeader } from '../services/supabaseClient';
 import { clearMasterDataCaches } from '../services/masterDataSyncService';
@@ -2408,6 +2410,50 @@ export const AppProvider: React.FC<{
     );
   };
 
+  const resolveRegionalMatrixRouting = (zoneHint?: string): ResolvedMatrixRouting => {
+    const isOccidenteOnly =
+      isRegionalRestricted &&
+      assignedRegionCodes.length > 0 &&
+      assignedRegionCodes.every((r) => r === 'OCCIDENTE');
+    if (isOccidenteOnly) {
+      return { region: 'Occidente', sucursal: 'ZULIA', choferSede: 'OCCIDENTE' };
+    }
+
+    const isCentroAndesOnly =
+      isRegionalRestricted &&
+      assignedRegionCodes.length > 0 &&
+      !assignedRegionCodes.includes('OCCIDENTE');
+    const zoneNorm = String(zoneHint || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    const isAndeanHint = /ANDES|MERIDA|TACHIRA|SAN CRISTOBAL|BARINAS|EL VIGIA/.test(zoneNorm);
+
+    if (isCentroAndesOnly) {
+      const targetReg =
+        activeRegionScope === 'ANDES' || (activeRegionScope !== 'CENTRO' && isAndeanHint)
+          ? 'Andes'
+          : 'Centro';
+      return { region: targetReg, sucursal: 'VALENCIA', choferSede: 'VALENCIA' };
+    }
+
+    if (activeRegionScope === 'ANDES') {
+      return { region: 'Andes', sucursal: 'VALENCIA', choferSede: 'VALENCIA' };
+    }
+    if (activeRegionScope === 'CENTRO') {
+      return { region: 'Centro', sucursal: 'VALENCIA', choferSede: 'VALENCIA' };
+    }
+    if (activeRegionScope === 'OCCIDENTE') {
+      return { region: 'Occidente', sucursal: 'ZULIA', choferSede: 'OCCIDENTE' };
+    }
+
+    return resolveMatrixRoutingFromRegion(
+      isAndeanHint ? 'ANDES' : undefined,
+      activeSucursal || (verifiedSucursal && verifiedSucursal !== 'GLOBAL' ? verifiedSucursal : 'ZULIA')
+    );
+  };
+
   const updateVisit = async (
     visitId: string,
     updates: Partial<ScheduledVisit>,
@@ -2435,18 +2481,14 @@ export const AppProvider: React.FC<{
         );
         return p?.email || '';
       })();
-      const resolvedSucursal =
-        activeSucursal ||
-        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
-          ? verifiedSucursal
-          : activeRegionScope === 'CENTRO'
-            ? 'VALENCIA'
-            : 'ZULIA');
+      const routing = resolveRegionalMatrixRouting(mergedVisit.zone);
       const payload = buildMatrixUpsertRowFromVisit(mergedVisit, {
         clientCode: lookupClientCode(mergedVisit.storeId, mergedVisit.storeName),
         clientTempId: mergedVisit.id,
         promotoraEmail: resolvedPromEmail,
-        sucursal: resolvedSucursal,
+        sucursal: routing.sucursal,
+        region: routing.region,
+        choferSede: routing.choferSede,
       });
       const res = await persistMatrixUpsertBatch([payload]);
       applySavedRowsToState(res.filas);
@@ -2525,18 +2567,14 @@ export const AppProvider: React.FC<{
         );
         return p?.email || '';
       })();
-      const resolvedSucursal =
-        activeSucursal ||
-        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
-          ? verifiedSucursal
-          : activeRegionScope === 'CENTRO'
-            ? 'VALENCIA'
-            : 'ZULIA');
+      const routing = resolveRegionalMatrixRouting(newVisit.zone);
       const payload = buildMatrixUpsertRowFromVisit(newVisit, {
         clientCode: lookupClientCode(newVisit.storeId, newVisit.storeName),
         clientTempId: tempId,
         promotoraEmail: resolvedPromEmail,
-        sucursal: resolvedSucursal,
+        sucursal: routing.sucursal,
+        region: routing.region,
+        choferSede: routing.choferSede,
       });
       const res = await persistMatrixUpsertBatch([payload]);
       applySavedRowsToState(res.filas);
@@ -2697,13 +2735,6 @@ export const AppProvider: React.FC<{
     }
 
     try {
-      const resolvedSucursal =
-        activeSucursal ||
-        (verifiedSucursal && verifiedSucursal !== 'GLOBAL'
-          ? verifiedSucursal
-          : activeRegionScope === 'CENTRO'
-            ? 'VALENCIA'
-            : 'ZULIA');
       const resolveEmailForVisit = (promName: string): string => {
         if (params.promotoraEmail && params.promotoraName && canonicalStaffKey(promName) === canonicalStaffKey(params.promotoraName)) {
           return params.promotoraEmail;
@@ -2717,14 +2748,17 @@ export const AppProvider: React.FC<{
         );
         return p?.email || '';
       };
-      const rowsPayload = plan.affectedVisits.map((v) =>
-        buildMatrixUpsertRowFromVisit(v, {
+      const rowsPayload = plan.affectedVisits.map((v) => {
+        const routing = resolveRegionalMatrixRouting(v.zone);
+        return buildMatrixUpsertRowFromVisit(v, {
           clientCode: lookupClientCode(v.storeId, v.storeName),
           clientTempId: v.id,
           promotoraEmail: resolveEmailForVisit(v.promotoraName),
-          sucursal: resolvedSucursal,
-        })
-      );
+          sucursal: routing.sucursal,
+          region: routing.region,
+          choferSede: routing.choferSede,
+        });
+      });
       const rpcRes = await persistMatrixUpsertBatch(rowsPayload);
       applySavedRowsToState(rpcRes.filas);
       addAuditLog(

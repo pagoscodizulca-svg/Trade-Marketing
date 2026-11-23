@@ -1055,7 +1055,170 @@ export async function withdrawDegustacionFromPromotoraRoute(params: {
   });
 
   if (error) {
+    if (isMissingRpcError(error)) {
+      const targetFilter = cleanCronogramaId
+        ? client
+            .from('cronograma_degustaciones')
+            .update({ estado: 'CANCELADA', motivo_rechazo: cleanMotivo })
+            .eq('id', cleanCronogramaId)
+        : client
+            .from('cronograma_degustaciones')
+            .update({ estado: 'CANCELADA', motivo_rechazo: cleanMotivo })
+            .eq('survey_origen_id', cleanSurveyId as string);
+      const { error: directErr } = await targetFilter;
+      if (directErr) {
+        throw new Error(directErr.message || 'No se pudo retirar la degustación de la ruta.');
+      }
+      return true;
+    }
     throw new Error(error.message || 'No se pudo retirar la degustación de la ruta.');
   }
   return true;
+}
+
+/**
+ * Confirma e idempotentemente sincroniza una degustación aprobada de OCCIDENTE (Grecia)
+ * entre `public.surveys` -> `public.cronograma_degustaciones` (Módulo 2) ->
+ * `public.rutas_promotoras` (/portal) + `public.entregas_degustacion` (Chofer Occidente).
+ *
+ * Opera en conjunto con los triggers SQL `trg_survey_aprobada_to_cronograma` y
+ * `trg_cronograma_dispatch_ruta_y_chofer` sin depender de RPCs ausentes y garantizando 0 duplicados.
+ */
+export async function syncApprovedOccidenteDegustacionToModule2(params: {
+  surveyId?: string | null;
+  cronogramaId?: string | null;
+  fecha: string;
+  turno: 'MAÑANA' | 'TARDE' | 'COMPLETO';
+  clienteNombre: string;
+  clienteCodigo?: string;
+  zonaDireccion?: string;
+  productoResumen: string;
+  cantidadKilos: number;
+  vendedorFdv?: string;
+  promotoraId?: string | null;
+  promotoraNombre: string;
+  promotoraEmail: string;
+  observaciones?: string;
+  insumosCalculados?: Record<string, unknown>;
+}): Promise<{ cronograma_id: string; syncedByTrigger: boolean }> {
+  if (!isSupabaseConfigured) {
+    throw new Error('Supabase no está configurado.');
+  }
+
+  const cleanPromNombre = sanitizeCellText(params.promotoraNombre, 140);
+  const cleanPromEmail = sanitizeCellText(params.promotoraEmail, 160).toLowerCase();
+  if (!cleanPromNombre || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanPromEmail)) {
+    throw new Error('La promotora asignada debe tener nombre y correo electrónico válido.');
+  }
+
+  const safePromUuid = isValidUuid(params.promotoraId) ? String(params.promotoraId).trim() : null;
+  const cleanSurveyId = isValidUuid(params.surveyId) ? String(params.surveyId).trim() : null;
+  const cleanCronId = isValidUuid(params.cronogramaId) ? String(params.cronogramaId).trim() : null;
+  const client = getSupabaseCoordinatorClient();
+
+  // 1) Si viene de `public.surveys`, verificar primero si Trigger 1 ya materializó la fila en Módulo 2
+  if (cleanSurveyId) {
+    const existingBySurvey = await client
+      .from('cronograma_degustaciones')
+      .select('id')
+      .eq('survey_origen_id', cleanSurveyId)
+      .limit(1);
+    const existingId = Array.isArray(existingBySurvey.data) ? existingBySurvey.data[0]?.id : null;
+    if (!existingBySurvey.error && existingId) {
+      return { cronograma_id: String(existingId), syncedByTrigger: true };
+    }
+  }
+
+  // 2) Si ya tiene `cronogramaId` (ej. carga multiformato), aprobar en sitio y disparar Trigger 2
+  const shiftHours =
+    params.turno === 'TARDE'
+      ? { ini: '14:00', fin: '18:00' }
+      : params.turno === 'COMPLETO'
+        ? { ini: '09:00', fin: '17:00' }
+        : { ini: '09:00', fin: '13:00' };
+
+  const basePayload: Record<string, unknown> = {
+    fecha: /^\d{4}-\d{2}-\d{2}$/.test(params.fecha) ? params.fecha : new Date().toISOString().slice(0, 10),
+    turno: params.turno,
+    hora_inicio: shiftHours.ini,
+    hora_fin: shiftHours.fin,
+    cliente_nombre: sanitizeCellText(params.clienteNombre, 180) || 'PDV SIN NOMBRE',
+    cliente_codigo: sanitizeCellText(params.clienteCodigo, 80).toUpperCase(),
+    zona_direccion: sanitizeCellText(params.zonaDireccion, 220) || 'OCCIDENTE',
+    producto_resumen: sanitizeCellText(params.productoResumen, 160).toUpperCase() || 'MORTADELA',
+    productos: [sanitizeCellText(params.productoResumen, 160).toUpperCase() || 'MORTADELA'],
+    cantidad_kilos: Math.max(0.1, Number(params.cantidadKilos) || 1),
+    vendedor_fdv: sanitizeCellText(params.vendedorFdv, 140) || 'FDV CODIZULCA',
+    promotora_id: safePromUuid,
+    promotora_nombre: cleanPromNombre,
+    promotora_email: cleanPromEmail,
+    observaciones: sanitizeCellText(params.observaciones, 600),
+    insumos_calculados: params.insumosCalculados ?? {},
+    estado: 'APROBADA',
+    region: 'Occidente',
+    sucursal: 'ZULIA',
+    chofer_sede: 'OCCIDENTE',
+    ...(cleanSurveyId ? { survey_origen_id: cleanSurveyId, degustacion_origen_id: cleanSurveyId } : {}),
+  };
+
+  const stripOptionalCols = (obj: Record<string, unknown>) => {
+    const copy = { ...obj };
+    delete copy.chofer_sede;
+    delete copy.degustacion_origen_id;
+    return copy;
+  };
+
+  if (cleanCronId) {
+    let upd = await client
+      .from('cronograma_degustaciones')
+      .update(basePayload)
+      .eq('id', cleanCronId)
+      .select('id');
+    if (upd.error && /chofer_sede|degustacion_origen_id|PGRST204|42703/i.test(String(upd.error.message || upd.error.code || ''))) {
+      upd = await client
+        .from('cronograma_degustaciones')
+        .update(stripOptionalCols(basePayload))
+        .eq('id', cleanCronId)
+        .select('id');
+    }
+    const returnedId = Array.isArray(upd.data) ? upd.data[0]?.id : null;
+    if (upd.error || !returnedId) {
+      throw new Error(upd.error?.message || 'No se pudo aprobar la degustación en cronograma_degustaciones (0 filas afectadas).');
+    }
+    return { cronograma_id: String(returnedId), syncedByTrigger: false };
+  }
+
+  // 3) Respaldo idempotente si Trigger 1 aún no estaba aplicado en BD
+  const insertBody = {
+    ...basePayload,
+    idempotency_hash: cleanSurveyId
+      ? `survey_${cleanSurveyId}`
+      : `occ_${basePayload.fecha}_${basePayload.turno}_${Date.now()}`.slice(0, 120),
+  };
+  let ins = await client
+    .from('cronograma_degustaciones')
+    .insert(insertBody)
+    .select('id');
+  if (ins.error && /chofer_sede|degustacion_origen_id|PGRST204|42703/i.test(String(ins.error.message || ins.error.code || ''))) {
+    ins = await client
+      .from('cronograma_degustaciones')
+      .insert(stripOptionalCols(insertBody))
+      .select('id');
+  }
+  if (ins.error?.code === '23505' && cleanSurveyId) {
+    const retryFind = await client
+      .from('cronograma_degustaciones')
+      .select('id')
+      .eq('survey_origen_id', cleanSurveyId)
+      .limit(1);
+    const foundId = Array.isArray(retryFind.data) ? retryFind.data[0]?.id : null;
+    if (foundId) {
+      return { cronograma_id: String(foundId), syncedByTrigger: true };
+    }
+  }
+  const insertedId = Array.isArray(ins.data) ? ins.data[0]?.id : null;
+  if (ins.error || !insertedId) {
+    throw new Error(ins.error?.message || 'No se pudo registrar la degustación aprobada en Módulo 2.');
+  }
+  return { cronograma_id: String(insertedId), syncedByTrigger: false };
 }

@@ -53,6 +53,7 @@ import {
   isValidUuid,
 } from '../../services/degustacionesPipelineService';
 import {
+  MODULE2_PRODUCT_FILTER_OPTIONS,
   filterMatrixVisits,
   normalizeSearchText,
   resolveRealPromotoraForMatrix,
@@ -67,6 +68,9 @@ export const ScheduleMatrixView: React.FC = () => {
     masterEntities,
     activeSucursal,
     activeSucursalLabel,
+    activeRegionScope,
+    assignedRegionCodes,
+    isRegionalRestricted,
     module1Bundle,
     isCronogramaRealtimeConnected,
     updateVisitFromProductFill, 
@@ -77,6 +81,11 @@ export const ScheduleMatrixView: React.FC = () => {
     batchFillClientsProductShift,
     clearVisitsBatch,
   } = useApp();
+
+  const isCentroAndesOnlyCoordinator =
+    isRegionalRestricted &&
+    assignedRegionCodes.length > 0 &&
+    !assignedRegionCodes.includes('OCCIDENTE');
 
   const liveClock = useLiveVenezuelaClock();
   const [selectedMetric360, setSelectedMetric360] = useState<Metric360Id | null>(null);
@@ -228,7 +237,11 @@ export const ScheduleMatrixView: React.FC = () => {
       if (selectedShift !== 'TODOS' && item.shift !== selectedShift) return false;
       if (selectedProduct !== 'TODOS' && prodFilter) {
         const pNorm = normalizeSearchText(item.productName || '');
-        if (!pNorm.includes(prodFilter)) return false;
+        const matchesProd =
+          prodFilter === 'vencampo'
+            ? pNorm.includes('vencampo') || pNorm.includes('arroz')
+            : pNorm.includes(prodFilter);
+        if (!matchesProd) return false;
       }
       if (q) {
         const match =
@@ -562,7 +575,6 @@ export const ScheduleMatrixView: React.FC = () => {
       { id: 'VENCAMPO', codigo: 'COD-002', nombre: 'VENCAMPO ARROZ', marca: 'VENCAMPO', categoria: 'VIVERES', unidad: 'BULTO' },
       { id: 'ESPALDA', codigo: 'COD-003', nombre: 'ESPALDA AHUMADA', marca: 'ASTURIAS', categoria: 'LINEA COCIDA', unidad: 'KG' },
       { id: 'JAMON', codigo: 'COD-004', nombre: 'JAMÓN COCIDO SUPERIOR', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
-      { id: 'SALCHICHA', codigo: 'COD-005', nombre: 'SALCHICHAS VIENA ASTURIAS 500G', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
     ];
   }, [masterEntities?.productos]);
 
@@ -2436,26 +2448,16 @@ export const ScheduleMatrixView: React.FC = () => {
               ))}
             </div>
 
-            {/* Product filter (base + productos reales presentes en la tabla) */}
-            <div className="flex flex-wrap items-center gap-1 bg-black p-1 rounded-lg border border-zinc-900">
-              {Array.from(
-                new Set([
-                  'TODOS',
-                  'MORTADELA',
-                  'VENCAMPO',
-                  'ESPALDA',
-                  'JAMON',
-                  'SALCHICHA',
-                  ...visits
-                    .map((v) => String(v.productFocus || '').trim().toUpperCase())
-                    .filter((p) => p.length > 0 && p.length <= 28),
-                ])
-              )
-                .slice(0, 12)
-                .map((prod) => (
+            {/* Product filter — 5 opciones oficiales exactas */}
+            <div
+              className="flex flex-wrap items-center gap-1 bg-black p-1 rounded-lg border border-zinc-900"
+              data-testid="module2-product-filter-bar"
+            >
+              {MODULE2_PRODUCT_FILTER_OPTIONS.map((prod) => (
                 <button
                   key={prod}
                   type="button"
+                  data-testid={`module2-product-filter-${prod}`}
                   onClick={() => setSelectedProduct(prod)}
                   className={`px-3 py-1 rounded text-xs font-black tracking-wide uppercase transition cursor-pointer ${
                     selectedProduct === prod
@@ -2728,7 +2730,6 @@ export const ScheduleMatrixView: React.FC = () => {
                         <option value="VENCAMPO">VENCAMPO</option>
                         <option value="ESPALDA">ESPALDA</option>
                         <option value="JAMON">JAMÓN</option>
-                        <option value="SALCHICHA">SALCHICHA</option>
                       </select>
                     </td>
 
@@ -3401,6 +3402,18 @@ export const ScheduleMatrixView: React.FC = () => {
                     return;
                   }
 
+                  const cleanPromChoice = String(newPromotoraName || '').trim();
+                  const isUnassignedPromChoice =
+                    !cleanPromChoice ||
+                    /^POR ASIGNAR|^SIN ASIGNAR/i.test(cleanPromChoice);
+                  if (isCentroAndesOnlyCoordinator && isUnassignedPromChoice) {
+                    showNotification(
+                      'Selecciona una promotora activa asignada antes de guardar para despachar automáticamente a su Módulo de Ruta y a la App del Chofer de Valencia.',
+                      0
+                    );
+                    return;
+                  }
+
                   // Validación: Promotora no duplicada en misma fecha y jornada
                   const conflict = isPromotoraBooked(
                     newPromotoraName,
@@ -3461,7 +3474,14 @@ export const ScheduleMatrixView: React.FC = () => {
                       shift: batchShift,
                       storeId: matchedStore?.id || '',
                       storeName: matchedStore?.name || cleanStoreName,
-                      zone: newZone.trim() || matchedStore?.zone || 'MARACAIBO',
+                      zone:
+                        newZone.trim() ||
+                        matchedStore?.zone ||
+                        (isCentroAndesOnlyCoordinator
+                          ? activeRegionScope === 'ANDES'
+                            ? 'ANDES'
+                            : 'VALENCIA / CENTRO'
+                          : 'MARACAIBO'),
                       productFocus: prodUpper,
                       fillProductSelection: prodUpper,
                       fillQuantityInput: batchQuantity,

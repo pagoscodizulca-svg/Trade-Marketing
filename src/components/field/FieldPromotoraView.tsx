@@ -105,6 +105,7 @@ import {
   assignAcceptedDegustacionToPromotoraRoute,
   buildActivePromotoraCatalog,
   isValidUuid,
+  syncApprovedOccidenteDegustacionToModule2,
   updateCronogramaPromotoraIdInSupabase,
   withdrawDegustacionFromPromotoraRoute,
 } from '../../services/degustacionesPipelineService';
@@ -316,8 +317,22 @@ export const FieldPromotoraView: React.FC = () => {
   const liveClock = useLiveVenezuelaClock();
   const [selectedMetric360, setSelectedMetric360] = useState<Metric360Id | null>(null);
 
+  // María (Centro y Andes, sin Occidente) carga degustaciones exclusivamente de forma manual en Módulo 2
+  const isCentroAndesOnlyCoordinator =
+    isRegionalRestricted &&
+    assignedRegionCodes.length > 0 &&
+    !assignedRegionCodes.includes('OCCIDENTE');
+
   // Active sub-module tab (Degustaciones | Informes | Merchandising | Personal)
-  const [activeSubTab, setActiveSubTab] = useState<FieldSubTab>('degustaciones');
+  const [activeSubTab, setActiveSubTab] = useState<FieldSubTab>(() =>
+    isCentroAndesOnlyCoordinator ? 'informes' : 'degustaciones'
+  );
+
+  useEffect(() => {
+    if (isCentroAndesOnlyCoordinator && activeSubTab === 'degustaciones') {
+      setActiveSubTab('informes');
+    }
+  }, [isCentroAndesOnlyCoordinator, activeSubTab]);
 
   // Referencia tipada y estado para desplazamiento suave accesible del botón "Enlaces"
   const linksSectionRef = useRef<HTMLElement | null>(null);
@@ -1435,10 +1450,39 @@ export const FieldPromotoraView: React.FC = () => {
   // =========================================================================
   // ASIGNACIÓN / REASIGNACIÓN DE PROMOTORA ACTIVA (ZERO TRUST + /portal/ruta)
   // =========================================================================
-  const activePromotoraCatalog = useMemo(
-    () => buildActivePromotoraCatalog(module1Bundle?.staffMembers),
-    [module1Bundle]
-  );
+  const activePromotoraCatalog = useMemo(() => {
+    const base = buildActivePromotoraCatalog(module1Bundle?.staffMembers);
+    const byKey = new Map(base.map((opt) => [opt.canonicalKey, opt]));
+
+    for (const p of masterEntities?.promotoras ?? []) {
+      if (p.activo === false) continue;
+      const catLower = String(p.categoria || '').toLowerCase();
+      if (catLower.includes('merch')) continue;
+      const cleanName = String(p.nombre_completo || '').trim();
+      if (!cleanName) continue;
+      const cKey = canonicalStaffKey(cleanName);
+      if (!cKey) continue;
+      const cleanEmail = String(p.email || '').trim().toLowerCase();
+      const rawAuthUid = String((p as unknown as { auth_user_id?: string | null }).auth_user_id || '').trim();
+      const safeId = isValidUuid(rawAuthUid)
+        ? rawAuthUid
+        : String(p.id || '').trim();
+      const existing = byKey.get(cKey);
+      if (!existing) {
+        byKey.set(cKey, {
+          id: safeId || cKey,
+          name: cleanName,
+          canonicalKey: cKey,
+          email: cleanEmail,
+          assignedStore: '',
+        });
+      } else if (!existing.email && cleanEmail) {
+        byKey.set(cKey, { ...existing, email: cleanEmail });
+      }
+    }
+
+    return Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }, [module1Bundle, masterEntities?.promotoras]);
 
   const allowedActivePromotoraIds = useMemo(
     () => new Set(activePromotoraCatalog.map((p) => p.id)),
@@ -1704,7 +1748,19 @@ export const FieldPromotoraView: React.FC = () => {
         s.id === matchedPromotora.id ||
         canonicalStaffKey(s.name) === canonicalStaffKey(matchedPromotora.name)
     );
-    const promotoraEmail = String(matchedStaffRecord?.email || '').trim().toLowerCase();
+    const matchedMasterPromotora = (masterEntities?.promotoras || []).find(
+      (p) =>
+        String(p.id || '') === matchedPromotora.id ||
+        canonicalStaffKey(p.nombre_completo) === canonicalStaffKey(matchedPromotora.name)
+    );
+    const promotoraEmail = String(
+      matchedPromotora.email ||
+        matchedStaffRecord?.email ||
+        matchedMasterPromotora?.email ||
+        ''
+    )
+      .trim()
+      .toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(promotoraEmail)) {
       showToast(
         `Registra primero el correo electrónico de "${matchedPromotora.name}" en la Pestaña de Personal para habilitar su acceso a /portal y autorizar la degustación.`
@@ -1722,21 +1778,71 @@ export const FieldPromotoraView: React.FC = () => {
         item.cronogramaId ||
         (item.source === 'carga_multiformato' && isValidUuid(item.id) ? item.id : null);
 
-      const rpcResult = await assignAcceptedDegustacionToPromotoraRoute({
-        promotoraId: matchedPromotora.id,
-        promotoraEmail,
+      const finalAssignedPromotora = matchedPromotora.name;
+      const suppliesPreview = calculateProductionSupplies(
+        item.productName,
+        item.requestedQty || item.fillQuantityInput || 1,
+        item.targetSamples
+      );
+      const insumosPayload = {
+        ...suppliesPreview.operationalSupplies,
+        mortadelaQty: suppliesPreview.mortadelaQty,
+        espaldaQty: suppliesPreview.espaldaQty,
+        arrozQty: suppliesPreview.arrozQty,
+        azucarGrams: suppliesPreview.azucarGrams,
+        lecheGrams: suppliesPreview.lecheGrams,
+      };
+
+      // 1) Actualizar estado verificado en `public.surveys` (.update().select()) -> dispara Trigger 1 -> Módulo 2 -> Trigger 2 (Ruta + Chofer Occidente)
+      if (originSurveyId || item.source !== 'carga_multiformato') {
+        await updateSupabaseDegustacionStatus(item.id, {
+          estado: 'APROBADA',
+          promotoraAsignada: finalAssignedPromotora,
+          promotoraEmail,
+          region: 'Occidente',
+          insumosCalculados: insumosPayload,
+          rawComments: {
+            ...(item.rawComments || {}),
+            fecha: item.date,
+            turno: item.shift,
+            zona: item.zone,
+            clienteCodigo: item.clienteCodigo,
+            vendedor: item.sellerApplicant,
+            cantidad: item.requestedQty || item.fillQuantityInput || 1,
+            region: 'Occidente',
+          },
+          eventDateYmd: item.date,
+          isStrictAdmin,
+        });
+      }
+
+      // 2) Confirmar fila idempotente en `public.cronograma_degustaciones` (0 duplicados) y disparar Trigger 2 si aplica
+      const syncCronograma = await syncApprovedOccidenteDegustacionToModule2({
         surveyId: originSurveyId,
         cronogramaId: targetCronogramaId,
-        confirmarAceptacion: true,
-        aprobadoPor: currentUser?.name || currentUser?.email || null,
-        allowedPromotoraIds: allowedActivePromotoraIds,
+        fecha: item.date,
+        turno:
+          item.shift === 'TARDE'
+            ? 'TARDE'
+            : item.shift === 'COMPLETO'
+              ? 'COMPLETO'
+              : 'MAÑANA',
+        clienteNombre: item.storeName,
+        clienteCodigo: item.clienteCodigo,
+        zonaDireccion: item.zone,
+        productoResumen: item.productName,
+        cantidadKilos: Number(item.requestedQty || item.fillQuantityInput || 1) || 1,
+        vendedorFdv: item.sellerApplicant,
+        promotoraId: isValidUuid(matchedPromotora.id) ? matchedPromotora.id : null,
+        promotoraNombre: finalAssignedPromotora,
+        promotoraEmail,
+        observaciones: item.notes,
+        insumosCalculados: insumosPayload,
       });
 
-      const finalAssignedPromotora = matchedPromotora.name;
-
-      const syncResult = upsertVisitFromApprovedTasting({
+      upsertVisitFromApprovedTasting({
         solicitudId: item.id,
-        cronogramaId: rpcResult.cronograma_id,
+        cronogramaId: syncCronograma.cronograma_id,
         degustacionId: item.degustacionId,
         date: item.date,
         dayLabel: item.dayLabel,
@@ -1749,7 +1855,7 @@ export const FieldPromotoraView: React.FC = () => {
         requestedQty: item.requestedQty || item.fillQuantityInput || 1,
         targetSamples: item.targetSamples,
         sellerName: item.sellerApplicant,
-        promotoraId: matchedPromotora.id,
+        promotoraId: isValidUuid(matchedPromotora.id) ? matchedPromotora.id : '',
         promotoraName: finalAssignedPromotora,
         mapsUrl: item.mapsUrl,
         notes: item.notes,
@@ -1774,25 +1880,7 @@ export const FieldPromotoraView: React.FC = () => {
         [item.id]: finalAssignedPromotora,
       }));
 
-      // Notificar en segundo plano al servicio FDV Render sin bloquear la ruta ya proyectada en Supabase
-      if (originSurveyId) {
-        void updateSupabaseDegustacionStatus(item.id, {
-          estado: 'APROBADA',
-          promotoraAsignada: finalAssignedPromotora,
-          insumosCalculados: {
-            ...syncResult.supplies.operationalSupplies,
-            mortadelaQty: syncResult.supplies.mortadelaQty,
-            espaldaQty: syncResult.supplies.espaldaQty,
-            arrozQty: syncResult.supplies.arrozQty,
-            azucarGrams: syncResult.supplies.azucarGrams,
-            lecheGrams: syncResult.supplies.lecheGrams,
-          },
-          rawComments: item.rawComments,
-          eventDateYmd: item.date,
-          isStrictAdmin,
-        }).catch(() => {});
-      }
-
+      void refreshSupabaseData();
       void degustacionNotifications.markAsRead(item.id);
       if (selectedTastingDetail?.id === item.id) {
         setSelectedTastingDetail(null);
@@ -1801,13 +1889,13 @@ export const FieldPromotoraView: React.FC = () => {
       setLastAuthorizedShareBanner({
         promotoraName: finalAssignedPromotora,
         promotoraEmail,
-        phone: matchedStaffRecord?.phone || '',
+        phone: matchedStaffRecord?.phone || matchedMasterPromotora?.telefono || '',
         storeName: item.storeName,
         fechaYmd: item.date,
       });
 
       showToast(
-        `Degustación autorizada y sincronizada en tiempo real hacia /portal y Cronograma de productos (${item.storeName} • ${finalAssignedPromotora}).`
+        `Degustación aprobada y despachada a Módulo 2, Ruta de ${finalAssignedPromotora} y Chofer Occidente (${item.storeName}).`
       );
     } catch (err) {
       showToast(
@@ -3299,7 +3387,9 @@ export const FieldPromotoraView: React.FC = () => {
           {/* Barra de Submódulos Estilizada (Cápsula Ejecutiva) */}
           <div className="inline-flex flex-wrap items-center bg-zinc-950/90 p-1 rounded-xl border border-white/[0.08] shadow-inner gap-1">
             {[
-              { id: 'degustaciones', label: 'Degustaciones', count: tastingSchedule.length },
+              ...(!isCentroAndesOnlyCoordinator
+                ? [{ id: 'degustaciones', label: 'Degustaciones', count: tastingSchedule.length }]
+                : []),
               {
                 id: 'solicitudes_contraloria',
                 label: 'Solicitudes a Contraloría',

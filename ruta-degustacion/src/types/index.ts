@@ -62,6 +62,10 @@ export interface Entrega {
   notas_chofer: string;
   /** Sucursal operativa propietaria del registro (usada para filtro global de Super Admin) */
   sucursal?: OperativeSucursal;
+  /** Región operativa de origen ('Occidente' | 'Centro' | 'Andes') */
+  region?: string;
+  /** Sede del chofer responsable ('OCCIDENTE' | 'VALENCIA') */
+  chofer_sede?: 'OCCIDENTE' | 'VALENCIA';
 }
 
 /**

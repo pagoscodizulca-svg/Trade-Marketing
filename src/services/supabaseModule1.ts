@@ -3517,6 +3517,7 @@ async function resolveOrMaterializeDegustacionSurveyRow(
     store: storeName,
     promoter: promoterName,
     product: productSummary,
+    region: sanitizeFdvText(fallbackComments.region, 40) || 'Occidente',
     comments: JSON.stringify(fallbackComments),
     creatorId: sanitizeFdvText(fallbackComments.vendedorId || fallbackComments.vendedor, 140) || promoterName,
     created_at: createdAt,
@@ -3556,7 +3557,11 @@ async function patchDegustacionSurveyRowViaSdk(
 
     if (!error) {
       setSurveysLeidoTradeSupport(true);
-      return ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+      const updated = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+      if (!updated) {
+        throw new Error('No se pudo confirmar la actualización de la degustación en Supabase (0 filas afectadas; verifica permisos RLS).');
+      }
+      return updated;
     }
 
     if (isMissingColumnPostgrestError(error)) {
@@ -3576,7 +3581,11 @@ async function patchDegustacionSurveyRowViaSdk(
     throw new Error(`No se pudo actualizar la degustación en Supabase: ${error.message}`);
   }
 
-  return ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+  const fallbackUpdated = ((data as unknown as RawSupabaseSurvey[] | null) || [])[0] || null;
+  if (!fallbackUpdated) {
+    throw new Error('No se pudo confirmar la actualización de la degustación en Supabase (0 filas afectadas; verifica permisos RLS).');
+  }
+  return fallbackUpdated;
 }
 
 /**
@@ -3694,6 +3703,7 @@ export async function updateSupabaseDegustacionStatus(
     rawComments?: Record<string, any>;
     eventDateYmd?: string;
     isStrictAdmin?: boolean;
+    region?: string;
   }
 ): Promise<void> {
   assertSupabaseConfigured();
@@ -3743,6 +3753,7 @@ export async function updateSupabaseDegustacionStatus(
     ...(updates.salesAssisted !== undefined ? { salesAssisted: updates.salesAssisted } : {}),
     ...(updates.acceptanceRate !== undefined ? { acceptanceRate: updates.acceptanceRate } : {}),
     ...(updates.insumosCalculados !== undefined ? { insumosCalculados: updates.insumosCalculados } : {}),
+    ...(updates.region ? { region: sanitizeFdvText(updates.region, 40) } : {}),
   };
 
   const resolved = await resolveOrMaterializeDegustacionSurveyRow(
@@ -3757,6 +3768,7 @@ export async function updateSupabaseDegustacionStatus(
       resolved.targetId,
       {
         ...(cleanPromotora ? { promoter: cleanPromotora } : {}),
+        ...(updates.region ? { region: sanitizeFdvText(updates.region, 40) } : {}),
         comments: JSON.stringify(updatedComments),
       },
       String(updatedComments.visto_en_trade_at)

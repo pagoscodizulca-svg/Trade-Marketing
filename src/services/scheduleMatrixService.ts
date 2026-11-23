@@ -14,6 +14,70 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const YMD_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 export const UNASSIGNED_PROMOTORA_LABEL = 'POR ASIGNAR (Trade Marketing)';
 
+/**
+ * Opciones exactas y orden oficial de la barra de filtros de productos del Módulo 2
+ * (encima de "TABLA GENERAL DE ACTIVACIONES").
+ */
+export const MODULE2_PRODUCT_FILTER_OPTIONS = [
+  'TODOS',
+  'MORTADELA',
+  'VENCAMPO',
+  'ESPALDA',
+  'JAMON',
+] as const;
+
+export type Module2ProductFilterOption = (typeof MODULE2_PRODUCT_FILTER_OPTIONS)[number];
+export type ChoferSedeCode = 'OCCIDENTE' | 'VALENCIA';
+
+export interface ResolvedMatrixRouting {
+  region: 'Occidente' | 'Centro' | 'Andes';
+  sucursal: 'ZULIA' | 'VALENCIA';
+  choferSede: ChoferSedeCode;
+}
+
+/**
+ * Resuelve de forma determinista el enrutamiento regional y de chofer para Módulo 2:
+ * - Occidente / Zulia -> region='Occidente', sucursal='ZULIA', choferSede='OCCIDENTE'
+ * - Centro / Valencia / Capital -> region='Centro', sucursal='VALENCIA', choferSede='VALENCIA'
+ * - Andes -> region='Andes', sucursal='VALENCIA', choferSede='VALENCIA' (hub Chofer Valencia)
+ */
+export function resolveMatrixRoutingFromRegion(
+  rawRegion?: string | null,
+  rawSucursal?: string | null
+): ResolvedMatrixRouting {
+  const norm = (val?: string | null) =>
+    String(val ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+
+  const reg = norm(rawRegion);
+  const suc = norm(rawSucursal);
+
+  if (
+    reg === 'ANDES' ||
+    reg === 'REGION ANDES' ||
+    /MERIDA|TACHIRA|SAN CRISTOBAL|BARINAS|EL VIGIA/.test(reg)
+  ) {
+    return { region: 'Andes', sucursal: 'VALENCIA', choferSede: 'VALENCIA' };
+  }
+
+  if (
+    reg === 'CENTRO' ||
+    reg === 'REGION CENTRO' ||
+    reg === 'VALENCIA' ||
+    reg === 'CAPITAL' ||
+    suc === 'VALENCIA' ||
+    suc === 'CENTRO' ||
+    suc === 'CAPITAL'
+  ) {
+    return { region: 'Centro', sucursal: 'VALENCIA', choferSede: 'VALENCIA' };
+  }
+
+  return { region: 'Occidente', sucursal: 'ZULIA', choferSede: 'OCCIDENTE' };
+}
+
 export function isRealUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_REGEX.test(value.trim());
 }
@@ -207,7 +271,11 @@ export function filterMatrixVisits(
     if (criteria.selectedShift !== 'TODOS' && v.shift !== criteria.selectedShift) return false;
     if (criteria.selectedProduct !== 'TODOS' && normProdFilter) {
       const hay = normalizeSearchText(`${v.productFocus} ${v.fillProductSelection ?? ''}`);
-      if (!hay.includes(normProdFilter)) return false;
+      const matchesProduct =
+        normProdFilter === 'vencampo'
+          ? hay.includes('vencampo') || hay.includes('arroz') || Number(v.arrozQty || 0) > 0
+          : hay.includes(normProdFilter);
+      if (!matchesProduct) return false;
     }
     if (normQuery) {
       const hay = normalizeSearchText(
@@ -243,6 +311,8 @@ export const MatrixUpsertRowSchema = z.object({
   promotora_nombre: z.string().trim().max(180).optional().default(''),
   promotora_email: z.string().trim().max(180).optional().default(''),
   sucursal: z.string().trim().max(40).optional().default(''),
+  region: z.string().trim().max(40).optional().default(''),
+  chofer_sede: z.enum(['OCCIDENTE', 'VALENCIA', '']).optional().default(''),
   observaciones: z.string().trim().max(1000).optional().default(''),
   idempotency_hash: z.string().trim().max(128).optional(),
 });
@@ -283,7 +353,14 @@ function defaultWindowForShift(shift: ShiftType): { horaInicio: string; horaFin:
 
 export function buildMatrixUpsertRowFromVisit(
   visit: ScheduledVisit,
-  options?: { clientCode?: string; clientTempId?: string; promotoraEmail?: string; sucursal?: string }
+  options?: {
+    clientCode?: string;
+    clientTempId?: string;
+    promotoraEmail?: string;
+    sucursal?: string;
+    region?: string;
+    choferSede?: ChoferSedeCode | '';
+  }
 ): MatrixUpsertRowInput {
   const shift = normalizeProductionShift(visit.shift);
   const { horaInicio, horaFin } = defaultWindowForShift(shift);
@@ -324,6 +401,12 @@ export function buildMatrixUpsertRowFromVisit(
     )
   );
 
+  const routing = resolveMatrixRoutingFromRegion(options?.region, options?.sucursal);
+  const explicitSede: ChoferSedeCode =
+    options?.choferSede === 'VALENCIA' || options?.choferSede === 'OCCIDENTE'
+      ? options.choferSede
+      : routing.choferSede;
+
   return MatrixUpsertRowSchema.parse({
     id: resolvedCronId,
     client_temp_id: options?.clientTempId ?? visit.id,
@@ -353,7 +436,9 @@ export function buildMatrixUpsertRowFromVisit(
     promotora_id: resolvedPromotoraId,
     promotora_nombre: String(visit.promotoraName || '').trim() || UNASSIGNED_PROMOTORA_LABEL,
     promotora_email: String(options?.promotoraEmail || '').trim().toLowerCase(),
-    sucursal: String(options?.sucursal || '').trim().toUpperCase(),
+    sucursal: routing.sucursal,
+    region: routing.region,
+    chofer_sede: explicitSede,
     observaciones: String(visit.notes || '').trim(),
   });
 }
@@ -567,12 +652,32 @@ function formatChoferDeliveryDateLabel(ymd: string): string {
 }
 
 function resolveSafeSucursalCode(raw: string | null | undefined): string {
-  const upper = String(raw || '').trim().toUpperCase();
-  if (upper === 'ZULIA' || upper === 'VALENCIA' || upper === 'CENTRO' || upper === 'ORIENTE' || upper === 'CAPITAL') {
-    return upper;
+  const upper = String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  if (upper === 'VALENCIA' || upper === 'CENTRO' || upper === 'ANDES' || upper === 'CAPITAL') {
+    return 'VALENCIA';
   }
-  if (upper === 'OCCIDENTE' || upper === 'ANDES') return 'ZULIA';
+  if (upper === 'ZULIA' || upper === 'OCCIDENTE') {
+    return 'ZULIA';
+  }
+  if (upper === 'ORIENTE') return 'ORIENTE';
   return 'ZULIA';
+}
+
+function isMissingOptionalColumnError(
+  err: { code?: string; message?: string } | null | undefined,
+  colName: string
+): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').trim().toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    (code === 'PGRST204' || code === '42703' || msg.includes('does not exist') || msg.includes('schema cache')) &&
+    msg.includes(colName.toLowerCase())
+  );
 }
 
 function generateClientUuid(): string {
@@ -625,12 +730,24 @@ async function syncScheduledRowsToDownstreamApps(
       String(saved.promotora_nombre || row.promotora_nombre || '').trim() ||
       UNASSIGNED_PROMOTORA_LABEL;
     const cleanPromEmail = String(row.promotora_email || '').trim().toLowerCase() || null;
-    const cleanSucursal = resolveSafeSucursalCode(saved.sucursal || row.sucursal);
+    const routing = resolveMatrixRoutingFromRegion(row.region, saved.sucursal || row.sucursal);
+    const cleanSucursal = routing.sucursal;
+    const cleanRegion = routing.region;
+    const cleanChoferSede: ChoferSedeCode =
+      row.chofer_sede === 'VALENCIA' || row.chofer_sede === 'OCCIDENTE'
+        ? row.chofer_sede
+        : routing.choferSede;
+    const hasAssignedPromotora =
+      Boolean(cleanPromEmail) ||
+      Boolean(row.promotora_id) ||
+      (cleanPromNombre.length > 0 &&
+        !cleanPromNombre.toUpperCase().startsWith('POR ASIGNAR') &&
+        !cleanPromNombre.toUpperCase().startsWith('SIN ASIGNAR'));
     const shiftWindow = defaultWindowForShift(row.turno);
     const horaInicio = row.hora_inicio || shiftWindow.horaInicio;
     const horaFin = row.hora_fin || shiftWindow.horaFin;
 
-    if (options.syncPromotoraRoute) {
+    if (options.syncPromotoraRoute && hasAssignedPromotora) {
       try {
         const existingRuta = await client
           .from('rutas_promotoras')
@@ -638,47 +755,36 @@ async function syncScheduledRowsToDownstreamApps(
           .eq('cronograma_id', cronogramaId)
           .limit(1);
 
-        const rutaPayload: Record<string, unknown> = {
-          cronograma_id: cronogramaId,
-          fecha: row.fecha,
-          turno: row.turno,
-          hora_inicio: horaInicio,
-          hora_fin: horaFin,
-          cliente_nombre: row.cliente_nombre,
-          cliente_codigo: row.cliente_codigo,
-          zona_direccion: row.zona_direccion,
-          producto_resumen: row.producto_resumen,
-          productos: row.productos,
-          cantidad_kilos: row.cantidad_kilos,
-          vendedor_fdv: row.vendedor_fdv,
-          promotora_id: row.promotora_id ?? null,
-          promotora_nombre: cleanPromNombre,
-          promotora_email: cleanPromEmail,
-          estado_ruta: 'ASIGNADA',
-          observaciones: row.observaciones,
-          sucursal: cleanSucursal,
-        };
-
         const existingId = Array.isArray(existingRuta.data) ? existingRuta.data[0]?.id : null;
-        if (!existingRuta.error && existingId) {
-          const updRuta = await client
-            .from('rutas_promotoras')
-            .update(rutaPayload)
-            .eq('id', existingId)
-            .select('id');
-          if (updRuta.error) {
-            console.warn('[syncScheduledRowsToDownstreamApps] Error actualizando rutas_promotoras:', {
-              code: updRuta.error.code,
-              message: updRuta.error.message,
-              cronogramaId,
-            });
-          }
-        } else if (!existingRuta.error) {
+        // Si el trigger en BD ya materializó la fila para este `cronograma_id`, no reescribir ni duplicar
+        if (!existingRuta.error && !existingId) {
+          const rutaPayload: Record<string, unknown> = {
+            cronograma_id: cronogramaId,
+            fecha: row.fecha,
+            turno: row.turno,
+            hora_inicio: horaInicio,
+            hora_fin: horaFin,
+            cliente_nombre: row.cliente_nombre,
+            cliente_codigo: row.cliente_codigo,
+            zona_direccion: row.zona_direccion,
+            producto_resumen: row.producto_resumen,
+            productos: row.productos,
+            cantidad_kilos: row.cantidad_kilos,
+            vendedor_fdv: row.vendedor_fdv,
+            promotora_id: row.promotora_id ?? null,
+            promotora_nombre: cleanPromNombre,
+            promotora_email: cleanPromEmail,
+            estado_ruta: 'ASIGNADA',
+            observaciones: row.observaciones,
+            region: cleanRegion,
+            sucursal: cleanSucursal,
+          };
+
           const insRuta = await client
             .from('rutas_promotoras')
             .insert(rutaPayload)
             .select('id');
-          if (insRuta.error) {
+          if (insRuta.error && insRuta.error.code !== '23505') {
             console.warn('[syncScheduledRowsToDownstreamApps] Error insertando en rutas_promotoras:', {
               code: insRuta.error.code,
               message: insRuta.error.message,
@@ -693,20 +799,6 @@ async function syncScheduledRowsToDownstreamApps(
 
     if (options.syncChoferDelivery) {
       try {
-        const choferTurno = row.turno === 'TARDE' ? 'TARDE' : 'MAÑANA';
-        const deliveryPayload: Record<string, unknown> = {
-          cronograma_id: cronogramaId,
-          fecha: formatChoferDeliveryDateLabel(row.fecha),
-          turno: choferTurno,
-          numero_grupo_turno: `${choferTurno} · ${row.fecha}`,
-          cliente: row.cliente_nombre.toUpperCase(),
-          producto: row.producto_resumen.toUpperCase().slice(0, 120),
-          vendedor: (row.vendedor_fdv || 'TRADE MARKETING').toUpperCase(),
-          promotora: cleanPromNombre.toUpperCase(),
-          notas_chofer: row.observaciones || '',
-          sucursal: cleanSucursal,
-        };
-
         const existingEntrega = await client
           .from('entregas_degustacion')
           .select('id')
@@ -717,21 +809,25 @@ async function syncScheduledRowsToDownstreamApps(
           ? existingEntrega.data[0]?.id
           : null;
 
-        if (!existingEntrega.error && existingEntregaId) {
-          const updEnt = await client
-            .from('entregas_degustacion')
-            .update(deliveryPayload)
-            .eq('id', existingEntregaId)
-            .select('id');
-          if (updEnt.error) {
-            console.warn('[syncScheduledRowsToDownstreamApps] Error actualizando entregas_degustacion:', {
-              code: updEnt.error.code,
-              message: updEnt.error.message,
-              cronogramaId,
-            });
-          }
-        } else if (!existingEntrega.error) {
-          const insEnt = await client
+        // Si el trigger en BD ya materializó la entrega del chofer para este `cronograma_id`, evitar duplicado
+        if (!existingEntrega.error && !existingEntregaId) {
+          const choferTurno = row.turno === 'TARDE' ? 'TARDE' : 'MAÑANA';
+          const deliveryPayload: Record<string, unknown> = {
+            cronograma_id: cronogramaId,
+            fecha: formatChoferDeliveryDateLabel(row.fecha),
+            turno: choferTurno,
+            numero_grupo_turno: `${choferTurno} · ${row.fecha}`,
+            cliente: row.cliente_nombre.toUpperCase(),
+            producto: row.producto_resumen.toUpperCase().slice(0, 120),
+            vendedor: (row.vendedor_fdv || 'TRADE MARKETING').toUpperCase(),
+            promotora: cleanPromNombre.toUpperCase(),
+            notas_chofer: row.observaciones || '',
+            region: cleanRegion,
+            sucursal: cleanSucursal,
+            chofer_sede: cleanChoferSede,
+          };
+
+          let insEnt = await client
             .from('entregas_degustacion')
             .insert({
               id: generateClientUuid(),
@@ -743,7 +839,23 @@ async function syncScheduledRowsToDownstreamApps(
               hora_entrega: null,
             })
             .select('id');
-          if (insEnt.error) {
+          if (insEnt.error && isMissingOptionalColumnError(insEnt.error, 'chofer_sede')) {
+            const { chofer_sede: _omitSede, ...legacyDelivery } = deliveryPayload;
+            void _omitSede;
+            insEnt = await client
+              .from('entregas_degustacion')
+              .insert({
+                id: generateClientUuid(),
+                ...legacyDelivery,
+                stand_entregado: false,
+                producto_entregado: false,
+                completado: false,
+                estado_logistico: 'PENDIENTE',
+                hora_entrega: null,
+              })
+              .select('id');
+          }
+          if (insEnt.error && insEnt.error.code !== '23505') {
             console.warn('[syncScheduledRowsToDownstreamApps] Error insertando en entregas_degustacion:', {
               code: insEnt.error.code,
               message: insEnt.error.message,
@@ -829,7 +941,13 @@ export async function persistMatrixUpsertBatch(
     const cleanPromNombre =
       String(row.promotora_nombre || '').trim() || UNASSIGNED_PROMOTORA_LABEL;
     const cleanPromEmail = String(row.promotora_email || '').trim().toLowerCase() || null;
-    const cleanSucursal = resolveSafeSucursalCode(row.sucursal);
+    const routing = resolveMatrixRoutingFromRegion(row.region, row.sucursal);
+    const cleanSucursal = routing.sucursal;
+    const cleanRegion = routing.region;
+    const cleanChoferSede: ChoferSedeCode =
+      row.chofer_sede === 'VALENCIA' || row.chofer_sede === 'OCCIDENTE'
+        ? row.chofer_sede
+        : routing.choferSede;
     const payload: Record<string, unknown> = {
       fecha: row.fecha,
       turno: row.turno,
@@ -849,16 +967,27 @@ export async function persistMatrixUpsertBatch(
       promotora_email: cleanPromEmail,
       observaciones: row.observaciones,
       sucursal: cleanSucursal,
+      region: cleanRegion,
+      chofer_sede: cleanChoferSede,
       // Agendamiento directo desde Trade Marketing (Módulo 2) queda APROBADA para persistir tras F5 y reflejarse en apps de campo
       estado: 'APROBADA',
     };
 
     if (row.id) {
-      const upd = await client
+      let upd = await client
         .from('cronograma_degustaciones')
         .update(payload)
         .eq('id', row.id)
         .select('id, cliente_nombre, fecha, turno, estado, promotora_id, promotora_nombre');
+      if (upd.error && isMissingOptionalColumnError(upd.error, 'chofer_sede')) {
+        const { chofer_sede: _omitSede, ...legacyPayload } = payload;
+        void _omitSede;
+        upd = await client
+          .from('cronograma_degustaciones')
+          .update(legacyPayload)
+          .eq('id', row.id)
+          .select('id, cliente_nombre, fecha, turno, estado, promotora_id, promotora_nombre');
+      }
       if (upd.error) {
         console.error('[persistMatrixUpsertBatch] Error en UPDATE cronograma_degustaciones', {
           code: upd.error.code,
@@ -888,18 +1017,27 @@ export async function persistMatrixUpsertBatch(
       savedPairs.push({ row, saved });
       actualizadas += 1;
     } else {
-      const ins = await client
+      const insertBody: Record<string, unknown> = {
+        ...payload,
+        idempotency_hash:
+          row.idempotency_hash ||
+          `${row.fecha}_${row.turno}_${normalizeSearchText(row.cliente_nombre)}_${normalizeSearchText(row.producto_resumen)}_${Date.now()}`.slice(
+            0,
+            120
+          ),
+      };
+      let ins = await client
         .from('cronograma_degustaciones')
-        .insert({
-          ...payload,
-          idempotency_hash:
-            row.idempotency_hash ||
-            `${row.fecha}_${row.turno}_${normalizeSearchText(row.cliente_nombre)}_${normalizeSearchText(row.producto_resumen)}_${Date.now()}`.slice(
-              0,
-              120
-            ),
-        })
+        .insert(insertBody)
         .select('id, cliente_nombre, fecha, turno, estado, promotora_id, promotora_nombre');
+      if (ins.error && isMissingOptionalColumnError(ins.error, 'chofer_sede')) {
+        const { chofer_sede: _omitSede, ...legacyInsert } = insertBody;
+        void _omitSede;
+        ins = await client
+          .from('cronograma_degustaciones')
+          .insert(legacyInsert)
+          .select('id, cliente_nombre, fecha, turno, estado, promotora_id, promotora_nombre');
+      }
       if (ins.error) {
         console.error('[persistMatrixUpsertBatch] Error en INSERT cronograma_degustaciones', {
           code: ins.error.code,

@@ -108,9 +108,13 @@ export async function fetchPortalRutaRecords(params: {
     profile.appRole === 'promotora'
       ? rawList.filter((r) => {
           const rowEmail = String(r.promotora_email || '').trim().toLowerCase();
+          const rowAuthUid = String(
+            (r as RutaPromotoraRecord & { auth_user_id?: string | null }).auth_user_id || ''
+          ).trim();
+          const matchesAuthUid = Boolean(profile.userId && rowAuthUid && rowAuthUid === profile.userId);
           const matchesId = Boolean(profile.staffId && r.promotora_id === profile.staffId);
           const matchesEmail = Boolean(normalizedEmail && rowEmail && rowEmail === normalizedEmail);
-          return (matchesId || matchesEmail) && r.fecha >= todayYmd;
+          return (matchesAuthUid || matchesId || matchesEmail) && r.fecha >= todayYmd;
         })
       : rawList;
 
