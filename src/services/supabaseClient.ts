@@ -360,6 +360,9 @@ let unifiedClient: SupabaseClient | null = null;
 let dedicatedMasterClient: SupabaseClient<MasterDataDatabase> | null = null;
 let cachedAccessToken: string | null = null;
 let cachedAuthUserId: string | null = null;
+let cachedSessionExpiresAtSec: number | null = null;
+let initialSessionHydrationPromise: Promise<Session | null> | null = null;
+let inflightSessionRefreshPromise: Promise<Session | null> | null = null;
 let activeSucursalHeader: OperativeSucursal | null = null;
 let authListenerBound = false;
 const sessionResetCallbacks = new Set<() => void>();
@@ -427,31 +430,191 @@ function buildSucursalAwareFetch(baseFetch?: typeof fetch): typeof fetch {
   };
 }
 
+function isTokenAuthenticatedUserJwt(token: string | null | undefined): token is string {
+  const clean = String(token ?? '').trim();
+  if (clean.length < 20) return false;
+  if (clean === SUPABASE_ANON_KEY || clean === SUPABASE_MASTER_ANON_KEY) return false;
+  if (clean.startsWith('sb_publishable_') || clean.startsWith('sb_secret_')) return false;
+  if (clean.startsWith('eyJ')) {
+    const payload = decodeJwtPayload(clean);
+    const role = typeof payload?.role === 'string' ? payload.role.trim().toLowerCase() : '';
+    if (role === 'anon' || role === 'service_role') return false;
+  }
+  return true;
+}
+
 function bindAuthTokenSync(client: SupabaseClient, fallbackKey: string): void {
   if (authListenerBound) return;
   authListenerBound = true;
 
-  void client.auth.getSession().then(({ data }) => {
-    const token = data.session?.access_token || null;
-    cachedAccessToken = token;
-    cachedAuthUserId = data.session?.user?.id || null;
-    if (token) {
-      client.realtime.setAuth(token);
-    }
-  });
+  initialSessionHydrationPromise = client.auth
+    .getSession()
+    .then(({ data }) => {
+      const session = data?.session ?? null;
+      const token = session?.access_token || null;
+      cachedAccessToken = isTokenAuthenticatedUserJwt(token) ? token : null;
+      cachedAuthUserId = session?.user?.id || null;
+      cachedSessionExpiresAtSec = typeof session?.expires_at === 'number' ? session.expires_at : null;
+      if (cachedAccessToken) {
+        client.realtime.setAuth(cachedAccessToken);
+      }
+      return session;
+    })
+    .catch(() => null);
 
   client.auth.onAuthStateChange((event, session: Session | null) => {
     const token = session?.access_token || null;
     const nextUserId = session?.user?.id || null;
     const switchedUser = cachedAuthUserId !== null && nextUserId !== cachedAuthUserId;
-    cachedAccessToken = token;
+    cachedAccessToken = isTokenAuthenticatedUserJwt(token) ? token : null;
     cachedAuthUserId = nextUserId;
+    cachedSessionExpiresAtSec = typeof session?.expires_at === 'number' ? session.expires_at : null;
     if (event === 'SIGNED_OUT' || !session || switchedUser) {
       activeSucursalHeader = null;
+      inflightSessionRefreshPromise = null;
       notifySessionResetCallbacks();
     }
-    client.realtime.setAuth(token ?? fallbackKey);
+    client.realtime.setAuth(cachedAccessToken ?? fallbackKey);
   });
+}
+
+/**
+ * Espera a que la sesión de Supabase Auth quede hidratada antes de disparar consultas
+ * autenticadas, eliminando condiciones de carrera donde peticiones salen como `anon`.
+ */
+export async function waitForResolvedAuthSession(
+  customClient?: SupabaseClient | null,
+  timeoutMs = 4000
+): Promise<Session | null> {
+  const targetClient = customClient ?? (isSupabaseConfigured ? getSupabaseClient() : null);
+  if (!targetClient || typeof targetClient.auth?.getSession !== 'function') {
+    return null;
+  }
+
+  const isPrimary = !customClient || targetClient === unifiedClient;
+  if (isPrimary && initialSessionHydrationPromise) {
+    try {
+      const hydrated = await Promise.race([
+        initialSessionHydrationPromise,
+        new Promise<null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), Math.max(500, timeoutMs));
+          if (typeof (timer as { unref?: () => void }).unref === 'function') {
+            (timer as { unref: () => void }).unref();
+          }
+        }),
+      ]);
+      if (hydrated?.access_token && isTokenAuthenticatedUserJwt(hydrated.access_token)) {
+        return hydrated;
+      }
+    } catch {
+      // Continúa a verificación directa getSession()
+    }
+  }
+
+  try {
+    const { data, error } = await targetClient.auth.getSession();
+    if (error || !data?.session) {
+      return null;
+    }
+    const session = data.session;
+    if (isPrimary) {
+      const token = session.access_token || null;
+      cachedAccessToken = isTokenAuthenticatedUserJwt(token) ? token : null;
+      cachedAuthUserId = session.user?.id || null;
+      cachedSessionExpiresAtSec = typeof session.expires_at === 'number' ? session.expires_at : null;
+      if (cachedAccessToken) {
+        targetClient.realtime?.setAuth?.(cachedAccessToken);
+      }
+    }
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Obtiene un JWT `authenticated` válido para el usuario en sesión.
+ * Si el token está vencido, próximo a vencer o `forceRefresh` es `true`, ejecuta
+ * `refreshSession()` deduplicado una sola vez. Jamás devuelve llaves `anon`.
+ */
+export async function getAuthenticatedSessionToken(
+  customClient?: SupabaseClient | null,
+  options: { forceRefresh?: boolean; minTtlSeconds?: number } = {}
+): Promise<string | null> {
+  const targetClient = customClient ?? (isSupabaseConfigured ? getSupabaseClient() : null);
+  if (!targetClient || typeof targetClient.auth?.getSession !== 'function') {
+    return null;
+  }
+
+  const isPrimary = !customClient || targetClient === unifiedClient;
+  const minTtlSeconds = Math.max(0, options.minTtlSeconds ?? 30);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (
+    !options.forceRefresh &&
+    isPrimary &&
+    cachedAccessToken &&
+    isTokenAuthenticatedUserJwt(cachedAccessToken) &&
+    (cachedSessionExpiresAtSec === null || cachedSessionExpiresAtSec > nowSec + minTtlSeconds)
+  ) {
+    return cachedAccessToken;
+  }
+
+  const session = options.forceRefresh ? null : await waitForResolvedAuthSession(targetClient);
+  const sessionToken = session?.access_token || null;
+  const sessionExp = typeof session?.expires_at === 'number' ? session.expires_at : null;
+  const isNearExpiry = sessionExp !== null && sessionExp <= nowSec + minTtlSeconds;
+
+  if (!options.forceRefresh && sessionToken && isTokenAuthenticatedUserJwt(sessionToken) && !isNearExpiry) {
+    return sessionToken;
+  }
+
+  if (typeof targetClient.auth?.refreshSession !== 'function') {
+    return sessionToken && isTokenAuthenticatedUserJwt(sessionToken) ? sessionToken : null;
+  }
+
+  const runRefresh = async (): Promise<Session | null> => {
+    try {
+      const { data, error } = await targetClient.auth.refreshSession();
+      if (error || !data?.session) {
+        return null;
+      }
+      const nextSession = data.session;
+      if (isPrimary) {
+        const nextToken = nextSession.access_token || null;
+        cachedAccessToken = isTokenAuthenticatedUserJwt(nextToken) ? nextToken : null;
+        cachedAuthUserId = nextSession.user?.id || null;
+        cachedSessionExpiresAtSec =
+          typeof nextSession.expires_at === 'number' ? nextSession.expires_at : null;
+        if (cachedAccessToken) {
+          targetClient.realtime?.setAuth?.(cachedAccessToken);
+        }
+      }
+      return nextSession;
+    } catch {
+      return null;
+    }
+  };
+
+  let refreshed: Session | null = null;
+  if (isPrimary) {
+    if (!inflightSessionRefreshPromise) {
+      inflightSessionRefreshPromise = runRefresh().finally(() => {
+        inflightSessionRefreshPromise = null;
+      });
+    }
+    refreshed = await inflightSessionRefreshPromise;
+  } else {
+    refreshed = await runRefresh();
+  }
+
+  const refreshedToken = refreshed?.access_token || null;
+  if (refreshedToken && isTokenAuthenticatedUserJwt(refreshedToken)) {
+    return refreshedToken;
+  }
+  return !options.forceRefresh && sessionToken && isTokenAuthenticatedUserJwt(sessionToken)
+    ? sessionToken
+    : null;
 }
 
 /**

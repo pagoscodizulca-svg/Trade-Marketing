@@ -14,11 +14,13 @@ RUN npm --prefix ruta-degustacion ci
 
 COPY . .
 
-# Solo valores PÚBLICOS (URL y llave `sb_publishable_`). NUNCA pases `sb_secret_` ni `service_role` aquí.
+# Solo valores PÚBLICOS (URL y llave `sb_publishable_` / `anon`). NUNCA pases `sb_secret_` ni `service_role` aquí.
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_PUBLISHABLE_KEY
+ARG VITE_SUPABASE_ANON_KEY
 ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
-    VITE_SUPABASE_PUBLISHABLE_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY
+    VITE_SUPABASE_PUBLISHABLE_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY \
+    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
 
 RUN npm run build:all
 

@@ -108,6 +108,29 @@ export function validateServerEnvConfig(
     warnings.push('Falta configurar SUPABASE_URL / VITE_SUPABASE_URL en producción.');
   }
 
+  if (options.isProduction) {
+    const publicKey = (
+      env.SUPABASE_PUBLISHABLE_KEY ||
+      env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      env.SUPABASE_ANON_KEY ||
+      env.VITE_SUPABASE_ANON_KEY ||
+      ''
+    ).trim();
+    if (!publicKey) {
+      warnings.push(
+        'Falta configurar SUPABASE_PUBLISHABLE_KEY / VITE_SUPABASE_PUBLISHABLE_KEY en runtime para verificar JWTs.'
+      );
+    }
+    const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+    if (!serviceKey && publicKey) {
+      options.logger.info('server_env_master_data_mode', {
+        mode: 'user_scoped_rls_fallback',
+        detail:
+          'SUPABASE_SERVICE_ROLE_KEY ausente: Data Maestra ERP operará usando JWT authenticated bajo RLS.',
+      });
+    }
+  }
+
   const positiveIntVars = [
     'PORT',
     'TRUST_PROXY_HOPS',

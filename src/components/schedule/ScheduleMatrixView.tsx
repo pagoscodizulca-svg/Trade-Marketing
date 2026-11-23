@@ -19,6 +19,7 @@ import {
   ChevronLeft,
   ChevronRight,
   BarChart3,
+  RefreshCw,
   X,
 } from 'lucide-react';
 import { ShiftType } from '../../types';
@@ -343,18 +344,33 @@ export const ScheduleMatrixView: React.FC = () => {
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
   const [storeZoneFilter, setStoreZoneFilter] = useState<string>('TODAS');
   const [storeSearchInBatch, setStoreSearchInBatch] = useState<string>('');
+  const [debouncedStoreSearchInBatch, setDebouncedStoreSearchInBatch] = useState<string>('');
   const [visibleBatchStoresLimit, setVisibleBatchStoresLimit] = useState<number>(150);
+
+  // Debounce ligero (~180 ms) para mantener búsqueda fluida con miles de PDVs
+  useEffect(() => {
+    if (!storeSearchInBatch.trim()) {
+      setDebouncedStoreSearchInBatch('');
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedStoreSearchInBatch(storeSearchInBatch);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [storeSearchInBatch]);
 
   // Al cambiar de sede operativa, limpiar selección previa y reiniciar filtro de zona
   useEffect(() => {
     setSelectedStoreIds([]);
     setStoreZoneFilter('TODAS');
+    setStoreSearchInBatch('');
+    setDebouncedStoreSearchInBatch('');
     setVisibleBatchStoresLimit(150);
   }, [activeSucursal]);
 
   useEffect(() => {
     setVisibleBatchStoresLimit(150);
-  }, [storeZoneFilter, storeSearchInBatch]);
+  }, [storeZoneFilter, debouncedStoreSearchInBatch]);
 
   // Estados de carga para persistencia en Supabase y bloqueo de doble envío
   const [isPersistingMatrix, setIsPersistingMatrix] = useState<boolean>(false);
@@ -431,32 +447,51 @@ export const ScheduleMatrixView: React.FC = () => {
     [stores]
   );
 
+  // Pre-índice memoizado para búsqueda instantánea NFD insensible a tildes y ", C.A." con miles de PDVs
+  const indexedStoresForBatch = useMemo(
+    () =>
+      stores.map((store) => {
+        const normTokens = [store.name, store.zone, store.clientCode, store.sellerName, store.city].map(
+          (field) => normalizeSearchText(field)
+        );
+        const compactTokens = normTokens.map((t) => t.replace(/[^a-z0-9]+/g, ''));
+        return { store, normTokens, compactTokens };
+      }),
+    [stores]
+  );
+
   // Stores filtered for the batch selection list (búsqueda NFD insensible a tildes y ", C.A.")
   const filteredStoresForBatch = useMemo(() => {
-    const q = normalizeSearchText(storeSearchInBatch);
+    const q = normalizeSearchText(debouncedStoreSearchInBatch);
     const qCompact = q.replace(/[^a-z0-9]+/g, '');
-    return stores.filter((s) => {
-      const matchZone = storeZoneFilter === 'TODAS' || s.zone === storeZoneFilter;
-      if (!matchZone) return false;
-      if (!q) return true;
-      const fields = [s.name, s.zone, s.clientCode, s.sellerName, s.city];
-      return fields.some((field) => {
-        const norm = normalizeSearchText(field);
-        if (norm.includes(q)) return true;
-        return qCompact.length >= 2 && norm.replace(/[^a-z0-9]+/g, '').includes(qCompact);
-      });
-    });
-  }, [stores, storeZoneFilter, storeSearchInBatch]);
+    const out: typeof stores = [];
+    for (const item of indexedStoresForBatch) {
+      if (storeZoneFilter !== 'TODAS' && item.store.zone !== storeZoneFilter) continue;
+      if (!q) {
+        out.push(item.store);
+        continue;
+      }
+      const matched = item.normTokens.some(
+        (norm, idx) =>
+          norm.includes(q) || (qCompact.length >= 2 && item.compactTokens[idx]!.includes(qCompact))
+      );
+      if (matched) out.push(item.store);
+    }
+    return out;
+  }, [indexedStoresForBatch, storeZoneFilter, debouncedStoreSearchInBatch]);
 
   const visibleStoresInBatch = useMemo(
     () => filteredStoresForBatch.slice(0, visibleBatchStoresLimit),
     [filteredStoresForBatch, visibleBatchStoresLimit]
   );
 
+  const selectedStoreIdSet = useMemo(() => new Set(selectedStoreIds), [selectedStoreIds]);
+
   // Solo clientes marcados Y visibles dentro del filtro/zona actual
-  const effectiveBatchStoreIds = filteredStoresForBatch
-    .filter((s) => selectedStoreIds.includes(s.id))
-    .map((s) => s.id);
+  const effectiveBatchStoreIds = useMemo(
+    () => filteredStoresForBatch.filter((s) => selectedStoreIdSet.has(s.id)).map((s) => s.id),
+    [filteredStoresForBatch, selectedStoreIdSet]
+  );
   const hiddenSelectedCount = selectedStoreIds.length - effectiveBatchStoreIds.length;
 
   // Estado del modal LIMPIAR POR LOTE / NUEVA CARGA (cancelación lógica auditable)
@@ -1284,25 +1319,77 @@ export const ScheduleMatrixView: React.FC = () => {
 
               {/* Listado con Checkboxes de Tiendas (renderizado incremental para carteras > 3,000 clientes) */}
               <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1 divide-y divide-zinc-900/60">
+                {masterData.error && stores.length > 0 && (
+                  <div className="mb-2 p-2.5 rounded-xl bg-amber-950/30 border border-amber-700/40 text-[11px] text-amber-300 flex items-start justify-between gap-2">
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="inline-block font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/30 mr-1.5">
+                        [Código: {masterData.errorCode ?? 'UNKNOWN_ERR'}]
+                      </span>
+                      <span className="break-words">{masterData.error}</span>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="retry-master-data-btn"
+                      onClick={() => void masterData.refrescar()}
+                      disabled={masterData.cargando}
+                      className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600/90 hover:bg-red-500 disabled:opacity-60 text-white text-[10px] font-bold transition"
+                    >
+                      {masterData.cargando ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3 h-3" />
+                      )}
+                      Reintentar carga
+                    </button>
+                  </div>
+                )}
+
                 {masterData.cargando && stores.length === 0 ? (
-                  <div className="py-8 text-center text-xs text-zinc-400">
-                    Cargando clientes de {activeSucursalLabel}...
+                  <div className="py-8 text-center text-xs text-zinc-400 flex flex-col items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+                    <span>Cargando clientes de {activeSucursalLabel}...</span>
                   </div>
                 ) : filteredStoresForBatch.length === 0 ? (
-                  <div className="py-8 text-center text-xs text-zinc-500 space-y-1">
+                  <div className="py-6 px-2 text-center text-xs text-zinc-500 space-y-2.5">
                     <p className="font-semibold text-zinc-400">
                       {stores.length === 0
                         ? `Sin clientes activos registrados para ${activeSucursalLabel}.`
                         : 'Ningún cliente coincide con el filtro actual.'}
                     </p>
                     {masterData.error && (
-                      <p className="text-[11px] text-amber-400">{masterData.error}</p>
+                      <div className="space-y-2 bg-zinc-950/90 border border-amber-700/40 rounded-xl p-3 text-left">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span
+                            data-testid="master-data-error-code"
+                            className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono text-[10px] font-bold"
+                          >
+                            [Código: {masterData.errorCode ?? 'UNKNOWN_ERR'}]
+                          </span>
+                          <button
+                            type="button"
+                            data-testid="retry-master-data-btn"
+                            onClick={() => void masterData.refrescar()}
+                            disabled={masterData.cargando}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-60 text-white text-[11px] font-bold transition cursor-pointer"
+                          >
+                            {masterData.cargando ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3 h-3" />
+                            )}
+                            Reintentar carga
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-amber-300/95 leading-relaxed break-words">
+                          {masterData.error}
+                        </p>
+                      </div>
                     )}
                   </div>
                 ) : (
                   <>
                     {visibleStoresInBatch.map((store) => {
-                      const isSelected = selectedStoreIds.includes(store.id);
+                      const isSelected = selectedStoreIdSet.has(store.id);
                       return (
                         <label
                           key={store.id}

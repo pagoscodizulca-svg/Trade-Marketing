@@ -48,14 +48,162 @@ import type {
   ZonaComercial,
 } from '../types/masterData';
 import {
+  createUserScopedSupabaseClient,
   getAdminSupabaseClient,
   isOperativeServerSucursal,
   normalizeServerSucursal,
   type AuthenticatedServerUser,
 } from './supabaseAdminAuth';
+import { serverLogger } from './logger';
 
 const ERP_PAGE_SIZE = 1000;
 const DEFAULT_ERP_CACHE_TTL_MS = 60_000;
+const MAX_USER_SCOPED_CACHE_ENTRIES = 32;
+
+const PROMOTORAS_FULL_SELECT =
+  'id,nombre_completo,direccion,telefono,correo,activo,created_at,updated_at,categoria,region,region_id,auth_user_id';
+const PROMOTORAS_BASE_SELECT =
+  'id,nombre_completo,direccion,telefono,correo,activo,created_at,updated_at,categoria';
+
+export type ServerMasterDataCategoryCode =
+  | 'ENV_MISSING'
+  | 'AUTH_REQUIRED'
+  | 'RLS_42501'
+  | 'SCHEMA_PGRST'
+  | 'UPSTREAM_503'
+  | 'NETWORK_ERR'
+  | 'UNKNOWN_ERR';
+
+export class ServerMasterDataError extends Error {
+  readonly categoryCode: ServerMasterDataCategoryCode;
+  readonly technicalCode: string | null;
+  readonly httpStatus: number;
+  readonly table: string | null;
+  readonly hint: string | null;
+
+  constructor(params: {
+    message: string;
+    categoryCode: ServerMasterDataCategoryCode;
+    technicalCode?: string | null;
+    httpStatus?: number;
+    table?: string | null;
+    hint?: string | null;
+  }) {
+    super(params.message);
+    this.name = 'ServerMasterDataError';
+    this.categoryCode = params.categoryCode;
+    this.technicalCode = params.technicalCode ?? null;
+    this.httpStatus = params.httpStatus ?? 503;
+    this.table = params.table ?? null;
+    this.hint = params.hint ?? null;
+  }
+}
+
+function classifyServerErpError(err: unknown, fallbackTable: string | null = null): ServerMasterDataError {
+  if (err instanceof ServerMasterDataError) {
+    return err;
+  }
+  const rec = (err && typeof err === 'object' ? err : {}) as Record<string, unknown>;
+  const code = rec.code ? String(rec.code).trim().toUpperCase() : null;
+  const message = String(rec.message ?? (err instanceof Error ? err.message : err ?? 'Error consultando Supabase'));
+  const hint = rec.hint ? String(rec.hint) : null;
+  const lower = message.toLowerCase();
+
+  if (code === 'ENV_MISSING' || lower.includes('falta configurar supabase_url')) {
+    return new ServerMasterDataError({
+      message,
+      categoryCode: 'ENV_MISSING',
+      technicalCode: 'ENV_MISSING',
+      httpStatus: 503,
+      table: fallbackTable,
+      hint: 'Verifica SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_PUBLISHABLE_KEY + RLS) en Render.',
+    });
+  }
+  if (code === '42501' || lower.includes('permission denied') || lower.includes('row-level security')) {
+    return new ServerMasterDataError({
+      message,
+      categoryCode: 'RLS_42501',
+      technicalCode: code ?? '42501',
+      httpStatus: 403,
+      table: fallbackTable,
+      hint,
+    });
+  }
+  if (code === 'PGRST301' || lower.includes('jwt expired') || lower.includes('invalid jwt')) {
+    return new ServerMasterDataError({
+      message,
+      categoryCode: 'AUTH_REQUIRED',
+      technicalCode: code ?? 'AUTH_REQUIRED',
+      httpStatus: 401,
+      table: fallbackTable,
+      hint,
+    });
+  }
+  if (
+    code === '42P01' ||
+    code === '42703' ||
+    (code && code.startsWith('PGRST2')) ||
+    lower.includes('could not find the table') ||
+    lower.includes('does not exist')
+  ) {
+    return new ServerMasterDataError({
+      message,
+      categoryCode: 'SCHEMA_PGRST',
+      technicalCode: code ?? 'SCHEMA_PGRST',
+      httpStatus: 503,
+      table: fallbackTable,
+      hint,
+    });
+  }
+  if (
+    lower.includes('fetch failed') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('network')
+  ) {
+    return new ServerMasterDataError({
+      message,
+      categoryCode: 'NETWORK_ERR',
+      technicalCode: code ?? 'NETWORK_ERR',
+      httpStatus: 503,
+      table: fallbackTable,
+      hint,
+    });
+  }
+
+  return new ServerMasterDataError({
+    message,
+    categoryCode: 'UPSTREAM_503',
+    technicalCode: code ?? 'MASTER_DATA_UPSTREAM_ERROR',
+    httpStatus: 503,
+    table: fallbackTable,
+    hint,
+  });
+}
+
+function sendMasterDataErrorResponse(
+  res: Response,
+  err: unknown,
+  entity: string,
+  safeErrorMessage: string
+): void {
+  const classified = classifyServerErpError(err);
+  serverLogger.error('master_data_erp_query_failed', {
+    entity,
+    categoryCode: classified.categoryCode,
+    technicalCode: classified.technicalCode,
+    table: classified.table,
+    httpStatus: classified.httpStatus,
+    message: classified.message,
+    hint: classified.hint,
+  });
+  res.status(classified.httpStatus).json({
+    error: safeErrorMessage,
+    code: classified.categoryCode,
+    technicalCode: classified.technicalCode ?? classified.categoryCode,
+    entity,
+  });
+}
 
 export interface MasterDataExactCounts {
   regiones: number;
@@ -87,33 +235,70 @@ export interface MasterDataErpSnapshot {
   source: 'supabase_erp_clientes';
 }
 
+export interface MasterDataSnapshotLoadOptions {
+  forceRefresh?: boolean;
+  accessToken?: string;
+  activeSucursalHeader?: string | null;
+  userId?: string;
+}
+
 export interface MasterDataErpGateway {
-  loadSnapshot(options?: { forceRefresh?: boolean }): Promise<MasterDataErpSnapshot>;
+  loadSnapshot(options?: MasterDataSnapshotLoadOptions): Promise<MasterDataErpSnapshot>;
 }
 
 let cachedSnapshot: MasterDataErpSnapshot | null = null;
 let inflightSnapshotPromise: Promise<MasterDataErpSnapshot> | null = null;
+const userScopedSnapshotCache = new Map<string, MasterDataErpSnapshot>();
+const userScopedInflightMap = new Map<string, Promise<MasterDataErpSnapshot>>();
 
 export function invalidateMasterDataErpServerCache(): void {
   cachedSnapshot = null;
+  userScopedSnapshotCache.clear();
+  userScopedInflightMap.clear();
+}
+
+function isMissingColumnError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  const msg = String(err.message ?? '').toLowerCase();
+  return code === '42703' || code === 'PGRST204' || msg.includes('does not exist');
 }
 
 async function fetchAllTablePages<T>(
   client: SupabaseClient,
   tableName: string,
-  selectExpr = '*'
+  selectExpr = '*',
+  orderBy?: string,
+  fallbackSelectExpr?: string
 ): Promise<{ rows: T[]; exactCount: number }> {
   const rows: T[] = [];
   let exactCount: number | null = null;
+  let activeSelect = selectExpr;
+  let useOrder = Boolean(orderBy);
 
   for (let from = 0; ; from += ERP_PAGE_SIZE) {
-    const { data, error, count } = await client
-      .from(tableName)
-      .select(selectExpr, { count: 'exact' })
-      .range(from, from + ERP_PAGE_SIZE - 1);
+    const runPage = async (sel: string, applyOrder: boolean) => {
+      let query = client.from(tableName).select(sel, { count: 'exact' });
+      if (applyOrder && orderBy && typeof query.order === 'function') {
+        query = query.order(orderBy, { ascending: true });
+      }
+      return query.range(from, from + ERP_PAGE_SIZE - 1);
+    };
+
+    let { data, error, count } = await runPage(activeSelect, useOrder);
+
+    if (error && fallbackSelectExpr && activeSelect !== fallbackSelectExpr && isMissingColumnError(error)) {
+      activeSelect = fallbackSelectExpr;
+      ({ data, error, count } = await runPage(activeSelect, useOrder));
+    }
+
+    if (error && useOrder && isMissingColumnError(error)) {
+      useOrder = false;
+      ({ data, error, count } = await runPage(activeSelect, false));
+    }
 
     if (error) {
-      throw new Error(`Error consultando tabla ERP "${tableName}": ${error.message}`);
+      throw classifyServerErpError(error, tableName);
     }
     if (typeof count === 'number' && exactCount === null) {
       exactCount = count;
@@ -131,10 +316,12 @@ async function fetchAllTablePages<T>(
 async function fetchOptionalTablePages<T>(
   client: SupabaseClient,
   tableName: string,
-  selectExpr = '*'
+  selectExpr = '*',
+  orderBy?: string,
+  fallbackSelectExpr?: string
 ): Promise<{ rows: T[]; exactCount: number }> {
   try {
-    return await fetchAllTablePages<T>(client, tableName, selectExpr);
+    return await fetchAllTablePages<T>(client, tableName, selectExpr, orderBy, fallbackSelectExpr);
   } catch {
     return { rows: [], exactCount: 0 };
   }
@@ -142,14 +329,16 @@ async function fetchOptionalTablePages<T>(
 
 /**
  * Carga y normaliza TODAS las entidades maestras de CODIZULCA desde Supabase
- * paginando automáticamente en bloques de 1,000 filas (`count: 'exact'`) sin truncamiento:
+ * paginando automáticamente en bloques de 1,000 filas con orden determinístico por PK
+ * (`count: 'exact'`) sin truncamiento:
  * `"Regiones"`, `"Productos"`, `"vw_productos_detalle"`, `"Clientes"`, `promotoras`,
  * `"Supervisores"`, `"Vendedores"`, `"Forecast_Vendedores_Excluidos"`, `"Sucursales"`,
  * `"Estados"`, `"Municipios"`, `"Tipificacion_Clientes"` y `"Canal_Comercializacion"`.
  *
  * SEGURIDAD:
- *  - Se ejecuta exclusivamente en servidor usando `getAdminSupabaseClient()`
- *    (llave `SUPABASE_SERVICE_ROLE_KEY` jamás expuesta al navegador).
+ *  - Se ejecuta en servidor con `getAdminSupabaseClient()` (si `SUPABASE_SERVICE_ROLE_KEY`
+ *    está configurada en Render) o con `createUserScopedSupabaseClient(jwt)` bajo RLS
+ *    para rol `authenticated` (jamás `anon`, jamás expuesta al navegador).
  *  - Los handlers siempre filtran por región/sede autorizada antes de serializar la respuesta.
  */
 export async function loadErpMasterSnapshotFromClient(
@@ -170,39 +359,50 @@ export async function loadErpMasterSnapshotFromClient(
     vwProductosRes,
     promotorasRes,
   ] = await Promise.all([
-    fetchAllTablePages<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba'),
-    fetchOptionalTablePages<ErpSucursalRow>(client, 'Sucursales', 'id_sucu,created_at,sucu_desc,id_regi'),
-    fetchOptionalTablePages<ErpEstadoRow>(client, 'Estados', 'id_esta,created_at,esta_desc,id_regi'),
-    fetchOptionalTablePages<ErpMunicipioRow>(client, 'Municipios', 'id_muni,created_at,muni_desc,id_esta,id_regi'),
-    fetchOptionalTablePages<ErpSupervisorRow>(client, 'Supervisores', 'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont'),
-    fetchAllTablePages<ErpVendedorRow>(client, 'Vendedores', 'id_vend,created_at,vend_codi,vend_nomb,vend_acti,id_sucu,id_supe,vend_cont'),
+    fetchAllTablePages<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', 'id_regi'),
+    fetchOptionalTablePages<ErpSucursalRow>(client, 'Sucursales', 'id_sucu,created_at,sucu_desc,id_regi', 'id_sucu'),
+    fetchOptionalTablePages<ErpEstadoRow>(client, 'Estados', 'id_esta,created_at,esta_desc,id_regi', 'id_esta'),
+    fetchOptionalTablePages<ErpMunicipioRow>(client, 'Municipios', 'id_muni,created_at,muni_desc,id_esta,id_regi', 'id_muni'),
+    fetchOptionalTablePages<ErpSupervisorRow>(client, 'Supervisores', 'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont', 'id_supe'),
+    fetchAllTablePages<ErpVendedorRow>(client, 'Vendedores', 'id_vend,created_at,vend_codi,vend_nomb,vend_acti,id_sucu,id_supe,vend_cont', 'id_vend'),
     fetchOptionalTablePages<ErpForecastExcludedVendedoresRow>(
       client,
       'Forecast_Vendedores_Excluidos',
-      'id_fove,id_regi,fove_vend,updated_at'
+      'id_fove,id_regi,fove_vend,updated_at',
+      'id_fove'
     ),
-    fetchOptionalTablePages<ErpTipificacionRow>(client, 'Tipificacion_Clientes', 'id_tipi,created_at,tipi_desc,id_cave'),
+    fetchOptionalTablePages<ErpTipificacionRow>(client, 'Tipificacion_Clientes', 'id_tipi,created_at,tipi_desc,id_cave', 'id_tipi'),
     fetchOptionalTablePages<ErpCanalComercializacionRow>(
       client,
       'Canal_Comercializacion',
-      'id_cana,created_at,cana_desc'
+      'id_cana,created_at,cana_desc',
+      'id_cana'
     ),
     fetchAllTablePages<ErpClienteRow>(
       client,
       'Clientes',
-      'id_clie,created_at,clie_rif,clie_nomb,id_esta,id_vend,id_muni,clie_regi,clie_acti,clie_lati,clie_long,id_tipi,id_clie_prin'
+      'id_clie,created_at,clie_rif,clie_nomb,id_esta,id_vend,id_muni,clie_regi,clie_acti,clie_lati,clie_long,id_tipi,id_clie_prin',
+      'id_clie'
     ),
     fetchOptionalTablePages<ErpProductoRow>(
       client,
       'Productos',
-      'id_prod,created_at,prod_codi,prod_desc,prod_unid,prod_acti'
+      'id_prod,created_at,prod_codi,prod_desc,prod_unid,prod_acti',
+      'id_prod'
     ),
     fetchOptionalTablePages<ErpVwProductoDetalleRow>(
       client,
       'vw_productos_detalle',
-      'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at'
+      'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at',
+      'id_prod'
     ),
-    fetchOptionalTablePages<ErpPromotoraRow>(client, 'promotoras', '*'),
+    fetchOptionalTablePages<ErpPromotoraRow>(
+      client,
+      'promotoras',
+      PROMOTORAS_FULL_SELECT,
+      'id',
+      PROMOTORAS_BASE_SELECT
+    ),
   ]);
 
   const dataset: ErpMasterDataset = {
@@ -278,40 +478,90 @@ export function createDefaultMasterDataErpGateway(
   cacheTtlMs = DEFAULT_ERP_CACHE_TTL_MS
 ): MasterDataErpGateway {
   return {
-    async loadSnapshot(options = {}): Promise<MasterDataErpSnapshot> {
+    async loadSnapshot(options: MasterDataSnapshotLoadOptions = {}): Promise<MasterDataErpSnapshot> {
       const now = Date.now();
-      if (
-        !options.forceRefresh &&
-        cachedSnapshot &&
-        now - cachedSnapshot.fetchedAtMs < cacheTtlMs
-      ) {
-        return cachedSnapshot;
-      }
-
-      if (inflightSnapshotPromise && !options.forceRefresh) {
-        return inflightSnapshotPromise;
-      }
-
       const adminClient = getAdminSupabaseClient();
-      if (!adminClient) {
-        throw new Error(
-          'Falta configurar SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en el servidor para consultar Data Maestra ERP.'
-        );
+
+      if (adminClient) {
+        if (
+          !options.forceRefresh &&
+          cachedSnapshot &&
+          now - cachedSnapshot.fetchedAtMs < cacheTtlMs
+        ) {
+          return cachedSnapshot;
+        }
+
+        if (inflightSnapshotPromise && !options.forceRefresh) {
+          return inflightSnapshotPromise;
+        }
+
+        const promise = loadErpMasterSnapshotFromClient(adminClient)
+          .then((snap) => {
+            cachedSnapshot = snap;
+            return snap;
+          })
+          .finally(() => {
+            if (inflightSnapshotPromise === promise) {
+              inflightSnapshotPromise = null;
+            }
+          });
+
+        inflightSnapshotPromise = promise;
+        return promise;
       }
 
-      const promise = loadErpMasterSnapshotFromClient(adminClient)
+      // Respaldo seguro en servidor cuando falta `SUPABASE_SERVICE_ROLE_KEY` en Render:
+      // ejecuta la consulta con el JWT verificado del usuario (`authenticated` bajo RLS)
+      // con caché estrictamente aislada por `userId` (jamás compartida entre usuarios).
+      const userToken = String(options.accessToken ?? '').trim();
+      const userClient = userToken
+        ? createUserScopedSupabaseClient(userToken, options.activeSucursalHeader)
+        : null;
+
+      if (!userClient) {
+        throw new ServerMasterDataError({
+          message:
+            'Falta configurar SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o llave pública + sesión autenticada) en el servidor.',
+          categoryCode: 'ENV_MISSING',
+          technicalCode: 'ENV_MISSING',
+          httpStatus: 503,
+          hint: 'Configura SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY y SUPABASE_SERVICE_ROLE_KEY en Render.',
+        });
+      }
+
+      const scopeKey = `${options.userId || 'auth-user'}::${options.activeSucursalHeader || 'ALL'}`;
+      if (!options.forceRefresh) {
+        const cachedUserSnap = userScopedSnapshotCache.get(scopeKey);
+        if (cachedUserSnap && now - cachedUserSnap.fetchedAtMs < cacheTtlMs) {
+          return cachedUserSnap;
+        }
+        const existingInflight = userScopedInflightMap.get(scopeKey);
+        if (existingInflight) {
+          return existingInflight;
+        }
+      }
+
+      serverLogger.warn('master_data_using_user_scoped_rls_fallback', {
+        reason: 'SUPABASE_SERVICE_ROLE_KEY ausente en runtime; consultando Data Maestra con JWT authenticated bajo RLS.',
+        userId: options.userId ?? null,
+      });
+
+      const userPromise = loadErpMasterSnapshotFromClient(userClient)
         .then((snap) => {
-          cachedSnapshot = snap;
+          if (userScopedSnapshotCache.size >= MAX_USER_SCOPED_CACHE_ENTRIES) {
+            userScopedSnapshotCache.clear();
+          }
+          userScopedSnapshotCache.set(scopeKey, snap);
           return snap;
         })
         .finally(() => {
-          if (inflightSnapshotPromise === promise) {
-            inflightSnapshotPromise = null;
+          if (userScopedInflightMap.get(scopeKey) === userPromise) {
+            userScopedInflightMap.delete(scopeKey);
           }
         });
 
-      inflightSnapshotPromise = promise;
-      return promise;
+      userScopedInflightMap.set(scopeKey, userPromise);
+      return userPromise;
     },
   };
 }
@@ -469,6 +719,16 @@ export function resolveAuthorizedSucursalScope(
 export function createMasterDataErpHandlers(
   gateway: MasterDataErpGateway = createDefaultMasterDataErpGateway()
 ) {
+  const buildLoadOpts = (
+    actor: AuthenticatedServerUser,
+    forceRefresh: boolean
+  ): MasterDataSnapshotLoadOptions => ({
+    forceRefresh,
+    accessToken: actor.accessToken,
+    activeSucursalHeader: actor.activeSucursalHeader ?? null,
+    userId: actor.id,
+  });
+
   return {
     async handleBootstrapMaestros(req: Request, res: Response): Promise<void> {
       const actor = req.authUser;
@@ -486,7 +746,7 @@ export function createMasterDataErpHandlers(
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivos = parseBoolParam(req.query.soloActivos, false);
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
         const regiones = snap.regiones ?? [];
         const productos = (snap.productos ?? []).filter((p) => !soloActivos || p.activo);
@@ -563,11 +823,13 @@ export function createMasterDataErpHandlers(
             vendedores,
           },
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo cargar el paquete consolidado de Data Maestra desde Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'bootstrap',
+          'No se pudo cargar el paquete consolidado de Data Maestra desde Supabase.'
+        );
       }
     },
 
@@ -581,7 +843,7 @@ export function createMasterDataErpHandlers(
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivas = parseBoolParam(req.query.soloActivas, false);
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const regiones = (snap.regiones ?? []).filter((r) => !soloActivas || r.activo);
 
         res.setHeader('Cache-Control', 'private, max-age=60');
@@ -590,11 +852,13 @@ export function createMasterDataErpHandlers(
           total: regiones.length,
           data: regiones,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo oficial de regiones en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'regiones',
+          'No se pudo consultar el catálogo oficial de regiones en Supabase.'
+        );
       }
     },
 
@@ -609,7 +873,7 @@ export function createMasterDataErpHandlers(
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivos = parseBoolParam(req.query.soloActivos, false);
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
         const filtered = (snap.productos ?? []).filter((p) => {
           if (soloActivos && !p.activo) return false;
@@ -631,11 +895,13 @@ export function createMasterDataErpHandlers(
           total: filtered.length,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo nacional de productos en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'productos',
+          'No se pudo consultar el catálogo nacional de productos en Supabase.'
+        );
       }
     },
 
@@ -656,7 +922,7 @@ export function createMasterDataErpHandlers(
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivos = parseBoolParam(req.query.soloActivos, false);
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
         const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
         const regionIdFilter =
@@ -680,11 +946,13 @@ export function createMasterDataErpHandlers(
           total: filtered.length,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo maestro de supervisores en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'supervisores',
+          'No se pudo consultar el catálogo maestro de supervisores en Supabase.'
+        );
       }
     },
 
@@ -707,7 +975,7 @@ export function createMasterDataErpHandlers(
         const categoriaRaw =
           typeof req.query.categoria === 'string' ? req.query.categoria.trim() : 'TODAS';
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
         const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
         const regionIdFilter =
@@ -741,11 +1009,13 @@ export function createMasterDataErpHandlers(
           total: filtered.length,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo maestro de promotoras en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'promotoras',
+          'No se pudo consultar el catálogo maestro de promotoras en Supabase.'
+        );
       }
     },
 
@@ -766,7 +1036,7 @@ export function createMasterDataErpHandlers(
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivos = parseBoolParam(req.query.soloActivos, true);
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
 
         const filtered = (snap.cadenas ?? []).filter((c) => {
@@ -787,11 +1057,13 @@ export function createMasterDataErpHandlers(
           total: filtered.length,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo de cadenas comerciales en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'cadenas',
+          'No se pudo consultar el catálogo de cadenas comerciales en Supabase.'
+        );
       }
     },
 
@@ -812,7 +1084,7 @@ export function createMasterDataErpHandlers(
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivos = parseBoolParam(req.query.soloActivos, true);
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
 
         const filtered = (snap.zonas ?? []).filter((z) => {
@@ -834,11 +1106,13 @@ export function createMasterDataErpHandlers(
           total: filtered.length,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo de zonas geográficas en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'zonas',
+          'No se pudo consultar el catálogo de zonas geográficas en Supabase.'
+        );
       }
     },
 
@@ -857,7 +1131,7 @@ export function createMasterDataErpHandlers(
 
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const explicitRegion = parseOptionalRegionParam(req.query.region);
 
         const filtered = filterNormalizedErpClientes(snap.clientes, {
@@ -889,11 +1163,13 @@ export function createMasterDataErpHandlers(
           resumenRegional: snap.resumenRegional ?? [],
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo maestro de clientes en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'clientes',
+          'No se pudo consultar el catálogo maestro de clientes en Supabase.'
+        );
       }
     },
 
@@ -912,7 +1188,7 @@ export function createMasterDataErpHandlers(
 
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const explicitRegion = parseOptionalRegionParam(req.query.region);
 
         const filtered = filterNormalizedErpVendedores(snap.vendedores, {
@@ -934,11 +1210,13 @@ export function createMasterDataErpHandlers(
           auditoria: snap.vendedoresAuditoria,
           data: filtered,
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el catálogo maestro de vendedores en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'vendedores',
+          'No se pudo consultar el catálogo maestro de vendedores en Supabase.'
+        );
       }
     },
 
@@ -957,7 +1235,7 @@ export function createMasterDataErpHandlers(
 
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
-        const snap = await gateway.loadSnapshot({ forceRefresh });
+        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
         const resumen = scope.sucursal
           ? snap.sedesResumen.filter((s) => s.sucursal === scope.sucursal)
           : snap.sedesResumen;
@@ -976,11 +1254,13 @@ export function createMasterDataErpHandlers(
           totalActivos: resumen.reduce((acc, s) => acc + s.activos, 0),
           totalClientes: resumen.reduce((acc, s) => acc + s.total, 0),
         });
-      } catch {
-        res.status(503).json({
-          error: 'No se pudo consultar el resumen de clientes por región en Supabase.',
-          code: 'MASTER_DATA_UPSTREAM_ERROR',
-        });
+      } catch (err) {
+        sendMasterDataErrorResponse(
+          res,
+          err,
+          'resumen',
+          'No se pudo consultar el resumen de clientes por región en Supabase.'
+        );
       }
     },
   };

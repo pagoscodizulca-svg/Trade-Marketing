@@ -33,10 +33,23 @@ import type {
 } from '../types/masterData';
 import {
   getActiveClientSucursalHeader,
-  getCachedAccessToken,
   getMasterDataSupabaseClient,
   registerSupabaseSessionResetCallback,
 } from './supabaseClient';
+import {
+  MASTER_SELECT_COLUMNS,
+  MasterDataDiagnosticError,
+  assertMasterDataEnvReady,
+  classifyMasterDataError,
+  clearMasterCatalogRuntimeCaches,
+  deduplicateMasterRequest,
+  executeWithSessionRefreshRetry,
+  loadSharedDirectErpDataset,
+  logStructuredMasterDataError,
+  type MasterCatalogEntity,
+  type MasterDataDiagnosticInfo,
+  type MasterDataErrorCode,
+} from './masterCatalogsService';
 import { isOperativeSucursal, normalizeSucursalCodigo } from './userManagementService';
 import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
 import {
@@ -60,17 +73,14 @@ import {
   normalizeErpClientesDataset,
   normalizeErpVendedoresDataset,
   normalizeErpZonasDataset,
-  type ErpCanalComercializacionRow,
-  type ErpClienteRow,
-  type ErpEstadoRow,
-  type ErpForecastExcludedVendedoresRow,
-  type ErpMunicipioRow,
-  type ErpRegionRow,
-  type ErpSucursalRow,
-  type ErpSupervisorRow,
-  type ErpTipificacionRow,
-  type ErpVendedorRow,
 } from '../utils/erpMasterAdapter';
+
+export {
+  MASTER_SELECT_COLUMNS,
+  MasterDataDiagnosticError,
+  classifyMasterDataError,
+  logStructuredMasterDataError,
+};
 
 export type {
   AllowedRegionCode,
@@ -87,7 +97,10 @@ export type {
   FiltrosConsultaVendedores,
   LoteSincronizacion,
   LRUCacheMetrics,
+  MasterCatalogEntity,
   MasterDataDatabase,
+  MasterDataDiagnosticInfo,
+  MasterDataErrorCode,
   RegionalActorProfile,
   RegionalClientSyncReport,
   RegionalClientSyncSummary,
@@ -1346,6 +1359,7 @@ export function clearMasterDataCaches(): void {
   cacheCadenas.clear();
   cacheZonas.clear();
   cacheRegionesOficiales.clear();
+  clearMasterCatalogRuntimeCaches();
 }
 
 registerSupabaseSessionResetCallback(clearMasterDataCaches);
@@ -1376,6 +1390,7 @@ export function invalidarCacheMaestros(regionScope?: string): void {
     cacheClientes.deleteWhere(matchesScope);
     cacheCadenas.deleteWhere(matchesScope);
     cacheZonas.deleteWhere(matchesScope);
+    clearMasterCatalogRuntimeCaches();
   }
   for (const listener of suscriptoresLocales) {
     try {
@@ -1598,55 +1613,10 @@ function isMissingRelationPostgrestError(
   );
 }
 
-async function resolveBearerTokenForMasterApi(
-  client: SupabaseClient<MasterDataDatabase>
-): Promise<string> {
-  const cached = getCachedAccessToken();
-  if (cached && cached.length >= 20) return cached;
-  try {
-    const { data } = await client.auth.getSession();
-    return data?.session?.access_token?.trim() || '';
-  } catch {
-    return '';
-  }
-}
-
-async function fetchErpTablePagesDirect<T>(
-  client: SupabaseClient<MasterDataDatabase>,
-  tableName:
-    | 'Regiones'
-    | 'Sucursales'
-    | 'Estados'
-    | 'Municipios'
-    | 'Supervisores'
-    | 'Tipificacion_Clientes'
-    | 'Canal_Comercializacion'
-    | 'Forecast_Vendedores_Excluidos'
-    | 'Vendedores'
-    | 'Clientes',
-  selectExpr: string,
-  optional = false
-): Promise<T[]> {
-  const rows: T[] = [];
-  for (let from = 0; ; from += POSTGREST_READ_PAGE_SIZE) {
-    const { data, error } = await client
-      .from(tableName)
-      .select(selectExpr)
-      .range(from, from + POSTGREST_READ_PAGE_SIZE - 1);
-
-    if (error) {
-      if (optional) return [];
-      throw new Error(`Error consultando tabla ERP "${tableName}": ${error.message}`);
-    }
-
-    const page = Array.isArray(data) ? (data as unknown as T[]) : [];
-    rows.push(...page);
-    if (page.length < POSTGREST_READ_PAGE_SIZE) {
-      break;
-    }
-  }
-  return rows;
-}
+type BackendMasterApiResult<T> =
+  | { status: 'ok'; data: T[] }
+  | { status: 'fallback_direct'; reason?: MasterDataDiagnosticInfo }
+  | { status: 'skipped' };
 
 async function fetchMasterEntityFromBackendApi<T>(
   endpoint:
@@ -1654,55 +1624,160 @@ async function fetchMasterEntityFromBackendApi<T>(
     | '/api/maestros/clientes'
     | '/api/maestros/cadenas'
     | '/api/maestros/zonas',
+  entity: MasterCatalogEntity,
   params: URLSearchParams,
   client: SupabaseClient<MasterDataDatabase>,
   effectiveSucursal: SucursalMaestro | null
-): Promise<T[] | null> {
+): Promise<BackendMasterApiResult<T>> {
   if (typeof fetch !== 'function' || typeof window === 'undefined') {
-    return null;
+    return { status: 'skipped' };
   }
 
-  const token = await resolveBearerTokenForMasterApi(client);
-  if (!token) return null;
-
-  const queryStr = params.toString();
-  const url = `${endpoint}${queryStr ? `?${queryStr}` : ''}`;
-
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(effectiveSucursal ? { 'x-sucursal-activa': effectiveSucursal } : {}),
-    },
-  });
-
-  if (res.status === 404) {
-    return null;
-  }
-  if (!res.ok) {
-    let serverMsg = '';
-    try {
-      const errJson = (await res.json()) as { error?: string };
-      serverMsg = errJson?.error ? String(errJson.error) : '';
-    } catch {
-      // Cuerpo no JSON
+  return executeWithSessionRefreshRetry(client, entity, async (token) => {
+    if (!token) {
+      throw new MasterDataDiagnosticError({
+        categoryCode: 'AUTH_REQUIRED',
+        technicalCode: 'AUTH_REQUIRED',
+        status: 401,
+        entity,
+        table: endpoint,
+        safeMessage:
+          'Tu sesión no está activa o expiró. Inicia sesión para consultar los catálogos maestros.',
+        technicalMessage: 'Bearer token ausente al consultar endpoint BFF de maestros.',
+        hint: 'Se bloqueó la consulta sin sesión para impedir tráfico anon.',
+      });
     }
-    throw new Error(
-      serverMsg || `Error HTTP ${res.status} consultando ${endpoint} en el servidor.`
-    );
-  }
-  const payload = (await res.json()) as { data?: unknown };
-  if (!Array.isArray(payload?.data)) {
-    throw new Error(`Formato de respuesta inesperado desde ${endpoint}.`);
-  }
-  return payload.data as T[];
+
+    const queryStr = params.toString();
+    const url = `${endpoint}${queryStr ? `?${queryStr}` : ''}`;
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(effectiveSucursal ? { 'x-sucursal-activa': effectiveSucursal } : {}),
+        },
+      });
+    } catch (networkErr) {
+      const reason = classifyMasterDataError(networkErr, { entity, table: endpoint });
+      console.warn(
+        '[MasterData] Error de red consultando BFF; intentando lectura autenticada directa en Supabase.',
+        { endpoint, entity, categoryCode: reason.categoryCode }
+      );
+      return { status: 'fallback_direct', reason };
+    }
+
+    if (res.status === 401) {
+      let bodyCode = 'AUTH_SESSION_EXPIRED';
+      let bodyMsg = 'Sesión inválida o expirada.';
+      try {
+        const errJson = (await res.json()) as { error?: string; code?: string };
+        if (errJson?.code) bodyCode = String(errJson.code);
+        if (errJson?.error) bodyMsg = String(errJson.error);
+      } catch {
+        // Sin cuerpo JSON
+      }
+      throw new MasterDataDiagnosticError({
+        categoryCode: 'AUTH_REQUIRED',
+        technicalCode: bodyCode,
+        status: 401,
+        entity,
+        table: endpoint,
+        safeMessage: bodyMsg,
+        technicalMessage: bodyMsg,
+        hint: 'Se intentará renovar la sesión mediante refreshSession().',
+      });
+    }
+
+    if (res.status === 403) {
+      let bodyCode = '42501';
+      let bodyMsg = 'Acceso denegado para consultar este catálogo maestro.';
+      try {
+        const errJson = (await res.json()) as { error?: string; code?: string };
+        if (errJson?.code) bodyCode = String(errJson.code);
+        if (errJson?.error) bodyMsg = String(errJson.error);
+      } catch {
+        // Sin cuerpo JSON
+      }
+      const info = classifyMasterDataError(
+        { status: 403, code: bodyCode, message: bodyMsg },
+        { entity, table: endpoint }
+      );
+      logStructuredMasterDataError(info);
+      throw new MasterDataDiagnosticError(info);
+    }
+
+    if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+      let bodyCode = `HTTP_${res.status}`;
+      let bodyMsg = `El servidor BFF respondió HTTP ${res.status} en ${endpoint}.`;
+      try {
+        const errJson = (await res.json()) as {
+          error?: string;
+          code?: string;
+          technicalCode?: string;
+        };
+        if (errJson?.technicalCode || errJson?.code) {
+          bodyCode = String(errJson.technicalCode || errJson.code);
+        }
+        if (errJson?.error) bodyMsg = String(errJson.error);
+      } catch {
+        // Cuerpo no JSON
+      }
+      const reason = classifyMasterDataError(
+        { status: res.status, code: bodyCode, message: bodyMsg },
+        { entity, table: endpoint }
+      );
+      console.warn(
+        '[MasterData] BFF no disponible o degradado; intentando lectura autenticada directa en Supabase.',
+        {
+          endpoint,
+          entity,
+          status: res.status,
+          categoryCode: reason.categoryCode,
+          technicalCode: reason.technicalCode,
+        }
+      );
+      return { status: 'fallback_direct', reason };
+    }
+
+    if (!res.ok) {
+      let bodyCode = `HTTP_${res.status}`;
+      let bodyMsg = `Error HTTP ${res.status} consultando ${endpoint} en el servidor.`;
+      try {
+        const errJson = (await res.json()) as { error?: string; code?: string };
+        if (errJson?.code) bodyCode = String(errJson.code);
+        if (errJson?.error) bodyMsg = String(errJson.error);
+      } catch {
+        // Cuerpo no JSON
+      }
+      const info = classifyMasterDataError(
+        { status: res.status, code: bodyCode, message: bodyMsg },
+        { entity, table: endpoint }
+      );
+      logStructuredMasterDataError(info);
+      throw new MasterDataDiagnosticError(info);
+    }
+
+    const payload = (await res.json()) as { data?: unknown };
+    if (!Array.isArray(payload?.data)) {
+      const info = classifyMasterDataError(
+        { status: res.status, code: 'INVALID_PAYLOAD', message: `Formato de respuesta inesperado desde ${endpoint}.` },
+        { entity, table: endpoint }
+      );
+      logStructuredMasterDataError(info);
+      throw new MasterDataDiagnosticError(info);
+    }
+    return { status: 'ok', data: payload.data as T[] };
+  });
 }
 
 async function fetchVendedoresFromBackendApi(
   filtros: FiltrosConsultaVendedores,
   client: SupabaseClient<MasterDataDatabase>,
   effectiveSucursal: SucursalMaestro | null
-): Promise<Vendedor[] | null> {
+): Promise<BackendMasterApiResult<Vendedor>> {
   const params = new URLSearchParams();
   if (filtros.soloActivos === false) params.set('soloActivos', 'false');
   if (filtros.region) {
@@ -1717,6 +1792,7 @@ async function fetchVendedoresFromBackendApi(
   if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
   return fetchMasterEntityFromBackendApi<Vendedor>(
     '/api/maestros/vendedores',
+    'vendedores',
     params,
     client,
     filtros.region ? null : effectiveSucursal
@@ -1727,7 +1803,7 @@ async function fetchClientesFromBackendApi(
   filtros: FiltrosConsultaClientes,
   client: SupabaseClient<MasterDataDatabase>,
   effectiveSucursal: SucursalMaestro | null
-): Promise<ClienteConVendedor[] | null> {
+): Promise<BackendMasterApiResult<ClienteConVendedor>> {
   const params = new URLSearchParams();
   if (filtros.soloActivos === false) params.set('soloActivos', 'false');
   if (filtros.region) {
@@ -1745,6 +1821,7 @@ async function fetchClientesFromBackendApi(
   if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
   return fetchMasterEntityFromBackendApi<ClienteConVendedor>(
     '/api/maestros/clientes',
+    'clientes',
     params,
     client,
     filtros.region ? null : effectiveSucursal
@@ -1754,82 +1831,58 @@ async function fetchClientesFromBackendApi(
 async function fetchVendedoresFromSupabaseErpTables(
   client: SupabaseClient<MasterDataDatabase>,
   filtros: FiltrosConsultaVendedores,
-  effectiveSucursal: SucursalMaestro | null
+  effectiveSucursal: SucursalMaestro | null,
+  useSingletonCache: boolean
 ): Promise<Vendedor[]> {
-  const [regiones, sucursales, supervisores, vendedoresRaw, vendedoresExcluidos, clientesMin] =
-    await Promise.all([
-      fetchErpTablePagesDirect<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', false),
-      fetchErpTablePagesDirect<ErpSucursalRow>(client, 'Sucursales', 'id_sucu,created_at,sucu_desc,id_regi', true),
-      fetchErpTablePagesDirect<ErpSupervisorRow>(client, 'Supervisores', 'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont', true),
-      fetchErpTablePagesDirect<ErpVendedorRow>(client, 'Vendedores', 'id_vend,created_at,vend_codi,vend_nomb,vend_acti,id_sucu,id_supe,vend_cont', false),
-      fetchErpTablePagesDirect<ErpForecastExcludedVendedoresRow>(
-        client,
-        'Forecast_Vendedores_Excluidos',
-        'id_fove,id_regi,fove_vend,updated_at',
-        true
-      ),
-      fetchErpTablePagesDirect<ErpClienteRow>(client, 'Clientes', 'id_clie,id_vend,clie_acti', true),
-    ]);
+  const dataset = await loadSharedDirectErpDataset(client, {
+    forceRefresh: Boolean(filtros.forzarRefresco),
+    useSingletonCache,
+    ttlMs: resolveMasterDataCacheTtlMs(),
+    entity: 'vendedores',
+  });
 
   const normalized = normalizeErpVendedoresDataset({
-    regiones,
-    sucursales,
-    supervisores,
-    vendedores: vendedoresRaw,
-    vendedoresExcluidos,
-    clientes: clientesMin,
+    regiones: dataset.regiones,
+    sucursales: dataset.sucursales,
+    supervisores: dataset.supervisores,
+    vendedores: dataset.vendedores,
+    vendedoresExcluidos: dataset.vendedoresExcluidos,
+    clientes: dataset.clientes,
   });
 
   return filterNormalizedErpVendedores(normalized, {
     ...filtros,
-    sucursal: effectiveSucursal ?? undefined,
+    sucursal: filtros.region ? undefined : (effectiveSucursal ?? undefined),
   });
 }
 
 async function fetchClientesFromSupabaseErpTables(
   client: SupabaseClient<MasterDataDatabase>,
   filtros: FiltrosConsultaClientes,
-  effectiveSucursal: SucursalMaestro | null
+  effectiveSucursal: SucursalMaestro | null,
+  useSingletonCache: boolean
 ): Promise<ClienteConVendedor[]> {
-  const [
-    regiones,
-    sucursales,
-    estados,
-    municipios,
-    supervisores,
-    vendedoresRaw,
-    tipificaciones,
-    clientesRaw,
-  ] = await Promise.all([
-    fetchErpTablePagesDirect<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', true),
-    fetchErpTablePagesDirect<ErpSucursalRow>(client, 'Sucursales', 'id_sucu,created_at,sucu_desc,id_regi', true),
-    fetchErpTablePagesDirect<ErpEstadoRow>(client, 'Estados', 'id_esta,created_at,esta_desc,id_regi', true),
-    fetchErpTablePagesDirect<ErpMunicipioRow>(client, 'Municipios', 'id_muni,created_at,muni_desc,id_esta,id_regi', true),
-    fetchErpTablePagesDirect<ErpSupervisorRow>(client, 'Supervisores', 'id_supe,created_at,supe_nomb,supe_acti,id_regi,supe_cont', true),
-    fetchErpTablePagesDirect<ErpVendedorRow>(client, 'Vendedores', 'id_vend,created_at,vend_codi,vend_nomb,vend_acti,id_sucu,id_supe,vend_cont', true),
-    fetchErpTablePagesDirect<ErpTipificacionRow>(client, 'Tipificacion_Clientes', 'id_tipi,created_at,tipi_desc,id_cave', true),
-    fetchErpTablePagesDirect<ErpClienteRow>(
-      client,
-      'Clientes',
-      'id_clie,created_at,clie_rif,clie_nomb,id_esta,id_vend,id_muni,clie_regi,clie_acti,clie_lati,clie_long,id_tipi',
-      false
-    ),
-  ]);
+  const dataset = await loadSharedDirectErpDataset(client, {
+    forceRefresh: Boolean(filtros.forzarRefresco),
+    useSingletonCache,
+    ttlMs: resolveMasterDataCacheTtlMs(),
+    entity: 'clientes',
+  });
 
   const normalized = normalizeErpClientesDataset({
-    regiones,
-    sucursales,
-    estados,
-    municipios,
-    supervisores,
-    vendedores: vendedoresRaw,
-    tipificaciones,
-    clientes: clientesRaw,
+    regiones: dataset.regiones,
+    sucursales: dataset.sucursales,
+    estados: dataset.estados,
+    municipios: dataset.municipios,
+    supervisores: dataset.supervisores,
+    vendedores: dataset.vendedores,
+    tipificaciones: dataset.tipificaciones,
+    clientes: dataset.clientes,
   });
 
   return filterNormalizedErpClientes(normalized, {
     ...filtros,
-    sucursal: effectiveSucursal ?? undefined,
+    sucursal: filtros.region ? undefined : (effectiveSucursal ?? undefined),
   });
 }
 
@@ -1844,13 +1897,18 @@ export async function obtenerVendedoresMaestros(
 ): Promise<Vendedor[]> {
   const soloActivos = filtros.soloActivos !== false;
   const effectiveSucursal = filtros.sucursal ?? getActiveClientSucursalHeader() ?? null;
-  const claveCache = buildScopedMasterCacheKey({
-    soloActivos,
-    sucursal: effectiveSucursal || '',
-    zona: filtros.zona?.trim().toUpperCase() || '',
-    supervisor: filtros.supervisor?.trim().toUpperCase() || '',
-    busqueda: filtros.busqueda?.trim().toUpperCase() || '',
-  });
+  const claveCache = buildScopedMasterCacheKey(
+    {
+      soloActivos,
+      sucursal: effectiveSucursal || '',
+      region: filtros.region || '',
+      regionId: filtros.regionId?.trim() || '',
+      zona: filtros.zona?.trim().toUpperCase() || '',
+      supervisor: filtros.supervisor?.trim().toUpperCase() || '',
+      busqueda: filtros.busqueda?.trim().toUpperCase() || '',
+    },
+    filtros.region ?? null
+  );
 
   if (!filtros.forzarRefresco) {
     const enCache = cacheVendedores.get(claveCache);
@@ -1859,91 +1917,138 @@ export async function obtenerVendedoresMaestros(
     }
   }
 
+  if (!supabaseClient) {
+    assertMasterDataEnvReady('vendedores');
+  }
   const client = supabaseClient ?? getMasterDataSupabaseClient();
 
-  if (!supabaseClient) {
-    const fromApi = await fetchVendedoresFromBackendApi(filtros, client, effectiveSucursal);
-    if (fromApi !== null) {
-      cacheVendedores.set(claveCache, fromApi);
-      return fromApi;
-    }
-  }
+  const runLoad = async (): Promise<Vendedor[]> => {
+    let bffFallbackReason: MasterDataDiagnosticInfo | undefined;
 
-  const acumulado: Vendedor[] = [];
-  let desde = 0;
-  let missingLowercaseTable = false;
-
-  while (true) {
-    let query = client
-      .from('vendedores')
-      .select('*')
-      .order('nombre_completo', { ascending: true })
-      .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
-
-    if (soloActivos) {
-      query = query.eq('activo', true);
-    }
-    if (filtros.zona?.trim()) {
-      query = query.ilike('zona', filtros.zona.trim());
-    }
-    if (filtros.supervisor?.trim()) {
-      query = query.ilike('supervisor', filtros.supervisor.trim());
-    }
-    if (filtros.busqueda?.trim()) {
-      const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
-        'codigo_vendedor',
-        'nombre_completo',
-      ]);
-      if (orFilter) {
-        query = query.or(orFilter);
+    if (!supabaseClient) {
+      const apiRes = await fetchVendedoresFromBackendApi(filtros, client, effectiveSucursal);
+      if (apiRes.status === 'ok') {
+        cacheVendedores.set(claveCache, apiRes.data);
+        return apiRes.data;
+      }
+      if (apiRes.status === 'fallback_direct') {
+        bffFallbackReason = apiRes.reason;
       }
     }
 
-    const { data, error } = await query;
-    if (error) {
-      if (desde === 0 && isMissingRelationPostgrestError(error)) {
-        missingLowercaseTable = true;
-        break;
+    try {
+      return await executeWithSessionRefreshRetry(client, 'vendedores', async () => {
+        const acumulado: Vendedor[] = [];
+        let desde = 0;
+        let missingLowercaseTable = false;
+        let selectCols: string = MASTER_SELECT_COLUMNS.vendedores;
+
+        while (true) {
+          const buildQuery = (cols: string) => {
+            let query = client
+              .from('vendedores')
+              .select(cols)
+              .order('nombre_completo', { ascending: true })
+              .order('id', { ascending: true })
+              .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
+
+            if (soloActivos) {
+              query = query.eq('activo', true);
+            }
+            if (filtros.zona?.trim()) {
+              query = query.ilike('zona', filtros.zona.trim());
+            }
+            if (filtros.supervisor?.trim()) {
+              query = query.ilike('supervisor', filtros.supervisor.trim());
+            }
+            if (filtros.busqueda?.trim()) {
+              const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
+                'codigo_vendedor',
+                'nombre_completo',
+              ]);
+              if (orFilter) {
+                query = query.or(orFilter);
+              }
+            }
+            return query;
+          };
+
+          let { data, error } = await buildQuery(selectCols);
+          if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+            missingLowercaseTable = true;
+            break;
+          }
+          if (
+            error &&
+            selectCols !== MASTER_SELECT_COLUMNS.vendedoresMinimal &&
+            isPostgrestSchemaMismatchError(error)
+          ) {
+            selectCols = MASTER_SELECT_COLUMNS.vendedoresMinimal;
+            ({ data, error } = await buildQuery(selectCols));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error) {
+            const info = classifyMasterDataError(error, {
+              entity: 'vendedores',
+              table: 'vendedores',
+            });
+            logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+            throw new MasterDataDiagnosticError(info);
+          }
+
+          const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
+            normalizeReturnedVendedorRow
+          );
+          acumulado.push(...pagina);
+          if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
+            break;
+          }
+          desde += POSTGREST_READ_PAGE_SIZE;
+        }
+
+        if (missingLowercaseTable) {
+          const fromErp = await fetchVendedoresFromSupabaseErpTables(
+            client,
+            filtros,
+            effectiveSucursal,
+            !supabaseClient
+          );
+          cacheVendedores.set(claveCache, fromErp);
+          return fromErp;
+        }
+
+        const resultado = effectiveSucursal
+          ? acumulado.filter((v) => !v.sucursal || v.sucursal === effectiveSucursal)
+          : acumulado;
+
+        cacheVendedores.set(claveCache, resultado);
+        return resultado;
+      });
+    } catch (directErr) {
+      if (directErr instanceof MasterDataDiagnosticError) {
+        throw directErr;
       }
-      throw new Error(`Error consultando vendedores maestros: ${error.message}`);
+      const info = classifyMasterDataError(directErr, {
+        entity: 'vendedores',
+        table: 'Vendedores',
+      });
+      logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+      throw new MasterDataDiagnosticError(info);
     }
+  };
 
-    const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
-      normalizeReturnedVendedorRow
-    );
-    acumulado.push(...pagina);
-    if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
-      break;
-    }
-    desde += POSTGREST_READ_PAGE_SIZE;
+  if (supabaseClient) {
+    return runLoad();
   }
-
-  if (missingLowercaseTable || (acumulado.length === 0 && !supabaseClient)) {
-    const fromApi = !supabaseClient
-      ? await fetchVendedoresFromBackendApi(filtros, client, effectiveSucursal)
-      : null;
-    if (fromApi !== null) {
-      cacheVendedores.set(claveCache, fromApi);
-      return fromApi;
-    }
-    if (missingLowercaseTable) {
-      const fromErp = await fetchVendedoresFromSupabaseErpTables(client, filtros, effectiveSucursal);
-      cacheVendedores.set(claveCache, fromErp);
-      return fromErp;
-    }
-  }
-
-  const resultado = effectiveSucursal
-    ? acumulado.filter((v) => !v.sucursal || v.sucursal === effectiveSucursal)
-    : acumulado;
-
-  cacheVendedores.set(claveCache, resultado);
-  return resultado;
+  return deduplicateMasterRequest(`vendedores::${claveCache}`, runLoad, Boolean(filtros.forzarRefresco));
 }
 
 /**
  * Consulta la Fuente Única de Verdad de Clientes en Supabase paginando bloques de 1,000
- * registros automáticamente para soportar carteras > 2,700 clientes sin truncamiento.
+ * registros automáticamente con orden determinístico para soportar carteras > 4,000 clientes sin truncamiento.
  * Soporta tanto `public.clientes` como las tablas ERP de Codizulca (`public."Clientes"` +
  * `"Vendedores"` + `"Sucursales"` + `"Estados"` + `"Regiones"`), aislando estrictamente por sede.
  */
@@ -1978,124 +2083,167 @@ export async function obtenerClientesMaestros(
     }
   }
 
+  if (!supabaseClient) {
+    assertMasterDataEnvReady('clientes');
+  }
   const client = supabaseClient ?? getMasterDataSupabaseClient();
 
-  if (!supabaseClient) {
-    const fromApi = await fetchClientesFromBackendApi(filtros, client, effectiveSucursal);
-    if (fromApi !== null) {
-      cacheClientes.set(claveCache, fromApi);
-      return fromApi;
+  const runLoad = async (): Promise<ClienteConVendedor[]> => {
+    let bffFallbackReason: MasterDataDiagnosticInfo | undefined;
+
+    if (!supabaseClient) {
+      const apiRes = await fetchClientesFromBackendApi(filtros, client, effectiveSucursal);
+      if (apiRes.status === 'ok') {
+        cacheClientes.set(claveCache, apiRes.data);
+        return apiRes.data;
+      }
+      if (apiRes.status === 'fallback_direct') {
+        bffFallbackReason = apiRes.reason;
+      }
     }
-  }
 
-  let useJoinVendedor = incluirVendedor;
-  let useOrderByRazon = true;
-  let missingLowercaseTable = false;
+    try {
+      return await executeWithSessionRefreshRetry(client, 'clientes', async () => {
+        let useJoinVendedor = incluirVendedor;
+        let useOrderByRazon = true;
+        let useMinimalCols = false;
+        let missingLowercaseTable = false;
 
-  const acumulado: ClienteConVendedor[] = [];
-  let desde = 0;
+        const acumulado: ClienteConVendedor[] = [];
+        let desde = 0;
 
-  while (true) {
-    const runPage = async (withJoin: boolean, withOrder: boolean) => {
-      const selectExpr = withJoin
-        ? '*, vendedor:vendedores(id, codigo_vendedor, nombre_completo, zona, supervisor, activo)'
-        : '*';
-      let query = client.from('clientes').select(selectExpr);
-      if (withOrder) {
-        query = query.order('razon_social', { ascending: true });
-      }
-      query = query.range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
+        while (true) {
+          const runPage = async (withJoin: boolean, withOrder: boolean, minimal: boolean) => {
+            const selectExpr: string = minimal
+              ? MASTER_SELECT_COLUMNS.clientesMinimal
+              : withJoin
+                ? MASTER_SELECT_COLUMNS.clientesWithVendedor
+                : MASTER_SELECT_COLUMNS.clientes;
+            let query = client.from('clientes').select(selectExpr);
+            if (withOrder) {
+              query = query.order('razon_social', { ascending: true }).order('id', { ascending: true });
+            } else if (typeof query.order === 'function') {
+              query = query.order('id', { ascending: true });
+            }
+            query = query.range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
 
-      if (soloActivos) {
-        query = query.eq('activo', true);
-      }
-      if (filtros.regionId?.trim()) {
-        query = query.eq('region_id', filtros.regionId.trim());
-      }
-      if (filtros.zona?.trim()) {
-        query = query.ilike('zona', filtros.zona.trim());
-      }
-      if (filtros.ruta?.trim()) {
-        query = query.ilike('ruta', filtros.ruta.trim());
-      }
-      if (filtros.vendedorId?.trim()) {
-        query = query.eq('vendedor_id', filtros.vendedorId.trim());
-      }
-      if (filtros.codigoVendedor?.trim()) {
-        query = query.eq('codigo_vendedor', normalizarCodigoMaestro(filtros.codigoVendedor));
-      }
-      if (filtros.canal?.trim()) {
-        query = query.ilike('canal', filtros.canal.trim());
-      }
-      if (filtros.busqueda?.trim()) {
-        const orFilter = construirFiltroOrBusquedaClientes(filtros.busqueda);
-        if (orFilter) {
-          query = query.or(orFilter);
+            if (soloActivos) {
+              query = query.eq('activo', true);
+            }
+            if (filtros.regionId?.trim()) {
+              query = query.eq('region_id', filtros.regionId.trim());
+            }
+            if (filtros.zona?.trim()) {
+              query = query.ilike('zona', filtros.zona.trim());
+            }
+            if (filtros.ruta?.trim()) {
+              query = query.ilike('ruta', filtros.ruta.trim());
+            }
+            if (filtros.vendedorId?.trim()) {
+              query = query.eq('vendedor_id', filtros.vendedorId.trim());
+            }
+            if (filtros.codigoVendedor?.trim()) {
+              query = query.eq('codigo_vendedor', normalizarCodigoMaestro(filtros.codigoVendedor));
+            }
+            if (filtros.canal?.trim()) {
+              query = query.ilike('canal', filtros.canal.trim());
+            }
+            if (filtros.busqueda?.trim()) {
+              const orFilter = construirFiltroOrBusquedaClientes(filtros.busqueda);
+              if (orFilter) {
+                query = query.or(orFilter);
+              }
+            }
+
+            return query;
+          };
+
+          let { data, error } = await runPage(useJoinVendedor, useOrderByRazon, useMinimalCols);
+          if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+            missingLowercaseTable = true;
+            break;
+          }
+          if (error && useJoinVendedor && isPostgrestSchemaMismatchError(error)) {
+            useJoinVendedor = false;
+            ({ data, error } = await runPage(false, useOrderByRazon, useMinimalCols));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error && !useMinimalCols && isPostgrestSchemaMismatchError(error)) {
+            useMinimalCols = true;
+            ({ data, error } = await runPage(false, useOrderByRazon, true));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error && useOrderByRazon && isPostgrestSchemaMismatchError(error)) {
+            useOrderByRazon = false;
+            ({ data, error } = await runPage(useJoinVendedor, false, useMinimalCols));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error) {
+            const info = classifyMasterDataError(error, {
+              entity: 'clientes',
+              table: 'clientes',
+            });
+            logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+            throw new MasterDataDiagnosticError(info);
+          }
+
+          const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
+            normalizeReturnedClienteRow
+          );
+          acumulado.push(...pagina);
+          if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
+            break;
+          }
+          desde += POSTGREST_READ_PAGE_SIZE;
         }
-      }
 
-      return query;
-    };
+        if (missingLowercaseTable) {
+          const fromErp = await fetchClientesFromSupabaseErpTables(
+            client,
+            filtros,
+            effectiveSucursal,
+            !supabaseClient
+          );
+          cacheClientes.set(claveCache, fromErp);
+          return fromErp;
+        }
 
-    let { data, error } = await runPage(useJoinVendedor, useOrderByRazon);
-    if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
-      missingLowercaseTable = true;
-      break;
-    }
-    if (error && useJoinVendedor && isPostgrestSchemaMismatchError(error)) {
-      useJoinVendedor = false;
-      ({ data, error } = await runPage(false, useOrderByRazon));
-      if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
-        missingLowercaseTable = true;
-        break;
-      }
-    }
-    if (error && useOrderByRazon && isPostgrestSchemaMismatchError(error)) {
-      useOrderByRazon = false;
-      ({ data, error } = await runPage(useJoinVendedor, false));
-      if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
-        missingLowercaseTable = true;
-        break;
-      }
-    }
-    if (error) {
-      throw new Error(`Error consultando clientes maestros: ${error.message}`);
-    }
+        const resultado = effectiveSucursal
+          ? acumulado.filter((c) => {
+              const sucu = c.sucursal ?? inferirSucursalDesdeTerritorio(c);
+              return !sucu || sucu === effectiveSucursal;
+            })
+          : acumulado;
 
-    const pagina = ((data ?? []) as unknown as Record<string, unknown>[]).map(
-      normalizeReturnedClienteRow
-    );
-    acumulado.push(...pagina);
-    if (pagina.length < POSTGREST_READ_PAGE_SIZE) {
-      break;
+        cacheClientes.set(claveCache, resultado);
+        return resultado;
+      });
+    } catch (directErr) {
+      if (directErr instanceof MasterDataDiagnosticError) {
+        throw directErr;
+      }
+      const info = classifyMasterDataError(directErr, {
+        entity: 'clientes',
+        table: 'Clientes',
+      });
+      logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+      throw new MasterDataDiagnosticError(info);
     }
-    desde += POSTGREST_READ_PAGE_SIZE;
+  };
+
+  if (supabaseClient) {
+    return runLoad();
   }
-
-  if (missingLowercaseTable || (acumulado.length === 0 && !supabaseClient)) {
-    const fromApi = !supabaseClient
-      ? await fetchClientesFromBackendApi(filtros, client, effectiveSucursal)
-      : null;
-    if (fromApi !== null) {
-      cacheClientes.set(claveCache, fromApi);
-      return fromApi;
-    }
-    if (missingLowercaseTable) {
-      const fromErp = await fetchClientesFromSupabaseErpTables(client, filtros, effectiveSucursal);
-      cacheClientes.set(claveCache, fromErp);
-      return fromErp;
-    }
-  }
-
-  const resultado = effectiveSucursal
-    ? acumulado.filter((c) => {
-        const sucu = c.sucursal ?? inferirSucursalDesdeTerritorio(c);
-        return !sucu || sucu === effectiveSucursal;
-      })
-    : acumulado;
-
-  cacheClientes.set(claveCache, resultado);
-  return resultado;
+  return deduplicateMasterRequest(`clientes::${claveCache}`, runLoad, Boolean(filtros.forzarRefresco));
 }
 
 /**
@@ -2243,74 +2391,139 @@ export async function obtenerCadenasComerciales(
     if (cached !== undefined) return cached;
   }
 
+  if (!supabaseClient) {
+    assertMasterDataEnvReady('cadenas');
+  }
   const client = supabaseClient ?? getMasterDataSupabaseClient();
 
-  if (!supabaseClient) {
-    const params = new URLSearchParams();
-    if (!soloActivos) params.set('soloActivos', 'false');
-    if (filtros.region) params.set('region', filtros.region);
-    if (filtros.busqueda?.trim()) params.set('busqueda', filtros.busqueda.trim());
-    if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
-    const fromApi = await fetchMasterEntityFromBackendApi<CadenaComercial>(
-      '/api/maestros/cadenas',
-      params,
-      client,
-      filtros.region ? null : effectiveSucursal
-    );
-    if (fromApi !== null) {
-      cacheCadenas.set(claveCache, fromApi);
-      return fromApi;
-    }
-  }
+  const runLoad = async (): Promise<CadenaComercial[]> => {
+    let bffFallbackReason: MasterDataDiagnosticInfo | undefined;
 
-  const acumulado: CadenaComercial[] = [];
-  let missingLowercaseTable = false;
-  for (let desde = 0; ; desde += POSTGREST_READ_PAGE_SIZE) {
-    let query = client
-      .from('cadenas_comerciales')
-      .select('*')
-      .order('nombre', { ascending: true })
-      .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
-
-    if (soloActivos) query = query.eq('activo', true);
-    if (filtros.busqueda?.trim()) {
-      const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, ['codigo', 'nombre']);
-      if (orFilter) query = query.or(orFilter);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      if (desde === 0 && isMissingRelationPostgrestError(error)) {
-        missingLowercaseTable = true;
-        break;
+    if (!supabaseClient) {
+      const params = new URLSearchParams();
+      if (!soloActivos) params.set('soloActivos', 'false');
+      if (filtros.region) params.set('region', filtros.region);
+      if (filtros.busqueda?.trim()) params.set('busqueda', filtros.busqueda.trim());
+      if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
+      const apiRes = await fetchMasterEntityFromBackendApi<CadenaComercial>(
+        '/api/maestros/cadenas',
+        'cadenas',
+        params,
+        client,
+        filtros.region ? null : effectiveSucursal
+      );
+      if (apiRes.status === 'ok') {
+        cacheCadenas.set(claveCache, apiRes.data);
+        return apiRes.data;
       }
-      throw new Error(`Error consultando cadenas comerciales: ${error.message}`);
+      if (apiRes.status === 'fallback_direct') {
+        bffFallbackReason = apiRes.reason;
+      }
     }
-    const page = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedCadenaRow);
-    acumulado.push(...page);
-    if (page.length < POSTGREST_READ_PAGE_SIZE) break;
-  }
 
-  if (missingLowercaseTable) {
-    const [regiones, tipificaciones, canales, clientes] = await Promise.all([
-      fetchErpTablePagesDirect<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', false),
-      fetchErpTablePagesDirect<ErpTipificacionRow>(client, 'Tipificacion_Clientes', 'id_tipi,created_at,tipi_desc,id_cave', true),
-      fetchErpTablePagesDirect<ErpCanalComercializacionRow>(client, 'Canal_Comercializacion', 'id_cana,created_at,cana_desc', true),
-      fetchErpTablePagesDirect<ErpClienteRow>(client, 'Clientes', 'id_clie,clie_nomb,id_clie_prin,id_tipi,clie_regi,clie_acti', false),
-    ]);
-    let rows = normalizeErpCadenasDataset({
-      regiones,
-      tipificaciones,
-      canalesComercializacion: canales,
-      clientes,
-    });
-    if (soloActivos) rows = rows.filter((c) => c.activo);
-    cacheCadenas.set(claveCache, rows);
-    return rows;
-  }
+    try {
+      return await executeWithSessionRefreshRetry(client, 'cadenas', async () => {
+        const acumulado: CadenaComercial[] = [];
+        let missingLowercaseTable = false;
+        let selectCols: string = MASTER_SELECT_COLUMNS.cadenas;
 
-  cacheCadenas.set(claveCache, acumulado);
-  return acumulado;
+        for (let desde = 0; ; desde += POSTGREST_READ_PAGE_SIZE) {
+          const buildQuery = (cols: string) => {
+            let query = client
+              .from('cadenas_comerciales')
+              .select(cols)
+              .order('nombre', { ascending: true })
+              .order('id', { ascending: true })
+              .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
+
+            if (soloActivos) query = query.eq('activo', true);
+            if (filtros.busqueda?.trim()) {
+              const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, ['codigo', 'nombre']);
+              if (orFilter) query = query.or(orFilter);
+            }
+            return query;
+          };
+
+          let { data, error } = await buildQuery(selectCols);
+          if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+            missingLowercaseTable = true;
+            break;
+          }
+          if (
+            error &&
+            selectCols !== MASTER_SELECT_COLUMNS.cadenasMinimal &&
+            isPostgrestSchemaMismatchError(error)
+          ) {
+            selectCols = MASTER_SELECT_COLUMNS.cadenasMinimal;
+            ({ data, error } = await buildQuery(selectCols));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error) {
+            const info = classifyMasterDataError(error, {
+              entity: 'cadenas',
+              table: 'cadenas_comerciales',
+            });
+            logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+            throw new MasterDataDiagnosticError(info);
+          }
+          const page = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedCadenaRow);
+          acumulado.push(...page);
+          if (page.length < POSTGREST_READ_PAGE_SIZE) break;
+        }
+
+        if (missingLowercaseTable) {
+          const dataset = await loadSharedDirectErpDataset(client, {
+            forceRefresh: Boolean(filtros.forzarRefresco),
+            useSingletonCache: !supabaseClient,
+            ttlMs: resolveMasterDataCacheTtlMs(),
+            entity: 'cadenas',
+          });
+          let rows = normalizeErpCadenasDataset({
+            regiones: dataset.regiones,
+            tipificaciones: dataset.tipificaciones,
+            canalesComercializacion: dataset.canalesComercializacion,
+            clientes: dataset.clientes,
+          });
+          if (soloActivos) rows = rows.filter((c) => c.activo);
+          if (filtros.region) {
+            rows = rows.filter(
+              (c) =>
+                !c.region_id ||
+                normalizeAllowedRegionStrict(c.metadata?.region_codigo ?? c.sucursal) === filtros.region
+            );
+          }
+          if (filtros.busqueda?.trim()) {
+            rows = rows.filter((c) =>
+              coincideBusquedaComercialNormalizada(`${c.codigo} ${c.nombre} ${c.tipo_canal}`, filtros.busqueda)
+            );
+          }
+          cacheCadenas.set(claveCache, rows);
+          return rows;
+        }
+
+        cacheCadenas.set(claveCache, acumulado);
+        return acumulado;
+      });
+    } catch (directErr) {
+      if (directErr instanceof MasterDataDiagnosticError) {
+        throw directErr;
+      }
+      const info = classifyMasterDataError(directErr, {
+        entity: 'cadenas',
+        table: 'Tipificacion_Clientes',
+      });
+      logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+      throw new MasterDataDiagnosticError(info);
+    }
+  };
+
+  if (supabaseClient) {
+    return runLoad();
+  }
+  return deduplicateMasterRequest(`cadenas::${claveCache}`, runLoad, Boolean(filtros.forzarRefresco));
 }
 
 export async function guardarCadenaComercial(
@@ -2383,80 +2596,287 @@ export async function obtenerZonasComerciales(
     if (cached !== undefined) return cached;
   }
 
+  if (!supabaseClient) {
+    assertMasterDataEnvReady('zonas');
+  }
   const client = supabaseClient ?? getMasterDataSupabaseClient();
 
-  if (!supabaseClient) {
-    const params = new URLSearchParams();
-    if (!soloActivos) params.set('soloActivos', 'false');
-    if (filtros.region) params.set('region', filtros.region);
-    if (filtros.busqueda?.trim()) params.set('busqueda', filtros.busqueda.trim());
-    if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
-    const fromApi = await fetchMasterEntityFromBackendApi<ZonaComercial>(
-      '/api/maestros/zonas',
-      params,
-      client,
-      filtros.region ? null : effectiveSucursal
-    );
-    if (fromApi !== null) {
-      cacheZonas.set(claveCache, fromApi);
-      return fromApi;
-    }
-  }
+  const runLoad = async (): Promise<ZonaComercial[]> => {
+    let bffFallbackReason: MasterDataDiagnosticInfo | undefined;
 
-  const acumulado: ZonaComercial[] = [];
-  let missingLowercaseTable = false;
-  for (let desde = 0; ; desde += POSTGREST_READ_PAGE_SIZE) {
-    let query = client
-      .from('zonas')
-      .select('*')
-      .order('nombre', { ascending: true })
-      .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
-
-    if (soloActivos) query = query.eq('activo', true);
-    if (filtros.busqueda?.trim()) {
-      const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
-        'codigo',
-        'nombre',
-        'ciudad',
-      ]);
-      if (orFilter) query = query.or(orFilter);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      if (desde === 0 && isMissingRelationPostgrestError(error)) {
-        missingLowercaseTable = true;
-        break;
+    if (!supabaseClient) {
+      const params = new URLSearchParams();
+      if (!soloActivos) params.set('soloActivos', 'false');
+      if (filtros.region) params.set('region', filtros.region);
+      if (filtros.busqueda?.trim()) params.set('busqueda', filtros.busqueda.trim());
+      if (filtros.forzarRefresco) params.set('forzarRefresco', '1');
+      const apiRes = await fetchMasterEntityFromBackendApi<ZonaComercial>(
+        '/api/maestros/zonas',
+        'zonas',
+        params,
+        client,
+        filtros.region ? null : effectiveSucursal
+      );
+      if (apiRes.status === 'ok') {
+        cacheZonas.set(claveCache, apiRes.data);
+        return apiRes.data;
       }
-      throw new Error(`Error consultando zonas: ${error.message}`);
+      if (apiRes.status === 'fallback_direct') {
+        bffFallbackReason = apiRes.reason;
+      }
     }
-    const page = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedZonaRow);
-    acumulado.push(...page);
-    if (page.length < POSTGREST_READ_PAGE_SIZE) break;
+
+    try {
+      return await executeWithSessionRefreshRetry(client, 'zonas', async () => {
+        const acumulado: ZonaComercial[] = [];
+        let missingLowercaseTable = false;
+        let selectCols: string = MASTER_SELECT_COLUMNS.zonas;
+
+        for (let desde = 0; ; desde += POSTGREST_READ_PAGE_SIZE) {
+          const buildQuery = (cols: string) => {
+            let query = client
+              .from('zonas')
+              .select(cols)
+              .order('nombre', { ascending: true })
+              .order('id', { ascending: true })
+              .range(desde, desde + POSTGREST_READ_PAGE_SIZE - 1);
+
+            if (soloActivos) query = query.eq('activo', true);
+            if (filtros.busqueda?.trim()) {
+              const orFilter = construirFiltroOrBusquedaGenerica(filtros.busqueda, [
+                'codigo',
+                'nombre',
+                'ciudad',
+              ]);
+              if (orFilter) query = query.or(orFilter);
+            }
+            return query;
+          };
+
+          let { data, error } = await buildQuery(selectCols);
+          if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+            missingLowercaseTable = true;
+            break;
+          }
+          if (
+            error &&
+            selectCols !== MASTER_SELECT_COLUMNS.zonasMinimal &&
+            isPostgrestSchemaMismatchError(error)
+          ) {
+            selectCols = MASTER_SELECT_COLUMNS.zonasMinimal;
+            ({ data, error } = await buildQuery(selectCols));
+            if (error && desde === 0 && isMissingRelationPostgrestError(error)) {
+              missingLowercaseTable = true;
+              break;
+            }
+          }
+          if (error) {
+            const info = classifyMasterDataError(error, {
+              entity: 'zonas',
+              table: 'zonas',
+            });
+            logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+            throw new MasterDataDiagnosticError(info);
+          }
+          const page = ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeReturnedZonaRow);
+          acumulado.push(...page);
+          if (page.length < POSTGREST_READ_PAGE_SIZE) break;
+        }
+
+        if (missingLowercaseTable) {
+          const dataset = await loadSharedDirectErpDataset(client, {
+            forceRefresh: Boolean(filtros.forzarRefresco),
+            useSingletonCache: !supabaseClient,
+            ttlMs: resolveMasterDataCacheTtlMs(),
+            entity: 'zonas',
+          });
+          let rows = normalizeErpZonasDataset({
+            regiones: dataset.regiones,
+            sucursales: dataset.sucursales,
+            estados: dataset.estados,
+            municipios: dataset.municipios,
+            clientes: dataset.clientes,
+          });
+          if (soloActivos) rows = rows.filter((z) => z.activo);
+          if (filtros.region) {
+            rows = rows.filter(
+              (z) =>
+                normalizeAllowedRegionStrict(z.metadata?.region_codigo ?? z.sucursal) === filtros.region
+            );
+          }
+          if (filtros.busqueda?.trim()) {
+            rows = rows.filter((z) =>
+              coincideBusquedaComercialNormalizada(
+                `${z.codigo} ${z.nombre} ${z.ciudad ?? ''} ${z.estado ?? ''}`,
+                filtros.busqueda
+              )
+            );
+          }
+          cacheZonas.set(claveCache, rows);
+          return rows;
+        }
+
+        cacheZonas.set(claveCache, acumulado);
+        return acumulado;
+      });
+    } catch (directErr) {
+      if (directErr instanceof MasterDataDiagnosticError) {
+        throw directErr;
+      }
+      const info = classifyMasterDataError(directErr, {
+        entity: 'zonas',
+        table: 'Estados',
+      });
+      logStructuredMasterDataError(info, bffFallbackReason ? { bffFallbackReason } : {});
+      throw new MasterDataDiagnosticError(info);
+    }
+  };
+
+  if (supabaseClient) {
+    return runLoad();
+  }
+  return deduplicateMasterRequest(`zonas::${claveCache}`, runLoad, Boolean(filtros.forzarRefresco));
+}
+
+export interface LoadMasterCatalogsOptions {
+  filtrosVendedores?: FiltrosConsultaVendedores;
+  filtrosClientes?: FiltrosConsultaClientes;
+  cargarVendedores?: boolean;
+  cargarClientes?: boolean;
+  cargarCadenas?: boolean;
+  cargarZonas?: boolean;
+  forzarRefresco?: boolean;
+  supabaseClient?: SupabaseClient<MasterDataDatabase>;
+}
+
+export interface LoadMasterCatalogsResult {
+  vendedores: Vendedor[];
+  clientes: ClienteConVendedor[];
+  cadenas: CadenaComercial[];
+  zonas: ZonaComercial[];
+  errors: Partial<Record<MasterCatalogEntity, string>>;
+  errorCodes: Partial<Record<MasterCatalogEntity, MasterDataErrorCode>>;
+  primaryErrorCode: MasterDataErrorCode | null;
+  summaryError: string | null;
+  ok: boolean;
+}
+
+/**
+ * Carga los 4 catálogos maestros (`vendedores`, `clientes`, `cadenas`, `zonas`) en paralelo
+ * con `Promise.allSettled` para máxima velocidad y resiliencia parcial.
+ */
+export async function loadMasterCatalogs(
+  options: LoadMasterCatalogsOptions = {}
+): Promise<LoadMasterCatalogsResult> {
+  const {
+    filtrosVendedores,
+    filtrosClientes,
+    cargarVendedores = true,
+    cargarClientes = true,
+    cargarCadenas = true,
+    cargarZonas = true,
+    forzarRefresco = false,
+    supabaseClient,
+  } = options;
+
+  const [vendSettled, cliSettled, cadSettled, zonSettled] = await Promise.allSettled([
+    cargarVendedores
+      ? obtenerVendedoresMaestros({ ...(filtrosVendedores ?? {}), forzarRefresco }, supabaseClient)
+      : Promise.resolve([] as Vendedor[]),
+    cargarClientes
+      ? obtenerClientesMaestros({ ...(filtrosClientes ?? {}), forzarRefresco }, supabaseClient)
+      : Promise.resolve([] as ClienteConVendedor[]),
+    cargarCadenas
+      ? obtenerCadenasComerciales(
+          { soloActivos: false, region: filtrosClientes?.region, forzarRefresco },
+          supabaseClient
+        )
+      : Promise.resolve([] as CadenaComercial[]),
+    cargarZonas
+      ? obtenerZonasComerciales(
+          { soloActivos: false, region: filtrosClientes?.region, forzarRefresco },
+          supabaseClient
+        )
+      : Promise.resolve([] as ZonaComercial[]),
+  ]);
+
+  const errors: Partial<Record<MasterCatalogEntity, string>> = {};
+  const errorCodes: Partial<Record<MasterCatalogEntity, MasterDataErrorCode>> = {};
+
+  const recordRejection = (entity: MasterCatalogEntity, reason: unknown) => {
+    const info = classifyMasterDataError(reason, { entity });
+    errors[entity] = info.safeMessage;
+    errorCodes[entity] = info.categoryCode;
+    if (!(reason instanceof MasterDataDiagnosticError)) {
+      logStructuredMasterDataError(info);
+    }
+  };
+
+  let vendedores: Vendedor[] = [];
+  if (cargarVendedores) {
+    if (vendSettled.status === 'fulfilled') vendedores = vendSettled.value;
+    else recordRejection('vendedores', vendSettled.reason);
   }
 
-  if (missingLowercaseTable) {
-    const [regiones, sucursales, estados, municipios, clientes] = await Promise.all([
-      fetchErpTablePagesDirect<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', false),
-      fetchErpTablePagesDirect<ErpSucursalRow>(client, 'Sucursales', 'id_sucu,created_at,sucu_desc,id_regi', true),
-      fetchErpTablePagesDirect<ErpEstadoRow>(client, 'Estados', 'id_esta,created_at,esta_desc,id_regi', true),
-      fetchErpTablePagesDirect<ErpMunicipioRow>(client, 'Municipios', 'id_muni,created_at,muni_desc,id_esta,id_regi', true),
-      fetchErpTablePagesDirect<ErpClienteRow>(client, 'Clientes', 'id_clie,id_esta,id_muni,clie_regi,clie_acti', false),
-    ]);
-    let rows = normalizeErpZonasDataset({
-      regiones,
-      sucursales,
-      estados,
-      municipios,
-      clientes,
-    });
-    if (soloActivos) rows = rows.filter((z) => z.activo);
-    cacheZonas.set(claveCache, rows);
-    return rows;
+  let clientes: ClienteConVendedor[] = [];
+  if (cargarClientes) {
+    if (cliSettled.status === 'fulfilled') clientes = cliSettled.value;
+    else recordRejection('clientes', cliSettled.reason);
   }
 
-  cacheZonas.set(claveCache, acumulado);
-  return acumulado;
+  let cadenas: CadenaComercial[] = [];
+  if (cargarCadenas) {
+    if (cadSettled.status === 'fulfilled') cadenas = cadSettled.value;
+    else recordRejection('cadenas', cadSettled.reason);
+  }
+
+  let zonas: ZonaComercial[] = [];
+  if (cargarZonas) {
+    if (zonSettled.status === 'fulfilled') zonas = zonSettled.value;
+    else recordRejection('zonas', zonSettled.reason);
+  }
+
+  const errorEntries = Object.entries(errors) as Array<[MasterCatalogEntity, string]>;
+  const codePriority: MasterDataErrorCode[] = [
+    'ENV_MISSING',
+    'AUTH_REQUIRED',
+    'RLS_42501',
+    'SCHEMA_PGRST',
+    'UPSTREAM_503',
+    'NETWORK_ERR',
+    'UNKNOWN_ERR',
+  ];
+  const presentCodes = Object.values(errorCodes) as MasterDataErrorCode[];
+  const primaryErrorCode =
+    presentCodes.length > 0
+      ? (codePriority.find((c) => presentCodes.includes(c)) ?? presentCodes[0]!)
+      : null;
+  const summaryError =
+    errorEntries.length > 0
+      ? errorEntries.map(([k, msg]) => `${k.toUpperCase()}: ${msg}`).join(' · ')
+      : null;
+
+  return {
+    vendedores,
+    clientes,
+    cadenas,
+    zonas,
+    errors,
+    errorCodes,
+    primaryErrorCode,
+    summaryError,
+    ok: errorEntries.length === 0,
+  };
+}
+
+/**
+ * Invalida la caché en memoria de catálogos maestros y dispara una recarga fresca en paralelo.
+ */
+export async function refreshMasterCatalogs(
+  options: Omit<LoadMasterCatalogsOptions, 'forzarRefresco'> = {}
+): Promise<LoadMasterCatalogsResult> {
+  clearMasterDataCaches();
+  return loadMasterCatalogs({ ...options, forzarRefresco: true });
 }
 
 export async function guardarZonaComercial(
