@@ -286,6 +286,9 @@ export const FieldPromotoraView: React.FC = () => {
   const {
     currentUser,
     currentRole,
+    assignedRegion,
+    isRegionalRestricted,
+    verifiedRegionId,
     isStrictAdmin,
     caracasWeekStartYmd,
     visits,
@@ -2191,11 +2194,22 @@ export const FieldPromotoraView: React.FC = () => {
   const [activeReportTab, setActiveReportTab] = useState<ReportSubTab>('asistencia');
   const [reportSearchQuery, setReportSearchQuery] = useState('');
   const [reportRowLimit, setReportRowLimit] = useState<number>(150);
-  const [invRegionFilter, setInvRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
+  const lockedRegion: 'Occidente' | 'Valencia' | null =
+    isRegionalRestricted && assignedRegion ? assignedRegion : null;
+
+  const [invRegionFilter, setInvRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
+    () => lockedRegion ?? 'TODAS'
+  );
   const [invPromoterFilter, setInvPromoterFilter] = useState<string>('TODAS');
   const [invDateFrom, setInvDateFrom] = useState<string>('');
   const [invDateTo, setInvDateTo] = useState<string>('');
   const [checkinPhotosMap, setCheckinPhotosMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (lockedRegion) {
+      setInvRegionFilter(lockedRegion);
+    }
+  }, [lockedRegion]);
 
   // Estados sincronizados para Inventario y Degustación
   const [editingInventoryObs, setEditingInventoryObs] = useState<{ id: string; text: string } | null>(null);
@@ -2210,6 +2224,7 @@ export const FieldPromotoraView: React.FC = () => {
     finalInventory: number;
     samplesGiven: number;
     promoterObservation: string;
+    region: 'Occidente' | 'Valencia';
   }>({
     date: new Date().toISOString().slice(0, 10),
     storeName: '',
@@ -2219,7 +2234,16 @@ export const FieldPromotoraView: React.FC = () => {
     finalInventory: 0,
     samplesGiven: 0,
     promoterObservation: '',
+    region: lockedRegion ?? 'Occidente',
   });
+
+  useEffect(() => {
+    if (lockedRegion) {
+      setNewInventoryForm((prev) =>
+        prev.region === lockedRegion ? prev : { ...prev, region: lockedRegion }
+      );
+    }
+  }, [lockedRegion]);
 
   // Opciones de PDV y productos derivadas EXCLUSIVAMENTE de los registros sincronizados (sin catálogos cableados)
   const syncedStoreOptions = useMemo<string[]>(() => {
@@ -2260,11 +2284,13 @@ export const FieldPromotoraView: React.FC = () => {
   const inventoryPromoterOptions = useMemo<string[]>(() => {
     const names = new Set<string>();
     inventorySampling.forEach((inv) => {
+      const invReg = inv.region === 'Valencia' ? 'Valencia' : 'Occidente';
+      if (lockedRegion && invReg !== lockedRegion) return;
       const clean = String(inv.promotora || '').trim();
       if (clean) names.add(clean);
     });
     return Array.from(names).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [inventorySampling]);
+  }, [inventorySampling, lockedRegion]);
 
   const filteredInventorySampling = useMemo<InventorySamplingRecord[]>(() => {
     const q = reportSearchQuery.trim().toLowerCase();
@@ -2332,6 +2358,7 @@ export const FieldPromotoraView: React.FC = () => {
         finalQuantity: Number(newInventoryForm.finalInventory) || 0,
         degustations: Number(newInventoryForm.samplesGiven) || 0,
         comments: newInventoryForm.promoterObservation,
+        region: lockedRegion ?? newInventoryForm.region,
       });
       await refreshSupabaseData();
       setIsNewInventoryModalOpen(false);
@@ -2345,8 +2372,8 @@ export const FieldPromotoraView: React.FC = () => {
 
   // Totales reales calculados desde Supabase para KPIs de Informes
   const totalReportsMuestras = useMemo(
-    () => Math.round(inventorySampling.reduce((acc, c) => acc + c.portionsSampled, 0)),
-    [inventorySampling]
+    () => Math.round(filteredInventorySampling.reduce((acc, c) => acc + c.portionsSampled, 0)),
+    [filteredInventorySampling]
   );
   const totalReportsFotos = visitsHistory.length;
 
@@ -2356,9 +2383,11 @@ export const FieldPromotoraView: React.FC = () => {
     let body: (string | number)[][] = [];
 
     if (activeReportTab === 'inventario') {
-      title = 'Control de Inventario y Degustación en PDV (Supabase)';
+      title = lockedRegion
+        ? `Control de Inventario y Degustación en PDV — Región ${lockedRegion}`
+        : 'Control de Inventario y Degustación en PDV (Supabase)';
       head = [['PDV / TIENDA', 'PRODUCTO & ID', 'STOCK INIC.', 'DEGUSTACIÓN', 'ROTACIÓN / VENTA', 'STOCK FINAL', 'PROMOTORA']];
-      body = inventorySampling.slice(0, 300).map((i) => [
+      body = filteredInventorySampling.slice(0, 300).map((i) => [
         `${i.storeName}\n${i.date}`,
         `${i.productName}\n${i.lotNumber}`,
         `${i.initialStock}`,
@@ -2552,8 +2581,16 @@ export const FieldPromotoraView: React.FC = () => {
   // ----------------------------------------------------
   // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (OCCIDENTE + VALENCIA · SUPABASE `promotoras`)
   // ----------------------------------------------------
-  const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
+  const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
+    () => lockedRegion ?? 'TODAS'
+  );
   const [selectedStaffCategoryFilter, setSelectedStaffCategoryFilter] = useState<'TODAS' | StaffCategory>('TODAS');
+
+  useEffect(() => {
+    if (lockedRegion) {
+      setSelectedStaffRegionFilter(lockedRegion);
+    }
+  }, [lockedRegion]);
   const [selectedStaffSearch, setSelectedStaffSearch] = useState('');
   const [fallbackPromotorasStaff, setFallbackPromotorasStaff] = useState<StaffMemberRecord[]>([]);
   const [loadingPersonalCatalog, setLoadingPersonalCatalog] = useState(false);
@@ -2570,6 +2607,7 @@ export const FieldPromotoraView: React.FC = () => {
     email: string;
     assignedStore: string;
     address: string;
+    region: 'Occidente' | 'Valencia';
     password: string;
     status: 'Activo' | 'Inactivo';
     photoUrl?: string;
@@ -2582,6 +2620,7 @@ export const FieldPromotoraView: React.FC = () => {
     email: '',
     assignedStore: 'VARIAS',
     address: '',
+    region: lockedRegion ?? 'Occidente',
     password: '',
     status: 'Activo',
   });
@@ -2666,12 +2705,6 @@ export const FieldPromotoraView: React.FC = () => {
     }
   }, [activeSubTab, module1Bundle?.staffMembers, fallbackPromotorasStaff.length, loadFallbackPromotorasCatalog]);
 
-  const staffList = useMemo<StaffMemberRecord[]>(() => {
-    const fromBundle = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
-    if (fromBundle.length > 0) return fromBundle;
-    return fallbackPromotorasStaff;
-  }, [module1Bundle, fallbackPromotorasStaff]);
-
   const resolveMemberRegion = useCallback((m: StaffMemberRecord): 'Occidente' | 'Valencia' => {
     if (m.region === 'Valencia' || String(m.region || '').toLowerCase() === 'valencia') {
       return 'Valencia';
@@ -2684,6 +2717,13 @@ export const FieldPromotoraView: React.FC = () => {
     }
     return 'Occidente';
   }, []);
+
+  const staffList = useMemo<StaffMemberRecord[]>(() => {
+    const fromBundle = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
+    const base = fromBundle.length > 0 ? fromBundle : fallbackPromotorasStaff;
+    if (!lockedRegion) return base;
+    return base.filter((m) => resolveMemberRegion(m) === lockedRegion);
+  }, [module1Bundle, fallbackPromotorasStaff, lockedRegion, resolveMemberRegion]);
 
   const occidenteStaffCount = useMemo(
     () => staffList.filter((m) => resolveMemberRegion(m) === 'Occidente').length,
@@ -2827,6 +2867,7 @@ export const FieldPromotoraView: React.FC = () => {
       email: '',
       assignedStore: defaultCategory === 'merchandising' ? 'MERCHANDISING' : defaultCategory === 'eventual' ? 'TODAS' : 'VARIAS',
       address: '',
+      region: lockedRegion ?? (selectedStaffRegionFilter === 'Valencia' ? 'Valencia' : 'Occidente'),
       password: '',
       status: 'Activo',
       photoUrl: undefined,
@@ -2845,6 +2886,7 @@ export const FieldPromotoraView: React.FC = () => {
       email: String(member.email ?? ''),
       assignedStore: String(member.assignedStore ?? 'VARIAS'),
       address: String(member.address ?? ''),
+      region: lockedRegion ?? resolveMemberRegion(member),
       // Seguridad Zero Trust: nunca poblar ni mostrar contraseñas almacenadas
       password: '',
       status: member.status === 'Inactivo' ? 'Inactivo' : 'Activo',
@@ -2863,6 +2905,7 @@ export const FieldPromotoraView: React.FC = () => {
     setStaffFormError(null);
     setIsSavingStaffModal(true);
     try {
+      const effectiveStaffRegion: 'Occidente' | 'Valencia' = lockedRegion ?? staffFormModal.region;
       const saved = await saveSupabaseStaffMember({
         id: staffFormModal.id,
         name: cleanName,
@@ -2875,6 +2918,8 @@ export const FieldPromotoraView: React.FC = () => {
         status: staffFormModal.status,
         password: staffFormModal.password,
         photoUrl: staffFormModal.photoUrl,
+        region: effectiveStaffRegion,
+        regionId: lockedRegion ? verifiedRegionId : undefined,
       });
 
       // Aprovisionar/actualizar cuenta segura en Supabase Auth (sin texto plano en public.staff)
@@ -5155,27 +5200,37 @@ export const FieldPromotoraView: React.FC = () => {
             <div className="space-y-3 p-3.5 rounded-2xl bg-zinc-950 border border-zinc-900">
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {(
-                    [
-                      { id: 'TODAS', label: 'Todas las Regiones' },
-                      { id: 'Occidente', label: 'Occidente' },
-                      { id: 'Valencia', label: 'Valencia' },
-                    ] as const
-                  ).map((reg) => (
-                    <button
-                      key={reg.id}
-                      type="button"
-                      data-testid={`inv-region-${reg.id}`}
-                      onClick={() => setInvRegionFilter(reg.id)}
-                      className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                        invRegionFilter === reg.id
-                          ? 'bg-red-600 text-white border-red-500 shadow'
-                          : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
-                      }`}
+                  {lockedRegion ? (
+                    <span
+                      data-testid="inv-region-locked-badge"
+                      className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-red-600/15 text-white border border-red-500/45 shadow-sm"
                     >
-                      {reg.label}
-                    </button>
-                  ))}
+                      <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                      <span>Región: {lockedRegion}</span>
+                    </span>
+                  ) : (
+                    (
+                      [
+                        { id: 'TODAS', label: 'Todas las Regiones' },
+                        { id: 'Occidente', label: 'Occidente' },
+                        { id: 'Valencia', label: 'Valencia' },
+                      ] as const
+                    ).map((reg) => (
+                      <button
+                        key={reg.id}
+                        type="button"
+                        data-testid={`inv-region-${reg.id}`}
+                        onClick={() => setInvRegionFilter(reg.id)}
+                        className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          invRegionFilter === reg.id
+                            ? 'bg-red-600 text-white border-red-500 shadow'
+                            : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                        }`}
+                      >
+                        {reg.label}
+                      </button>
+                    ))
+                  )}
 
                   <select
                     value={invPromoterFilter}
@@ -5211,7 +5266,7 @@ export const FieldPromotoraView: React.FC = () => {
                   </div>
                 </div>
 
-                {(invRegionFilter !== 'TODAS' ||
+                {((!lockedRegion && invRegionFilter !== 'TODAS') ||
                   invPromoterFilter !== 'TODAS' ||
                   invDateFrom !== '' ||
                   invDateTo !== '' ||
@@ -5220,7 +5275,7 @@ export const FieldPromotoraView: React.FC = () => {
                     type="button"
                     data-testid="inv-clear-filters"
                     onClick={() => {
-                      setInvRegionFilter('TODAS');
+                      setInvRegionFilter(lockedRegion ?? 'TODAS');
                       setInvPromoterFilter('TODAS');
                       setInvDateFrom('');
                       setInvDateTo('');
@@ -5547,6 +5602,32 @@ export const FieldPromotoraView: React.FC = () => {
                           />
                         </div>
                         <div>
+                          <label className="block text-xs text-slate-400 mb-1">Región Operativa</label>
+                          {lockedRegion ? (
+                            <div
+                              data-testid="new-inv-region-locked"
+                              className="w-full bg-red-950/30 border border-red-500/40 rounded-lg px-3 py-2 text-sm text-white font-bold flex items-center gap-2"
+                            >
+                              <Lock className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                              <span>Región: {lockedRegion}</span>
+                            </div>
+                          ) : (
+                            <select
+                              value={newInventoryForm.region}
+                              onChange={(e) =>
+                                setNewInventoryForm({
+                                  ...newInventoryForm,
+                                  region: e.target.value as 'Occidente' | 'Valencia',
+                                })
+                              }
+                              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                            >
+                              <option value="Occidente">Occidente</option>
+                              <option value="Valencia">Valencia</option>
+                            </select>
+                          )}
+                        </div>
+                        <div className="md:col-span-2">
                           <label className="block text-xs text-slate-400 mb-1">Promotora Responsable</label>
                           <select
                             value={newInventoryForm.promoterName}
@@ -6637,16 +6718,28 @@ export const FieldPromotoraView: React.FC = () => {
                     <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider">
                       Padrón Activo Sincronizado • Supabase `promotoras`
                     </span>
-                    <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-950 text-zinc-300 border border-white/10">
-                      Occidente: {occidenteStaffCount} · Valencia: {valenciaStaffCount}
-                    </span>
+                    {lockedRegion ? (
+                      <span
+                        data-testid="personal-region-header-badge"
+                        className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-red-600/15 text-white border border-red-500/45"
+                      >
+                        <Lock className="w-3 h-3 text-red-400 shrink-0" />
+                        <span>Región: {lockedRegion} ({regionFilteredStaffList.length})</span>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-950 text-zinc-300 border border-white/10">
+                        Occidente: {occidenteStaffCount} · Valencia: {valenciaStaffCount}
+                      </span>
+                    )}
                   </div>
                   <h3 className="text-lg font-black text-white mt-1.5">
                     Personal y Promotoras Activas ({regionFilteredStaffList.length}
-                    {selectedStaffRegionFilter !== 'TODAS' ? ` de ${staffList.length}` : ''})
+                    {!lockedRegion && selectedStaffRegionFilter !== 'TODAS' ? ` de ${staffList.length}` : ''})
                   </h3>
                   <p className="text-xs text-zinc-400">
-                    Directorio sincronizado con Supabase por región operativa (Occidente y Valencia) y vinculado a cuentas de acceso en Supabase Auth.
+                    {lockedRegion
+                      ? `Directorio sincronizado con Supabase exclusivo de la región ${lockedRegion} y vinculado a cuentas de acceso en Supabase Auth.`
+                      : 'Directorio sincronizado con Supabase por región operativa (Occidente y Valencia) y vinculado a cuentas de acceso en Supabase Auth.'}
                   </p>
                 </div>
 
@@ -6696,45 +6789,58 @@ export const FieldPromotoraView: React.FC = () => {
 
               {/* Selector de Región / Perfil (Occidente vs Valencia) + Categoría */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-white/[0.06]">
-                <div
-                  className="flex flex-wrap items-center bg-zinc-950 p-1 rounded-xl border border-white/10 gap-1"
-                  role="tablist"
-                  aria-label="Filtrar personal por región"
-                >
-                  {(
-                    [
-                      { id: 'TODAS', label: 'Todas las Regiones', count: staffList.length, testId: 'personal-region-tab-todas' },
-                      { id: 'Occidente', label: 'Occidente', count: occidenteStaffCount, testId: 'personal-region-tab-occidente' },
-                      { id: 'Valencia', label: 'Valencia', count: valenciaStaffCount, testId: 'personal-region-tab-valencia' },
-                    ] as const
-                  ).map((regTab) => {
-                    const active = selectedStaffRegionFilter === regTab.id;
-                    return (
-                      <button
-                        key={regTab.id}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        data-testid={regTab.testId}
-                        onClick={() => setSelectedStaffRegionFilter(regTab.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                          active
-                            ? 'bg-red-600 text-white shadow'
-                            : 'text-zinc-400 hover:text-white hover:bg-white/[0.04]'
-                        }`}
-                      >
-                        <span>{regTab.label}</span>
-                        <span
-                          className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                            active ? 'bg-black/30 text-white' : 'bg-zinc-900 text-zinc-400'
+                {lockedRegion ? (
+                  <div
+                    data-testid="personal-region-locked-pill"
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-red-600/15 border border-red-500/45 text-xs font-bold text-white"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                    <span>Región: {lockedRegion}</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-black/30 text-white">
+                      {regionFilteredStaffList.length}
+                    </span>
+                  </div>
+                ) : (
+                  <div
+                    className="flex flex-wrap items-center bg-zinc-950 p-1 rounded-xl border border-white/10 gap-1"
+                    role="tablist"
+                    aria-label="Filtrar personal por región"
+                  >
+                    {(
+                      [
+                        { id: 'TODAS', label: 'Todas las Regiones', count: staffList.length, testId: 'personal-region-tab-todas' },
+                        { id: 'Occidente', label: 'Occidente', count: occidenteStaffCount, testId: 'personal-region-tab-occidente' },
+                        { id: 'Valencia', label: 'Valencia', count: valenciaStaffCount, testId: 'personal-region-tab-valencia' },
+                      ] as const
+                    ).map((regTab) => {
+                      const active = selectedStaffRegionFilter === regTab.id;
+                      return (
+                        <button
+                          key={regTab.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          data-testid={regTab.testId}
+                          onClick={() => setSelectedStaffRegionFilter(regTab.id)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                            active
+                              ? 'bg-red-600 text-white shadow'
+                              : 'text-zinc-400 hover:text-white hover:bg-white/[0.04]'
                           }`}
                         >
-                          {regTab.count}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+                          <span>{regTab.label}</span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                              active ? 'bg-black/30 text-white' : 'bg-zinc-900 text-zinc-400'
+                            }`}
+                          >
+                            {regTab.count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center bg-zinc-950 p-1 rounded-xl border border-white/10 gap-1">
                   {(
@@ -6962,6 +7068,33 @@ export const FieldPromotoraView: React.FC = () => {
                           className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white focus:outline-none focus:border-red-500"
                           placeholder="Sector / Ciudad"
                         />
+                      </div>
+
+                      <div>
+                        <label className="block text-zinc-300 font-bold mb-1">Región Operativa</label>
+                        {lockedRegion ? (
+                          <div
+                            data-testid="staff-modal-region-locked"
+                            className="w-full px-3 py-2 rounded-xl bg-red-950/30 border border-red-500/40 text-white font-bold flex items-center gap-2"
+                          >
+                            <Lock className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                            <span>Región: {lockedRegion}</span>
+                          </div>
+                        ) : (
+                          <select
+                            value={staffFormModal.region}
+                            onChange={(e) =>
+                              setStaffFormModal((prev) => ({
+                                ...prev,
+                                region: e.target.value as 'Occidente' | 'Valencia',
+                              }))
+                            }
+                            className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-white focus:outline-none focus:border-red-500"
+                          >
+                            <option value="Occidente">Occidente</option>
+                            <option value="Valencia">Valencia</option>
+                          </select>
+                        )}
                       </div>
 
                       <div>

@@ -44,6 +44,7 @@ import {
   fetchCheckinPhotosBatch,
   type StaffMemberRecord,
 } from '../../services/supabaseModule1';
+import { useOptionalApp } from '../../context/AppContext';
 import { normalizeSearchText } from '../../utils/textSearch';
 
 export { normalizeSearchText };
@@ -210,6 +211,11 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   onRefreshData,
   onNotifyToast,
 }) => {
+  const appCtx = useOptionalApp();
+  const isRegionalRestricted = Boolean(appCtx?.isRegionalRestricted);
+  const lockedRegion: 'Occidente' | 'Valencia' | null =
+    isRegionalRestricted && appCtx?.assignedRegion ? appCtx.assignedRegion : null;
+
   const todayCaracasYmd = useMemo(() => getCaracasTodayYmd(), []);
 
   // Por defecto abrimos en la jornada de hoy (America/Caracas), con conmutador de 1 clic hacia Historial Registrado
@@ -217,10 +223,18 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   const [selectedDateYmd, setSelectedDateYmd] = useState<string>(todayCaracasYmd);
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
-  const [regionFilter, setRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
+  const [regionFilter, setRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>(
+    () => lockedRegion ?? 'TODAS'
+  );
   const [promoterFilter, setPromoterFilter] = useState<string>('TODAS');
   const [profileFilter, setProfileFilter] = useState<'TODOS' | PerfilAsistencia>('TODOS');
   const [cardLimit, setCardLimit] = useState<number>(30);
+
+  useEffect(() => {
+    if (lockedRegion) {
+      setRegionFilter(lockedRegion);
+    }
+  }, [lockedRegion]);
 
   // Estado optimista local tras subidas/reemplazos inmediatos
   const [optimisticJornadas, setOptimisticJornadas] = useState<
@@ -1035,27 +1049,37 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
         {/* Filtros de Región, Promotora y Rango de Fechas (en modo Historial) */}
         <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-zinc-900">
           <div className="flex flex-wrap items-center gap-1.5">
-            {(
-              [
-                { id: 'TODAS', label: 'Todas las Regiones' },
-                { id: 'Occidente', label: 'Occidente' },
-                { id: 'Valencia', label: 'Valencia' },
-              ] as const
-            ).map((reg) => (
-              <button
-                key={reg.id}
-                type="button"
-                data-testid={`asistencia-region-${reg.id}`}
-                onClick={() => setRegionFilter(reg.id)}
-                className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                  regionFilter === reg.id
-                    ? 'bg-red-600 text-white border-red-500 shadow'
-                    : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
-                }`}
+            {lockedRegion ? (
+              <span
+                data-testid="asistencia-region-locked-badge"
+                className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-red-600/15 text-white border border-red-500/45 shadow-sm"
               >
-                {reg.label}
-              </button>
-            ))}
+                <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                <span>Región: {lockedRegion}</span>
+              </span>
+            ) : (
+              (
+                [
+                  { id: 'TODAS', label: 'Todas las Regiones' },
+                  { id: 'Occidente', label: 'Occidente' },
+                  { id: 'Valencia', label: 'Valencia' },
+                ] as const
+              ).map((reg) => (
+                <button
+                  key={reg.id}
+                  type="button"
+                  data-testid={`asistencia-region-${reg.id}`}
+                  onClick={() => setRegionFilter(reg.id)}
+                  className={`min-h-[34px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                    regionFilter === reg.id
+                      ? 'bg-red-600 text-white border-red-500 shadow'
+                      : 'bg-black text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                  }`}
+                >
+                  {reg.label}
+                </button>
+              ))
+            )}
 
             <select
               value={promoterFilter}
@@ -1093,7 +1117,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
             )}
           </div>
 
-          {(regionFilter !== 'TODAS' ||
+          {((!lockedRegion && regionFilter !== 'TODAS') ||
             promoterFilter !== 'TODAS' ||
             profileFilter !== 'TODOS' ||
             searchQuery.trim() !== '' ||
@@ -1103,7 +1127,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
               type="button"
               data-testid="asistencia-clear-filters"
               onClick={() => {
-                setRegionFilter('TODAS');
+                setRegionFilter(lockedRegion ?? 'TODAS');
                 setPromoterFilter('TODAS');
                 setProfileFilter('TODOS');
                 setDateFrom('');

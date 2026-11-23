@@ -11,7 +11,10 @@ const ALLOWED_COORDINATOR_ROLES = new Set([
   'superadmin',
   'coordinacion',
   'coordinadora',
+  'coordinador',
   'coordinadora_trade',
+  'coordinador_trade',
+  'coordinador_regional',
   'jefe_trade',
   'supervisor',
   'gerente_admin',
@@ -186,7 +189,11 @@ function normalizeServerRoleAlias(rawRole: unknown): string {
   if (
     clean === 'supervisor' ||
     clean === 'supervisora' ||
-    clean === 'supervisor_trade'
+    clean === 'supervisor_trade' ||
+    clean === 'coordinador_trade' ||
+    clean === 'coordinadora_trade' ||
+    clean === 'coordinador_regional' ||
+    clean === 'coordinador'
   ) {
     return 'coordinacion';
   }
@@ -194,6 +201,22 @@ function normalizeServerRoleAlias(rawRole: unknown): string {
     return 'vendedor';
   }
   return clean;
+}
+
+/**
+ * Resuelve de forma segura `activeSucursalHeader`:
+ * - Solo actores globales (`GLOBAL` / `super_admin`) pueden cambiar su hub vía cabecera `x-sucursal-activa`.
+ * - Actores regionales quedan fijados estrictamente a su propia `sucursal` verificada (impide spoofing de cabecera).
+ */
+function resolveSafeActiveSucursalHeaderForActor(
+  req: Request,
+  isGlobalActor: boolean,
+  verifiedSucursal: ServerSucursalCodigo | null
+): OperativeSucursal | null {
+  if (isGlobalActor) {
+    return normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req));
+  }
+  return isOperativeServerSucursal(verifiedSucursal) ? verifiedSucursal : null;
 }
 
 function extractSucursalCandidateFromRecord(row: Record<string, unknown>): ServerSucursalCodigo | null {
@@ -727,7 +750,7 @@ export async function requireFdvOrTradeAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -749,12 +772,18 @@ export async function requireFdvOrTradeAuth(
       return;
     }
 
+    const isGlobalActor =
+      appRole === 'super_admin' || appRole === 'superadmin' || effective.sucursal === 'GLOBAL';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isGlobalActor,
+        effective.sucursal
+      ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -825,7 +854,7 @@ export async function requireCadenaLogoViewerAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -847,12 +876,18 @@ export async function requireCadenaLogoViewerAuth(
       return;
     }
 
+    const isGlobalActor =
+      appRole === 'super_admin' || appRole === 'superadmin' || effective.sucursal === 'GLOBAL';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isGlobalActor,
+        effective.sucursal
+      ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -930,7 +965,7 @@ export async function requireIncidenciaActorAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -952,12 +987,18 @@ export async function requireIncidenciaActorAuth(
       return;
     }
 
+    const isGlobalActor =
+      appRole === 'super_admin' || appRole === 'superadmin' || effective.sucursal === 'GLOBAL';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isGlobalActor,
+        effective.sucursal
+      ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       isReadOnlyViewer:
         appRole === 'contraloria' ||
@@ -1029,7 +1070,7 @@ export async function requireTorreControlAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -1051,12 +1092,18 @@ export async function requireTorreControlAuth(
       return;
     }
 
+    const isGlobalActor =
+      appRole === 'super_admin' || appRole === 'superadmin' || effective.sucursal === 'GLOBAL';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isGlobalActor,
+        effective.sucursal
+      ),
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -1137,7 +1184,7 @@ export async function requireMasterDataReaderAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -1158,13 +1205,19 @@ export async function requireMasterDataReaderAuth(
       return;
     }
 
+    const isSuperAdmin = appRole === 'super_admin' || appRole === 'superadmin';
+    const isGlobalActor = isSuperAdmin || effective.sucursal === 'GLOBAL';
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
       sucursal: effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
-      isSuperAdmin: appRole === 'super_admin' || appRole === 'superadmin',
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isGlobalActor,
+        effective.sucursal
+      ),
+      isSuperAdmin,
       isCoordinatorOrAdmin: isCoordinatorOrAdminRole(appRole),
       accessToken: token,
     };
@@ -1345,7 +1398,7 @@ export async function requireCoordinatorOrAdminAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -1358,13 +1411,18 @@ export async function requireCoordinatorOrAdminAuth(
       return;
     }
 
-    const isSuperAdmin = appRole === 'super_admin';
+    const isSuperAdmin = appRole === 'super_admin' || appRole === 'superadmin';
+    const resolvedSucursal = isSuperAdmin ? 'GLOBAL' : effective.sucursal;
     req.authUser = {
       id: data.user.id,
       email: normalizeCanonicalEmail(data.user.email),
       appRole,
-      sucursal: isSuperAdmin ? 'GLOBAL' : effective.sucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      sucursal: resolvedSucursal,
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        isSuperAdmin || resolvedSucursal === 'GLOBAL',
+        resolvedSucursal
+      ),
       isSuperAdmin,
       isCoordinatorOrAdmin: true,
       isReadOnlyViewer: false,
@@ -1436,7 +1494,7 @@ export async function requireAttendanceActorAuth(
       data.user.id,
       token,
       jwtAppRole,
-      appMeta.sucursal,
+      appMeta.sucursal ?? appMeta.region,
       data.user.email
     );
     const appRole = effective.role;
@@ -1450,13 +1508,18 @@ export async function requireAttendanceActorAuth(
     }
 
     if (isCoordinatorOrAdminRole(appRole)) {
-      const isSuperAdmin = appRole === 'super_admin';
+      const isSuperAdmin = appRole === 'super_admin' || appRole === 'superadmin';
+      const resolvedSucursal = isSuperAdmin ? 'GLOBAL' : effective.sucursal;
       req.authUser = {
         id: data.user.id,
         email: canonicalEmail,
         appRole,
-        sucursal: isSuperAdmin ? 'GLOBAL' : effective.sucursal,
-        activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+        sucursal: resolvedSucursal,
+        activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+          req,
+          isSuperAdmin || resolvedSucursal === 'GLOBAL',
+          resolvedSucursal
+        ),
         staffId:
           typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id)
             ? appMeta.staff_id
@@ -1478,7 +1541,11 @@ export async function requireAttendanceActorAuth(
         email: canonicalEmail,
         appRole,
         sucursal: effective.sucursal,
-        activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+        activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+          req,
+          effective.sucursal === 'GLOBAL',
+          effective.sucursal
+        ),
         staffId: null,
         isCoordinatorOrAdmin: false,
         isReadOnlyViewer: true,
@@ -1603,7 +1670,11 @@ export async function requireAttendanceActorAuth(
       email: canonicalEmail,
       appRole: 'promotora',
       sucursal: resolvedStaffSucursal,
-      activeSucursalHeader: normalizeOperativeServerSucursal(extractRawActiveSucursalHeader(req)),
+      activeSucursalHeader: resolveSafeActiveSucursalHeaderForActor(
+        req,
+        false,
+        resolvedStaffSucursal
+      ),
       staffId: resolvedStaffId,
       isCoordinatorOrAdmin: false,
       accessToken: token,

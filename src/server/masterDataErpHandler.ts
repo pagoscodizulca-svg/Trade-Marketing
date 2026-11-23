@@ -630,14 +630,112 @@ function matchesEntityRegion(
   region: AllowedRegionCode | null,
   regionId: string | null
 ): boolean {
+  const itemRegion =
+    normalizeRegionName(item.metadata?.region_codigo) ?? normalizeRegionName(item.sucursal);
+
+  if (region && regionId) {
+    if (item.region_id) {
+      return item.region_id === regionId && (!itemRegion || itemRegion === region);
+    }
+    return itemRegion === region;
+  }
   if (regionId) {
     if (item.region_id === regionId) return true;
     if (!region) return false;
   }
   if (!region) return true;
-  const itemRegion =
-    normalizeRegionName(item.metadata?.region_codigo) ?? normalizeRegionName(item.sucursal);
   return itemRegion === region;
+}
+
+function isGlobalMasterActor(actor: AuthenticatedServerUser): boolean {
+  return (
+    actor.isSuperAdmin === true ||
+    actor.sucursal === 'GLOBAL' ||
+    actor.appRole === 'super_admin' ||
+    actor.appRole === 'superadmin'
+  );
+}
+
+/**
+ * Valida que un actor regional no pueda inyectar un `?regionId=` ajeno a su región asignada (anti-IDOR).
+ */
+function resolveAuthorizedRegionIdFilter(params: {
+  actor: AuthenticatedServerUser;
+  scopeRegion: AllowedRegionCode | null;
+  rawRequestedRegionId: unknown;
+  regiones: ReadonlyArray<{ id: string; codigo: string }>;
+}):
+  | { ok: true; regionId: string | null }
+  | { ok: false; status: number; code: string; error: string } {
+  const requestedId =
+    typeof params.rawRequestedRegionId === 'string' && params.rawRequestedRegionId.trim()
+      ? params.rawRequestedRegionId.trim()
+      : null;
+
+  if (isGlobalMasterActor(params.actor)) {
+    return { ok: true, regionId: requestedId };
+  }
+
+  const assignedRegionId = params.scopeRegion
+    ? params.regiones.find((r) => normalizeRegionName(r.codigo) === params.scopeRegion)?.id ?? null
+    : null;
+
+  if (requestedId && (!assignedRegionId || requestedId !== assignedRegionId)) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'FORBIDDEN_REGION_ACCESS',
+      error: `Acceso denegado: tu cuenta de ${params.scopeRegion ?? 'región restringida'} no puede consultar datos de otra región.`,
+    };
+  }
+
+  return { ok: true, regionId: assignedRegionId };
+}
+
+function filterSedesResumenForRegion<T extends { sucursal: string }>(
+  sedesResumen: ReadonlyArray<T>,
+  region: AllowedRegionCode | null,
+  sucursal: SucursalMaestro | null
+): T[] {
+  if (region) {
+    return sedesResumen.filter((s) => normalizeRegionName(s.sucursal) === region);
+  }
+  if (sucursal) {
+    return sedesResumen.filter((s) => s.sucursal === sucursal);
+  }
+  return [...sedesResumen];
+}
+
+function filterVendedoresAuditoriaForScope(
+  auditoria: VendedoresAuditSummary,
+  filteredVendedores: ReadonlyArray<{ activo: boolean; sucursal?: SucursalMaestro | null }>,
+  region: AllowedRegionCode | null,
+  sucursal: SucursalMaestro | null
+): VendedoresAuditSummary {
+  if (!region && !sucursal) {
+    return auditoria;
+  }
+  const porSede: Record<SucursalMaestro, number> = {
+    ZULIA: 0,
+    VALENCIA: 0,
+    CENTRO: 0,
+    ORIENTE: 0,
+    CAPITAL: 0,
+  };
+  let activos = 0;
+  for (const v of filteredVendedores) {
+    if (v.activo) activos += 1;
+    if (v.sucursal && v.sucursal in porSede) {
+      porSede[v.sucursal] += 1;
+    }
+  }
+  return {
+    ...auditoria,
+    totalErpRaw: filteredVendedores.length,
+    activosRealesUnicos: activos,
+    rutasComercialesActivas: activos,
+    porSede,
+  };
 }
 
 /**
@@ -777,15 +875,34 @@ export function createMasterDataErpHandlers(
         const soloActivos = parseBoolParam(req.query.soloActivos, false);
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
-        const regiones = snap.regiones ?? [];
-        const productos = (snap.productos ?? []).filter((p) => !soloActivos || p.activo);
-        const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
+        const isGlobal = isGlobalMasterActor(actor);
+        const allRegiones = snap.regiones ?? [];
+        const regionFilter = isGlobal
+          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? null)
+          : scope.region;
+
+        const authRegionId = resolveAuthorizedRegionIdFilter({
+          actor,
+          scopeRegion: regionFilter,
+          rawRequestedRegionId: req.query.regionId,
+          regiones: allRegiones,
+        });
+        if (!authRegionId.ok) {
+          res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
+          return;
+        }
+
         const regionIdFilter =
-          typeof req.query.regionId === 'string' && req.query.regionId.trim()
-            ? req.query.regionId.trim()
-            : regionFilter
-              ? regiones.find((r) => r.codigo === regionFilter)?.id ?? null
-              : null;
+          authRegionId.regionId ??
+          (regionFilter
+            ? allRegiones.find((r) => normalizeRegionName(r.codigo) === regionFilter)?.id ?? null
+            : null);
+
+        // Aislamiento estricto: actores regionales solo reciben su región en `data.regiones` y métricas.
+        const regiones = !isGlobal && regionFilter
+          ? allRegiones.filter((r) => normalizeRegionName(r.codigo) === regionFilter)
+          : allRegiones;
+        const productos = (snap.productos ?? []).filter((p) => !soloActivos || p.activo);
 
         const clientes = filterNormalizedErpClientes(snap.clientes, {
           soloActivos,
@@ -820,6 +937,22 @@ export function createMasterDataErpHandlers(
           (c) => c.latitud !== null && c.longitud !== null
         ).length;
 
+        const resumenRegionalScoped =
+          !isGlobal && regionFilter
+            ? (snap.resumenRegional ?? []).filter((r) => r.region === regionFilter)
+            : (snap.resumenRegional ?? []);
+        const sedesResumenScoped = !isGlobal
+          ? filterSedesResumenForRegion(snap.sedesResumen, regionFilter, scope.sucursal)
+          : snap.sedesResumen;
+        const vendedoresAuditoriaScoped = !isGlobal
+          ? filterVendedoresAuditoriaForScope(
+              snap.vendedoresAuditoria,
+              vendedores,
+              regionFilter,
+              scope.sucursal
+            )
+          : snap.vendedoresAuditoria;
+
         res.setHeader('Cache-Control', 'private, max-age=30');
         res.status(200).json({
           source: snap.source,
@@ -838,9 +971,9 @@ export function createMasterDataErpHandlers(
             zonas: zonas.length,
             vendedores: vendedores.length,
           },
-          resumenRegional: snap.resumenRegional ?? [],
-          sedesResumen: snap.sedesResumen,
-          vendedoresAuditoria: snap.vendedoresAuditoria,
+          resumenRegional: resumenRegionalScoped,
+          sedesResumen: sedesResumenScoped,
+          vendedoresAuditoria: vendedoresAuditoriaScoped,
           data: {
             regiones,
             productos,
@@ -869,11 +1002,24 @@ export function createMasterDataErpHandlers(
         return;
       }
 
+      const scope = resolveAuthorizedSucursalScope(actor, req.query.sucursal, req.query.region);
+      if (!scope.ok) {
+        res.status(scope.status).json({ error: scope.error, code: scope.code });
+        return;
+      }
+
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const soloActivas = parseBoolParam(req.query.soloActivas, false);
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
-        const regiones = (snap.regiones ?? []).filter((r) => !soloActivas || r.activo);
+        const isGlobal = isGlobalMasterActor(actor);
+        const regiones = (snap.regiones ?? []).filter((r) => {
+          if (soloActivas && !r.activo) return false;
+          if (!isGlobal && scope.region) {
+            return normalizeRegionName(r.codigo) === scope.region;
+          }
+          return true;
+        });
 
         res.setHeader('Cache-Control', 'private, max-age=60');
         res.status(200).json({
@@ -953,11 +1099,21 @@ export function createMasterDataErpHandlers(
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
-        const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
-        const regionIdFilter =
-          typeof req.query.regionId === 'string' && req.query.regionId.trim()
-            ? req.query.regionId.trim()
-            : null;
+        const isGlobal = isGlobalMasterActor(actor);
+        const regionFilter = isGlobal
+          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? null)
+          : scope.region;
+        const authRegionId = resolveAuthorizedRegionIdFilter({
+          actor,
+          scopeRegion: regionFilter,
+          rawRequestedRegionId: req.query.regionId,
+          regiones: snap.regiones ?? [],
+        });
+        if (!authRegionId.ok) {
+          res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
+          return;
+        }
+        const regionIdFilter = authRegionId.regionId;
 
         const filtered = (snap.supervisores ?? []).filter((s) => {
           if (soloActivos && !s.activo) return false;
@@ -1006,11 +1162,21 @@ export function createMasterDataErpHandlers(
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
-        const regionFilter = scope.region ?? parseOptionalRegionParam(req.query.region) ?? null;
-        const regionIdFilter =
-          typeof req.query.regionId === 'string' && req.query.regionId.trim()
-            ? req.query.regionId.trim()
-            : null;
+        const isGlobal = isGlobalMasterActor(actor);
+        const regionFilter = isGlobal
+          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? null)
+          : scope.region;
+        const authRegionId = resolveAuthorizedRegionIdFilter({
+          actor,
+          scopeRegion: regionFilter,
+          rawRequestedRegionId: req.query.regionId,
+          regiones: snap.regiones ?? [],
+        });
+        if (!authRegionId.ok) {
+          res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
+          return;
+        }
+        const regionIdFilter = authRegionId.regionId;
 
         const filtered = (snap.promotoras ?? []).filter((p) => {
           if (soloActivas && !p.activo) return false;
@@ -1161,13 +1327,28 @@ export function createMasterDataErpHandlers(
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
-        const explicitRegion = parseOptionalRegionParam(req.query.region);
+        const isGlobal = isGlobalMasterActor(actor);
+        const explicitRegion = isGlobal ? parseOptionalRegionParam(req.query.region) : null;
+        const effectiveRegion = isGlobal
+          ? (explicitRegion ?? (!scope.sucursal ? scope.region ?? undefined : undefined))
+          : (scope.region ?? undefined);
+
+        const authRegionId = resolveAuthorizedRegionIdFilter({
+          actor,
+          scopeRegion: effectiveRegion ?? null,
+          rawRequestedRegionId: req.query.regionId,
+          regiones: snap.regiones ?? [],
+        });
+        if (!authRegionId.ok) {
+          res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
+          return;
+        }
 
         const filtered = filterNormalizedErpClientes(snap.clientes, {
           soloActivos: parseBoolParam(req.query.soloActivos, true),
-          sucursal: explicitRegion ? undefined : scope.sucursal,
-          region: explicitRegion ?? (!scope.sucursal ? scope.region ?? undefined : undefined),
-          regionId: typeof req.query.regionId === 'string' ? req.query.regionId : undefined,
+          sucursal: effectiveRegion ? undefined : scope.sucursal,
+          region: effectiveRegion,
+          regionId: !effectiveRegion ? (authRegionId.regionId ?? undefined) : undefined,
           zona: typeof req.query.zona === 'string' ? req.query.zona : undefined,
           ruta: typeof req.query.ruta === 'string' ? req.query.ruta : undefined,
           vendedorId: typeof req.query.vendedorId === 'string' ? req.query.vendedorId : undefined,
@@ -1178,18 +1359,25 @@ export function createMasterDataErpHandlers(
         });
 
         const conGps = filtered.filter((c) => c.activo && c.latitud !== null && c.longitud !== null).length;
+        const sedesResumenScoped = isGlobal
+          ? (scope.sucursal
+              ? snap.sedesResumen.filter((s) => s.sucursal === scope.sucursal)
+              : snap.sedesResumen)
+          : filterSedesResumenForRegion(snap.sedesResumen, effectiveRegion ?? null, scope.sucursal);
+        const resumenRegionalScoped =
+          !isGlobal && effectiveRegion
+            ? (snap.resumenRegional ?? []).filter((r) => r.region === effectiveRegion)
+            : (snap.resumenRegional ?? []);
 
         res.setHeader('Cache-Control', 'private, max-age=30');
         res.status(200).json({
           source: snap.source,
-          region: explicitRegion ?? scope.region ?? 'ALL',
+          region: effectiveRegion ?? scope.region ?? 'ALL',
           sucursal: scope.sucursal ?? 'ALL',
           total: filtered.length,
           conGps,
-          sedesResumen: scope.sucursal
-            ? snap.sedesResumen.filter((s) => s.sucursal === scope.sucursal)
-            : snap.sedesResumen,
-          resumenRegional: snap.resumenRegional ?? [],
+          sedesResumen: sedesResumenScoped,
+          resumenRegional: resumenRegionalScoped,
           data: filtered,
         });
       } catch (err) {
@@ -1218,25 +1406,49 @@ export function createMasterDataErpHandlers(
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
-        const explicitRegion = parseOptionalRegionParam(req.query.region);
+        const isGlobal = isGlobalMasterActor(actor);
+        const explicitRegion = isGlobal ? parseOptionalRegionParam(req.query.region) : null;
+        const effectiveRegion = isGlobal
+          ? (explicitRegion ?? (!scope.sucursal ? scope.region ?? undefined : undefined))
+          : (scope.region ?? undefined);
+
+        const authRegionId = resolveAuthorizedRegionIdFilter({
+          actor,
+          scopeRegion: effectiveRegion ?? null,
+          rawRequestedRegionId: req.query.regionId,
+          regiones: snap.regiones ?? [],
+        });
+        if (!authRegionId.ok) {
+          res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
+          return;
+        }
 
         const filtered = filterNormalizedErpVendedores(snap.vendedores, {
           soloActivos: parseBoolParam(req.query.soloActivos, true),
-          sucursal: explicitRegion ? undefined : scope.sucursal,
-          region: explicitRegion ?? (!scope.sucursal ? scope.region ?? undefined : undefined),
-          regionId: typeof req.query.regionId === 'string' ? req.query.regionId : undefined,
+          sucursal: effectiveRegion ? undefined : scope.sucursal,
+          region: effectiveRegion,
+          regionId: !effectiveRegion ? (authRegionId.regionId ?? undefined) : undefined,
           zona: typeof req.query.zona === 'string' ? req.query.zona : undefined,
           supervisor: typeof req.query.supervisor === 'string' ? req.query.supervisor : undefined,
           busqueda: typeof req.query.busqueda === 'string' ? req.query.busqueda : undefined,
         });
 
+        const auditoriaScoped = !isGlobal
+          ? filterVendedoresAuditoriaForScope(
+              snap.vendedoresAuditoria,
+              filtered,
+              effectiveRegion ?? null,
+              scope.sucursal
+            )
+          : snap.vendedoresAuditoria;
+
         res.setHeader('Cache-Control', 'private, max-age=30');
         res.status(200).json({
           source: snap.source,
-          region: explicitRegion ?? scope.region ?? 'ALL',
+          region: effectiveRegion ?? scope.region ?? 'ALL',
           sucursal: scope.sucursal ?? 'ALL',
           total: filtered.length,
-          auditoria: snap.vendedoresAuditoria,
+          auditoria: auditoriaScoped,
           data: filtered,
         });
       } catch (err) {
@@ -1265,12 +1477,25 @@ export function createMasterDataErpHandlers(
       try {
         const forceRefresh = parseBoolParam(req.query.forzarRefresco, false);
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
-        const resumen = scope.sucursal
-          ? snap.sedesResumen.filter((s) => s.sucursal === scope.sucursal)
-          : snap.sedesResumen;
+        const isGlobal = isGlobalMasterActor(actor);
+        const resumen = !isGlobal
+          ? filterSedesResumenForRegion(snap.sedesResumen, scope.region, scope.sucursal)
+          : scope.sucursal
+            ? snap.sedesResumen.filter((s) => s.sucursal === scope.sucursal)
+            : snap.sedesResumen;
         const regionesResumen = scope.region
           ? (snap.resumenRegional ?? []).filter((r) => r.region === scope.region)
           : (snap.resumenRegional ?? []);
+        const totalActivos = resumen.reduce((acc, s) => acc + s.activos, 0);
+        const totalClientes = resumen.reduce((acc, s) => acc + s.total, 0);
+        const scopedCounts = isGlobal
+          ? snap.countsExact
+          : {
+              ...snap.countsExact,
+              clientesTotal: totalClientes,
+              clientesActivos: totalActivos,
+              regiones: regionesResumen.length,
+            };
 
         res.setHeader('Cache-Control', 'private, max-age=30');
         res.status(200).json({
@@ -1279,9 +1504,9 @@ export function createMasterDataErpHandlers(
           sucursal: scope.sucursal ?? 'ALL',
           sedes: resumen,
           regiones: regionesResumen,
-          counts: snap.countsExact,
-          totalActivos: resumen.reduce((acc, s) => acc + s.activos, 0),
-          totalClientes: resumen.reduce((acc, s) => acc + s.total, 0),
+          counts: scopedCounts,
+          totalActivos,
+          totalClientes,
         });
       } catch (err) {
         sendMasterDataErrorResponse(

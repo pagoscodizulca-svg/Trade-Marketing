@@ -190,6 +190,12 @@ export interface AppContextType {
   currentUser: User | null;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
+  /** Rol autorizado del usuario autenticado (ej. `'coordinador_trade'`, `'super_admin'`, `'promotora'`) */
+  role: string | null;
+  /** Región operativa asignada en formato legible (`'Occidente' | 'Valencia' | null` para Admin Global) */
+  assignedRegion: 'Occidente' | 'Valencia' | null;
+  /** Verdadero cuando la sesión está restringida estrictamente a una región (ej. Grecia -> Occidente) */
+  isRegionalRestricted: boolean;
   /** Rol IAM verificado en public.profiles ('super_admin' | 'contraloria' | 'coordinacion' | 'vendedor' | 'promotora' | 'cliente' | 'chofer' | null) */
   verifiedIamRole: ManagedUserRole | null;
   /** Sede verificada en public.profiles ('ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | 'GLOBAL' | null) */
@@ -508,9 +514,11 @@ export const AppProvider: React.FC<{
     email: string;
     displayName: string;
     appRole?: string | null;
+    rawAppRole?: string | null;
     iamRole?: ManagedUserRole | null;
     sucursal?: SucursalCodigo | null;
     regionId?: string | null;
+    regionLabel?: 'Occidente' | 'Valencia' | null;
     legacyRole: UserRole;
   } | null;
 }> = ({ children, verifiedProfile = null }) => {
@@ -555,6 +563,12 @@ export const AppProvider: React.FC<{
           (verifiedSucursal === 'GLOBAL' || verifiedSucursal === null)))
   );
 
+  const isRegionalRestricted = Boolean(verifiedProfile && !canSwitchSucursal);
+
+  const role: string | null = verifiedProfile
+    ? (verifiedProfile.rawAppRole || verifiedIamRole || verifiedProfile.appRole || null)
+    : null;
+
   const lockedRegionalSucursal: OperativeSucursal | null =
     !canSwitchSucursal && verifiedSucursal && isOperativeSucursal(verifiedSucursal)
       ? verifiedSucursal
@@ -567,8 +581,39 @@ export const AppProvider: React.FC<{
       const norm = hit ? normalizeRegionName(hit.codigo) : null;
       if (norm) return norm;
     }
+    if (verifiedProfile?.regionLabel) {
+      const norm = normalizeRegionName(verifiedProfile.regionLabel);
+      if (norm) return norm;
+    }
     return normalizeRegionName(verifiedSucursal);
-  }, [canSwitchSucursal, verifiedRegionId, activeRegiones, verifiedSucursal]);
+  }, [canSwitchSucursal, verifiedRegionId, activeRegiones, verifiedProfile?.regionLabel, verifiedSucursal]);
+
+  const assignedRegion: 'Occidente' | 'Valencia' | null = useMemo(() => {
+    if (!isRegionalRestricted) return null;
+    if (verifiedProfile?.regionLabel === 'Occidente' || verifiedProfile?.regionLabel === 'Valencia') {
+      return verifiedProfile.regionLabel;
+    }
+    if (lockedRegionalOfficial === 'OCCIDENTE' || lockedRegionalSucursal === 'ZULIA') {
+      return 'Occidente';
+    }
+    if (
+      lockedRegionalOfficial === 'CENTRO' ||
+      lockedRegionalSucursal === 'VALENCIA' ||
+      lockedRegionalSucursal === 'CENTRO' ||
+      lockedRegionalSucursal === 'CAPITAL'
+    ) {
+      return 'Valencia';
+    }
+    return null;
+  }, [isRegionalRestricted, verifiedProfile?.regionLabel, lockedRegionalOfficial, lockedRegionalSucursal]);
+
+  const scopedActiveRegiones: ActiveRegionItem[] = useMemo(() => {
+    if (!isRegionalRestricted || !lockedRegionalOfficial) return activeRegiones;
+    const matched = activeRegiones.filter(
+      (r) => normalizeRegionName(r.codigo) === lockedRegionalOfficial
+    );
+    return matched.length > 0 ? matched : activeRegiones;
+  }, [activeRegiones, isRegionalRestricted, lockedRegionalOfficial]);
 
   const activeRegionScope: AllowedRegionCode | 'ALL' | null = canSwitchSucursal
     ? selectedNationalRegionScope
@@ -602,6 +647,8 @@ export const AppProvider: React.FC<{
 
   const activeSucursalRef = useRef<OperativeSucursal | null>(activeSucursal);
   activeSucursalRef.current = activeSucursal;
+  const assignedRegionRef = useRef<'Occidente' | 'Valencia' | null>(assignedRegion);
+  assignedRegionRef.current = assignedRegion;
   const requiresSucursalSelectionRef = useRef<boolean>(requiresSucursalSelection);
   requiresSucursalSelectionRef.current = requiresSucursalSelection;
 
@@ -1034,7 +1081,9 @@ export const AppProvider: React.FC<{
     setIsLoadingSupabase(true);
     setSupabaseError(null);
     try {
-      const bundle = await fetchAllModule1FromSupabase();
+      const bundle = await fetchAllModule1FromSupabase(undefined, {
+        assignedRegion: assignedRegionRef.current,
+      });
       setModule1Bundle(bundle);
 
       // Sincronizar exclusivamente promotoras activas reales (Plantilla Fija + Eventual) desde Supabase
@@ -2917,10 +2966,13 @@ export const AppProvider: React.FC<{
         currentUser,
         currentRole,
         setCurrentRole,
+        role,
+        assignedRegion,
+        isRegionalRestricted,
         verifiedIamRole,
         verifiedSucursal,
         verifiedRegionId,
-        activeRegiones,
+        activeRegiones: scopedActiveRegiones,
         activeRegionScope,
         setActiveRegionScope,
         activeSucursal,

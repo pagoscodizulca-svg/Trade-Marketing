@@ -30,6 +30,8 @@ import {
 } from '../../services/supabaseClient';
 import { hasAssignedRegionalScope } from '../../utils/permissions';
 import { purgeAllSessionCaches } from '../../services/sessionCacheHygiene';
+import { clearMasterCatalogCaches } from '../../services/masterCatalogSyncService';
+import { clearMasterDataCaches } from '../../services/masterDataSyncService';
 import { UnassignedRegionGate } from './UnassignedRegionGate';
 
 interface TradeAuthGateProps {
@@ -157,6 +159,8 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
     const { data: sub } = client.auth.onAuthStateChange(async (event, session) => {
       if (!active) return;
       if (event === 'SIGNED_OUT' || !session) {
+        clearMasterDataCaches();
+        clearMasterCatalogCaches();
         void purgeAllSessionCaches({
           reason: event === 'SIGNED_OUT' ? 'sign_out' : 'token_expired',
           preserveAuthSession: false,
@@ -164,6 +168,11 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
         setProfile(null);
         setChecking(false);
         return;
+      }
+
+      if (event === 'SIGNED_IN') {
+        clearMasterDataCaches();
+        clearMasterCatalogCaches();
       }
 
       const resolved = await resolveVerifiedProfileWithStaffFallback(session);
@@ -200,6 +209,8 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
     setSubmitting(true);
 
     try {
+      clearMasterDataCaches();
+      clearMasterCatalogCaches();
       const { profile: authenticated } = await signInWithSupabaseCredentials(
         normalizedIdentifier,
         password

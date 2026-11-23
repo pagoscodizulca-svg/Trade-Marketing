@@ -144,6 +144,18 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
           : null;
 
     if (!effectiveCanSwitch) {
+      const rawLocked =
+        appCtx?.assignedRegion ?? activeDisplayLabel.replace(/^Regi[oó]n\s+/i, '');
+      const cleanLockedLabel =
+        rawLocked.toUpperCase() === 'OCCIDENTE'
+          ? 'Occidente'
+          : rawLocked.toUpperCase() === 'VALENCIA'
+            ? 'Valencia'
+            : rawLocked.toUpperCase() === 'CENTRO'
+              ? 'Centro'
+              : rawLocked.toUpperCase() === 'ANDES'
+                ? 'Andes'
+                : rawLocked;
       return (
         <div
           data-testid="region-bar-selector"
@@ -152,10 +164,10 @@ export const RegionGateSelector: React.FC<RegionGateSelectorProps> = ({
           <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
             <div
               data-testid="region-bar-locked-badge"
-              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-red-500/40 text-white font-semibold"
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-600/15 border border-red-500/45 text-white font-bold shadow-sm shadow-red-950/40"
             >
               <Lock className="w-3.5 h-3.5 text-red-500 shrink-0" />
-              <span>Región asignada por correo: {activeDisplayLabel}</span>
+              <span>Región: {cleanLockedLabel}</span>
             </div>
 
             <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">

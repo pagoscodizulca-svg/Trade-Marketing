@@ -278,14 +278,21 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
   );
 
   const lockedRegionalLabel = useMemo(() => {
+    if (appCtx?.assignedRegion) {
+      return `Región: ${appCtx.assignedRegion}`;
+    }
     if (verifiedRegionId && regionesById.has(verifiedRegionId)) {
-      return `Sucursal ${regionesById.get(verifiedRegionId)!.nombre}`;
+      const regName = regionesById.get(verifiedRegionId)!.nombre;
+      return `Región: ${regName}`;
+    }
+    if (verifiedSucursal === 'ZULIA') {
+      return 'Región: Occidente';
     }
     if (verifiedSucursal && isOperativeSucursal(verifiedSucursal)) {
       return SUCURSAL_LABELS[verifiedSucursal];
     }
-    return 'Sucursal Asignada';
-  }, [verifiedRegionId, verifiedSucursal, regionesById]);
+    return 'Región Asignada';
+  }, [appCtx?.assignedRegion, verifiedRegionId, verifiedSucursal, regionesById]);
 
   const quarantinedCounts = useMemo(() => {
     const cliQ = clientes.filter((c) => isRecordQuarantined(c)).length;
@@ -586,12 +593,21 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
     setPromModalError(null);
     setBusyKey('save_prom');
     try {
-      const targetRegion = regionesById.get(promRegionId);
+      const targetRegion = regionesById.get(isSuperAdmin ? promRegionId : (verifiedRegionId || ''));
       const sucursal = targetRegion
         ? (normalizeSucursalCodigo(targetRegion.codigo) as OperativeSucursal | null)
         : isOperativeSucursal(verifiedSucursal)
           ? verifiedSucursal
           : null;
+      const officialRegionLabel: 'Occidente' | 'Valencia' | undefined = !isSuperAdmin
+        ? (appCtx?.assignedRegion ?? (sucursal === 'VALENCIA' || sucursal === 'CENTRO' ? 'Valencia' : 'Occidente'))
+        : targetRegion
+          ? (normalizeRegionName(targetRegion.codigo) === 'CENTRO' ? 'Valencia' : 'Occidente')
+          : sucursal === 'VALENCIA' || sucursal === 'CENTRO'
+            ? 'Valencia'
+            : sucursal === 'ZULIA'
+              ? 'Occidente'
+              : undefined;
       await guardarPromotoraMaestra({
         id: editingPromId,
         nombre_completo: promNombre,
@@ -600,6 +616,7 @@ export const MasterEntitiesSyncPanel: React.FC<MasterEntitiesSyncPanelProps> = (
         ciudad: promCiudad || null,
         direccion: promCiudad || null,
         categoria: promCategoria,
+        region: officialRegionLabel,
         region_id: isSuperAdmin ? promRegionId || null : verifiedRegionId,
         sucursal,
         supervisor_id: promSupervisorId || null,

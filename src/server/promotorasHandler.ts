@@ -250,10 +250,26 @@ function resolveActorAllowedRegion(req: Request): {
   if (isGlobal) {
     return { isGlobal: true, assignedRegion: null };
   }
-  const assignedRegion = mapLegacySucursalToAllowedRegion(
-    user.activeSucursalHeader ?? user.sucursal
-  );
+  // Seguridad estricta: para actores regionales SIEMPRE usar `user.sucursal` verificada en servidor,
+  // jamás `user.activeSucursalHeader` enviada por el cliente.
+  const assignedRegion = mapLegacySucursalToAllowedRegion(user.sucursal);
   return { isGlobal: false, assignedRegion };
+}
+
+function extractRequestedHeaderRegion(req: Request): AllowedRegionCode | null {
+  const rawSuc = req.headers?.['x-sucursal-activa'];
+  const rawReg = req.headers?.['x-region-activa'];
+  const rawVal = Array.isArray(rawReg)
+    ? rawReg[0]
+    : typeof rawReg === 'string' && rawReg.trim()
+      ? rawReg
+      : Array.isArray(rawSuc)
+        ? rawSuc[0]
+        : typeof rawSuc === 'string'
+          ? rawSuc
+          : '';
+  if (!rawVal || !rawVal.trim()) return null;
+  return mapLegacySucursalToAllowedRegion(rawVal);
 }
 
 export function createPromotorasHandlers(options?: {
@@ -303,6 +319,14 @@ export function createPromotorasHandlers(options?: {
         });
         return;
       }
+      const headerRegion = extractRequestedHeaderRegion(req);
+      if (headerRegion && headerRegion !== actorScope.assignedRegion) {
+        res.status(403).json({
+          error: `Acceso denegado: tu perfil de ${actorScope.assignedRegion} no puede operar sobre ${headerRegion}.`,
+          code: 'FORBIDDEN_REGION_ACCESS',
+        });
+        return;
+      }
       if (parsed.data.region !== 'TODAS' && parsed.data.region !== actorScope.assignedRegion) {
         res.status(403).json({
           error: `Acceso denegado: tu perfil de ${actorScope.assignedRegion} no puede consultar promotoras de ${parsed.data.region}.`,
@@ -330,7 +354,18 @@ export function createPromotorasHandlers(options?: {
             : undefined;
 
       let effectiveRegionId = parsed.data.regionId;
-      if (!effectiveRegionId && effectiveRegion) {
+      if (!actorScope.isGlobal && actorScope.assignedRegion) {
+        const assignedRegionId =
+          (await gateway.resolveRegionIdByCode(actorScope.assignedRegion)) ?? undefined;
+        if (parsed.data.regionId && (!assignedRegionId || parsed.data.regionId !== assignedRegionId)) {
+          res.status(403).json({
+            error: `Acceso denegado: tu perfil de ${actorScope.assignedRegion} no puede consultar promotoras de otra región.`,
+            code: 'FORBIDDEN_REGION_ACCESS',
+          });
+          return;
+        }
+        effectiveRegionId = assignedRegionId;
+      } else if (!effectiveRegionId && effectiveRegion) {
         effectiveRegionId = (await gateway.resolveRegionIdByCode(effectiveRegion)) ?? undefined;
       }
 
@@ -416,11 +451,23 @@ export function createPromotorasHandlers(options?: {
 
     try {
       let resolvedRegionId = parsed.data.region_id ?? null;
-      if (!resolvedRegionId && targetRegion) {
+      if (!actorScope.isGlobal && actorScope.assignedRegion) {
+        const assignedRegionId = await gateway.resolveRegionIdByCode(actorScope.assignedRegion);
+        if (parsed.data.region_id && (!assignedRegionId || parsed.data.region_id !== assignedRegionId)) {
+          res.status(403).json({
+            error: `Acceso denegado: tu perfil de ${actorScope.assignedRegion} no puede crear promotoras en otra región.`,
+            code: 'FORBIDDEN_REGION_ACCESS',
+          });
+          return;
+        }
+        resolvedRegionId = assignedRegionId;
+      } else if (!resolvedRegionId && targetRegion) {
         resolvedRegionId = await gateway.resolveRegionIdByCode(targetRegion);
       }
 
       const legacySucursal = targetRegion ? mapAllowedRegionToLegacySucursal(targetRegion) : null;
+      const officialRegionLabel =
+        targetRegion === 'CENTRO' ? 'Valencia' : targetRegion === 'OCCIDENTE' ? 'Occidente' : null;
       const created = await gateway.createPromotora({
         nombre_completo: parsed.data.nombre_completo,
         email: parsed.data.email ?? null,
@@ -431,6 +478,7 @@ export function createPromotorasHandlers(options?: {
         categoria: parsed.data.categoria,
         supervisor_id: parsed.data.supervisor_id ?? null,
         activo: parsed.data.activo,
+        ...(officialRegionLabel ? { region: officialRegionLabel } : {}),
         ...(resolvedRegionId ? { region_id: resolvedRegionId } : {}),
         ...(legacySucursal ? { sucursal: legacySucursal } : {}),
       });
@@ -485,12 +533,17 @@ export function createPromotorasHandlers(options?: {
       const actorScope = resolveActorAllowedRegion(req);
       if (!actorScope.isGlobal) {
         const existingRegion = mapLegacySucursalToAllowedRegion(
-          existing.sucursal ?? existing.estado ?? existing.ciudad
+          existing.region ?? existing.sucursal ?? existing.estado ?? existing.ciudad ?? existing.direccion
         );
+        const assignedRegionId = actorScope.assignedRegion
+          ? await gateway.resolveRegionIdByCode(actorScope.assignedRegion)
+          : null;
         if (
           !actorScope.assignedRegion ||
-          (existingRegion && existingRegion !== actorScope.assignedRegion) ||
-          (parsed.data.region && parsed.data.region !== actorScope.assignedRegion)
+          !existingRegion ||
+          existingRegion !== actorScope.assignedRegion ||
+          (parsed.data.region && parsed.data.region !== actorScope.assignedRegion) ||
+          (parsed.data.region_id && (!assignedRegionId || parsed.data.region_id !== assignedRegionId))
         ) {
           res.status(403).json({
             error: 'Acceso denegado por aislamiento regional.',

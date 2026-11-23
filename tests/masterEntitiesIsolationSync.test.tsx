@@ -347,7 +347,7 @@ test('Escenario Adversario 1 (Coordinadora Zulia) · Solo ve Zulia + productos e
     />
   );
   assert.match(prodHtml, /data-testid="master-locked-region-badge"/);
-  assert.match(prodHtml, /Sucursal Zulia/);
+  assert.match(prodHtml, /Región:\s*(Occidente|Zulia)/i);
   assert.match(prodHtml, /data-testid="productos-readonly-badge"/);
   assert.match(prodHtml, /Mortadela Especial Asturias 0\.900kg/);
   assert.match(prodHtml, /Jamón Cocido Superior Asturias 2\.5kg/);
@@ -395,7 +395,7 @@ test('Escenario Adversario 2 (Otra Sucursal: Valencia) · Solo ve Valencia + pro
       }}
     />
   );
-  assert.match(cliHtml, /Sucursal Valencia/);
+  assert.match(cliHtml, /Región:\s*Valencia/i);
   assert.match(cliHtml, /AUTOMERCADO NAGUANAGUA CENTRAL/);
   assert.ok(!cliHtml.includes('HIPERMERCADO MARACAIBO NORTE'), 'Valencia JAMÁS debe ver clientes de Zulia');
   assert.ok(!cliHtml.includes('COMERCIAL HISTÓRICO SIN REGIÓN'), 'Valencia JAMÁS debe ver cuarentena');

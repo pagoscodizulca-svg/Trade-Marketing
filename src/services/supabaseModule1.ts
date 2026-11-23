@@ -1082,7 +1082,57 @@ async function fetchAsistenciaEvidenciasSafe(): Promise<{
   }
 }
 
-export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: number): Promise<Module1SupabaseBundle> {
+function matchesAssignedRegionForExternalFdvRow(
+  row: RawSupabaseSurvey,
+  assignedRegion?: 'Occidente' | 'Valencia' | null
+): boolean {
+  if (!assignedRegion) return true;
+  const parsed = safeParseJson<Record<string, unknown>>(row.comments);
+  const rawTokens = [
+    (row as unknown as Record<string, unknown>).region,
+    (row as unknown as Record<string, unknown>).sucursal,
+    parsed.region,
+    parsed.sucursal,
+    parsed.sede,
+    parsed.estado,
+    parsed.ciudad,
+    parsed.zona,
+    parsed.route,
+    parsed.ruta,
+    row.store,
+  ]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const isExplicitValencia =
+    /\b(valencia|carabobo|tocuyito|los guayos|naguanagua|san diego|guacara|maracay|turmero|aragua|caracas|distrito capital|miranda|centro)\b/.test(
+      rawTokens
+    );
+  const isExplicitOccidente =
+    /\b(occidente|zulia|maracaibo|san francisco|cabimas|coro|punto fijo|falcon|trujillo|valera|la villa|mara|ciudad ojeda|lagunillas)\b/.test(
+      rawTokens
+    );
+
+  if (assignedRegion === 'Occidente') {
+    if (isExplicitValencia && !isExplicitOccidente) return false;
+    return true;
+  }
+  if (assignedRegion === 'Valencia') {
+    if (isExplicitOccidente && !isExplicitValencia) return false;
+    return isExplicitValencia;
+  }
+  return true;
+}
+
+export async function fetchAllModule1FromSupabase(
+  explicitExchangeRateBs?: number,
+  options?: { assignedRegion?: 'Occidente' | 'Valencia' | null }
+): Promise<Module1SupabaseBundle> {
+  const assignedRegion = options?.assignedRegion ?? null;
   // Sin tasa de respaldo: si no se puede obtener en vivo, es null y los importes en Bs no se calculan.
   const liveBcvRate: number | null =
     explicitExchangeRateBs && explicitExchangeRateBs > 50 ? explicitExchangeRateBs : await fetchLiveBcvRate();
@@ -1348,9 +1398,13 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
     void renderReconciliationPromise
       .then((lateRenderRows) => {
         if (!Array.isArray(lateRenderRows) || lateRenderRows.length === 0) return;
+        const scopedLateRows = lateRenderRows.filter((r) =>
+          matchesAssignedRegionForExternalFdvRow(r, assignedRegion)
+        );
+        if (scopedLateRows.length === 0) return;
         const { renderOnlyRows } = mergeSupabaseAndRenderDegustacionRows(
           cleanDegustacionSurveys,
-          lateRenderRows
+          scopedLateRows
         );
         for (const newRow of renderOnlyRows) {
           emitLocalDegustacionSurveyEvent('INSERT', newRow);
@@ -1364,9 +1418,12 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
   // --------------------------------------------------------------------------
   // 1. DEGUSTACIONES (surveys where type = 'Degustacion' + reconciliación Render FDV) + VISITS PARA MÓDULO 2
   // --------------------------------------------------------------------------
+  const scopedRenderDegustacionRows = (rawRenderDegustacionRowsFast ?? []).filter((r) =>
+    matchesAssignedRegionForExternalFdvRow(r, assignedRegion)
+  );
   const { mergedRows: degustacionSurveys } = mergeSupabaseAndRenderDegustacionRows(
     cleanDegustacionSurveys,
-    rawRenderDegustacionRowsFast ?? []
+    scopedRenderDegustacionRows
   );
   const tastingItems: TastingScheduleItem[] = [];
   const visitsForSchedule: ScheduledVisit[] = [];
@@ -3919,6 +3976,7 @@ export async function createSupabaseInventoryRecord(params: {
   finalQuantity: number;
   degustations: number;
   comments: string;
+  region?: 'Occidente' | 'Valencia';
 }): Promise<RawSupabaseInventory | null> {
   const res = await supabaseFetch(`${SUPABASE_REST_URL}/inventory`, {
     method: 'POST',
@@ -3933,6 +3991,7 @@ export async function createSupabaseInventoryRecord(params: {
       finalQuantity: params.finalQuantity,
       degustations: params.degustations,
       comments: params.comments.trim(),
+      region: params.region ?? 'Occidente',
     }),
   });
   if (!res.ok) {
@@ -3985,6 +4044,8 @@ export async function saveSupabaseStaffMember(params: {
   status: 'Activo' | 'Inactivo';
   password?: string;
   photoUrl?: string;
+  region?: 'Occidente' | 'Valencia';
+  regionId?: string | null;
 }): Promise<{ id: string }> {
   const cleanId = String(params.id || '').trim();
   const isExistingRow = Boolean(cleanId && !cleanId.startsWith('stf_'));
@@ -4004,6 +4065,8 @@ export async function saveSupabaseStaffMember(params: {
       ciudad: String(params.address || '').trim() || null,
       categoria: mapStaffCategoryToPromotoraCategoria(params.category),
       activo: params.status === 'Activo',
+      ...(params.region ? { region: params.region } : {}),
+      ...(params.regionId ? { region_id: params.regionId } : {}),
     });
     return { id: String(saved.id) };
   };

@@ -76,17 +76,26 @@ function resolveClientOfficialRegionLabel(c: {
 const CLIENTES_PAGE_SIZE = 100;
 
 export const MasterDataManagementView: React.FC = () => {
-  const { masterData, verifiedSucursal, activeSucursal, activeRegionScope } = useApp();
-  const isGlobalUser = verifiedSucursal === 'GLOBAL';
+  const {
+    masterData,
+    verifiedSucursal,
+    activeSucursal,
+    activeRegionScope,
+    assignedRegion,
+    isRegionalRestricted,
+  } = useApp();
+  const isGlobalUser = verifiedSucursal === 'GLOBAL' && !isRegionalRestricted;
   const defaultRegionalBranch: SucursalMaestro =
     activeSucursal ??
     (verifiedSucursal && verifiedSucursal !== 'GLOBAL' ? verifiedSucursal : 'ZULIA');
   const activeRegionBadgeLabel: string =
-    activeRegionScope === 'ALL'
-      ? 'Todas las Regiones'
-      : activeRegionScope
-        ? activeRegionScope
-        : normalizeRegionName(activeSucursal ?? verifiedSucursal) ?? 'Todas las Regiones';
+    isRegionalRestricted && assignedRegion
+      ? `Región: ${assignedRegion}`
+      : activeRegionScope === 'ALL'
+        ? 'Todas las Regiones'
+        : activeRegionScope
+          ? activeRegionScope
+          : normalizeRegionName(activeSucursal ?? verifiedSucursal) ?? 'Todas las Regiones';
 
   const [subTab, setSubTab] = useState<MasterSubTab>('clientes');
   const [searchTerm, setSearchTerm] = useState('');

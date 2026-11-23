@@ -37,7 +37,8 @@
     "verify:pdf-autorizacion": "tsx scripts/verifyPendingAuthorizationPdf.ts",
     "verify:maestros": "tsx scripts/verifyMasterDataSync.ts",
     "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts",
-    "seed:promotoras": "tsx scripts/seed-promotoras.ts"
+    "seed:promotoras": "tsx scripts/seed-promotoras.ts",
+    "seed:coordinadora-occidente": "node scripts/seed-coordinadora-occidente.mjs"
   },
   "dependencies": {
     "@google/genai": "3.1.0",

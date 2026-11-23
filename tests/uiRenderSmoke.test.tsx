@@ -249,7 +249,7 @@ test('Compuerta G3/G4 · Smoke SSR de Renderizado UI + Invariantes de Seguridad 
     );
 
     assert.match(lockedBarHtml, /data-testid="region-bar-locked-badge"/);
-    assert.match(lockedBarHtml, /Región asignada por correo: Región OCCIDENTE/);
+    assert.match(lockedBarHtml, /Región:\s*Occidente/i);
     assert.ok(
       !lockedBarHtml.includes('data-testid="region-bar-select"'),
       'Sin selector desplegable en modo bloqueado'

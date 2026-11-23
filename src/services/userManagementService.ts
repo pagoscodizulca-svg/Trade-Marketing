@@ -166,7 +166,10 @@ export function normalizeManagedUserRole(rawRole: unknown): ManagedUserRole | nu
   }
   if (
     clean === 'coordinadora' ||
+    clean === 'coordinador' ||
     clean === 'coordinadora_trade' ||
+    clean === 'coordinador_trade' ||
+    clean === 'coordinador_regional' ||
     clean === 'jefe_trade' ||
     clean === 'supervisor' ||
     clean === 'supervisora' ||
@@ -216,14 +219,14 @@ export function normalizeSucursalCodigo(raw: unknown): SucursalCodigo | null {
     /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
     ''
   );
-  if (strippedPrefix === 'zulia') return 'ZULIA';
+  if (strippedPrefix === 'zulia' || strippedPrefix === 'occidente') return 'ZULIA';
   if (strippedPrefix === 'valencia') return 'VALENCIA';
   if (strippedPrefix === 'centro') return 'CENTRO';
   if (strippedPrefix === 'oriente') return 'ORIENTE';
   if (strippedPrefix === 'capital') return 'CAPITAL';
 
   if (
-    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+    /\b(occidente|zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira|coro|punto fijo|la villa)\b/.test(
       tokensText
     ) ||
     tokensText === 'col'

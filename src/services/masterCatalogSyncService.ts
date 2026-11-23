@@ -1017,7 +1017,16 @@ export async function guardarPromotoraMaestra(
   const telefonoClean = normalizarTelefonoMaestro(input.telefono);
   const direccionClean = asNullableString(input.direccion ?? input.ciudad);
 
-  // Esquema real de producción (`public.promotoras` ERP: id entero, correo, direccion, telefono, activo, categoria)
+  const cleanRegionLabel =
+    typeof input.region === 'string' && input.region.trim()
+      ? input.region.trim()
+      : input.sucursal === 'VALENCIA' || input.sucursal === 'CENTRO'
+        ? 'Valencia'
+        : input.sucursal === 'ZULIA'
+          ? 'Occidente'
+          : undefined;
+
+  // Esquema real de producción (`public.promotoras` ERP: id entero, correo, direccion, telefono, activo, categoria, region, region_id)
   const erpProdPayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     correo: emailClean,
@@ -1025,6 +1034,17 @@ export async function guardarPromotoraMaestra(
     direccion: direccionClean,
     activo: input.activo !== false,
     categoria: validatedCategoria,
+    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
+    ...(input.region_id ? { region_id: input.region_id } : {}),
+  };
+  const erpProdRegionOnlyPayload: Record<string, unknown> = {
+    nombre_completo: nombreCompleto,
+    correo: emailClean,
+    telefono: telefonoClean,
+    direccion: direccionClean,
+    activo: input.activo !== false,
+    categoria: validatedCategoria,
+    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
   };
   const erpProdMinimalPayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
@@ -1032,6 +1052,7 @@ export async function guardarPromotoraMaestra(
     telefono: telefonoClean,
     direccion: direccionClean,
     activo: input.activo !== false,
+    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
   };
 
   // Esquema normalizado extendido (`email`, `ciudad`, `estado`, `supervisor_id`, `region_id`, `sucursal`)
@@ -1044,6 +1065,7 @@ export async function guardarPromotoraMaestra(
     direccion: direccionClean,
     supervisor_id: input.supervisor_id ? limpiarCeldaTexto(input.supervisor_id) : null,
     activo: input.activo !== false,
+    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
     ...(input.region_id ? { region_id: input.region_id } : {}),
     ...(input.sucursal ? { sucursal: input.sucursal } : {}),
   };
@@ -1066,8 +1088,8 @@ export async function guardarPromotoraMaestra(
   // Si es actualización sobre ID numérico de producción (o alta sin region_id), intentar primero el esquema real ERP (`correo`)
   const attempts: Record<string, unknown>[] =
     isNumericId || (!isUpdate && !input.region_id)
-      ? [erpProdPayload, erpProdMinimalPayload, ...extendedAttempts]
-      : [...extendedAttempts, erpProdPayload, erpProdMinimalPayload];
+      ? [erpProdPayload, erpProdRegionOnlyPayload, erpProdMinimalPayload, ...extendedAttempts]
+      : [...extendedAttempts, erpProdPayload, erpProdRegionOnlyPayload, erpProdMinimalPayload];
 
   let result = await executeWrite(attempts[0]!);
   for (let i = 1; i < attempts.length && result.error && isMissingColumnDbError(result.error); i++) {
