@@ -817,6 +817,11 @@ function serveSpa(mountPath: string, distPath: string, label: string): void {
         if (base.endsWith('.webmanifest')) {
           res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
         }
+      } else if (
+        /^(favicon\.ico|codizulca-logo\.png)$/i.test(base) ||
+        filePath.includes(`${path.sep}icons${path.sep}`)
+      ) {
+        res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
       } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }

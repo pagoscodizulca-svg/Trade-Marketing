@@ -621,12 +621,17 @@ export async function resolveVerifiedProfileWithStaffFallback(
           iamRole === 'super_admin'
             ? []
             : (() => {
-                const fromProfile = extractAssignedRegionCodesList(
-                  iamProfile.regiones_asignadas,
+                const fromProfileArray = extractAssignedRegionCodesList(
+                  iamProfile.regiones_asignadas
+                );
+                if (fromProfileArray.length > 0) return fromProfileArray;
+                if (base.assignedRegions && base.assignedRegions.length > 0) {
+                  return base.assignedRegions;
+                }
+                return extractAssignedRegionCodesList(
+                  null,
                   iamProfile.region ?? sucursal
                 );
-                if (fromProfile.length > 0) return fromProfile;
-                return base.assignedRegions ?? [];
               })();
         const profileAssignedRegionLabels = profileAssignedRegions.map(formatOfficialRegionLabel);
 

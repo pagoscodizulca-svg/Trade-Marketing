@@ -11,14 +11,17 @@
  *  4. Recibe notificaciones Web Push (VAPID) para nuevas degustaciones creadas desde FDV.
  */
 
-const SHELL_CACHE = 'codizulca-trade-shell-v190';
+const SHELL_CACHE = 'codizulca-trade-shell-v322';
 const SHELL_URLS = [
   '/',
   '/portal',
   '/manifest.webmanifest',
+  '/favicon.ico',
   '/codizulca-logo.png',
+  '/icons/apple-touch-icon.png',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/icons/icon-maskable-512.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -104,6 +107,7 @@ self.addEventListener('fetch', (event) => {
   if (
     url.pathname.startsWith('/assets/') ||
     url.pathname.startsWith('/icons/') ||
+    url.pathname === '/favicon.ico' ||
     url.pathname === '/codizulca-logo.png' ||
     url.pathname === '/manifest.webmanifest'
   ) {

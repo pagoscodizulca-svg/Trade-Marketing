@@ -1,7 +1,8 @@
 {
-  "name": "RutaDegustación · Control de Entregas",
-  "short_name": "RutaDegust.",
-  "description": "Control de entregas de stands y productos de degustación en ruta (funciona sin conexión).",
+  "id": "/logistica/",
+  "name": "CODIZULCA C.A. · RutaDegustación",
+  "short_name": "CODIZULCA Ruta",
+  "description": "Control de entregas de stands y productos de degustación en ruta de CODIZULCA C.A. (funciona sin conexión).",
   "lang": "es",
   "dir": "ltr",
   "start_url": "/logistica/?modo=chofer",

@@ -359,7 +359,11 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 pb-2.5">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-2.5">
             <div className="cz-logo-badge w-11 h-11 rounded-xl bg-white p-1 grid place-items-center shrink-0 shadow">
-              <img src="/codizulca-logo.png" alt="Logo CODIZULCA C.A." className="w-full h-full object-contain" />
+              <img
+                src={`${import.meta.env.BASE_URL}codizulca-logo.png`}
+                alt="Logo CODIZULCA C.A."
+                className="w-full h-full object-contain"
+              />
             </div>
             <div className="min-w-0 flex-1 basis-40">
               <h1 className="text-base sm:text-lg font-extrabold leading-tight truncate tracking-tight">

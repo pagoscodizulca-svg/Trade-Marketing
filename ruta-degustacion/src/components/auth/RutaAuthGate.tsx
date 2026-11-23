@@ -50,7 +50,7 @@ export function RutaAuthGate({
           <div className="bg-ink px-6 py-5 border-b border-white/10 flex items-center gap-3.5">
             <div className="w-12 h-12 rounded-xl bg-white p-1.5 grid place-items-center shrink-0 shadow">
               <img
-                src="/codizulca-logo.png"
+                src={`${import.meta.env.BASE_URL}codizulca-logo.png`}
                 alt="Logo CODIZULCA C.A."
                 className="w-full h-full object-contain"
               />

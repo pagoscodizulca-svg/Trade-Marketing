@@ -308,9 +308,18 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
   if (checking) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 text-sm font-mono text-zinc-300">
-          <Loader2 className="w-5 h-5 text-red-500 animate-spin" />
-          <span>Validando sesión corporativa CODIZULCA...</span>
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-white p-2 flex items-center justify-center shadow-[0_6px_28px_rgba(220,38,38,0.3)] border border-white/90">
+            <img
+              src="/codizulca-logo.png"
+              alt="Logo CODIZULCA C.A."
+              className="w-full h-full object-contain"
+            />
+          </div>
+          <div className="flex items-center gap-2.5 text-sm font-mono text-zinc-300">
+            <Loader2 className="w-4 h-4 text-red-500 animate-spin" />
+            <span>Validando sesión corporativa CODIZULCA...</span>
+          </div>
         </div>
       </div>
     );
@@ -490,12 +499,16 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
       >
         <div className="max-w-md w-full rounded-2xl bg-zinc-950 border border-white/10 shadow-2xl p-6 sm:p-8 space-y-5">
           <div className="flex items-start gap-3.5">
-            <div className="w-11 h-11 rounded-xl bg-red-600/15 border border-red-500/30 flex items-center justify-center shrink-0">
-              <KeyRound className="w-5 h-5 text-red-400" />
+            <div className="w-12 h-12 rounded-xl bg-white p-1.5 flex items-center justify-center shrink-0 shadow-md">
+              <img
+                src="/codizulca-logo.png"
+                alt="Logo CODIZULCA C.A."
+                className="w-full h-full object-contain"
+              />
             </div>
             <div>
-              <span className="inline-block text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                Seguridad Corporativa · Primer Acceso
+              <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                <KeyRound className="w-3 h-3" /> Seguridad Corporativa · Primer Acceso
               </span>
               <h2 className="text-lg font-extrabold tracking-tight mt-1">
                 Actualiza tu contraseña

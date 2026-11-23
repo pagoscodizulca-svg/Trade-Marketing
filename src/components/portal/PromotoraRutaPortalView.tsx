@@ -984,9 +984,18 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   if (authChecking) {
     return (
       <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 text-sm font-mono text-zinc-300">
-          <Loader2 className="w-5 h-5 text-red-500 animate-spin" />
-          <span>Verificando acceso seguro...</span>
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-white p-2 flex items-center justify-center shadow-[0_6px_28px_rgba(220,38,38,0.3)] border border-white/90">
+            <img
+              src="/codizulca-logo.png"
+              alt="Logo CODIZULCA C.A."
+              className="w-full h-full object-contain"
+            />
+          </div>
+          <div className="flex items-center gap-2.5 text-sm font-mono text-zinc-300">
+            <Loader2 className="w-4 h-4 text-red-500 animate-spin" />
+            <span>Verificando acceso seguro CODIZULCA...</span>
+          </div>
         </div>
       </div>
     );
