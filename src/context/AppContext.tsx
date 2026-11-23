@@ -341,6 +341,7 @@ export interface AppContextType {
   batchFillClientsProductShift: (params: {
     storeIds: string[];
     product: string;
+    products?: string[];
     quantityInput: string;
     shift: ShiftType;
     dayLabel: string;
@@ -2402,6 +2403,7 @@ export const AppProvider: React.FC<{
   const batchFillClientsProductShift = async (params: {
     storeIds: string[];
     product: string;
+    products?: string[];
     quantityInput: string;
     shift: ShiftType;
     dayLabel: string;

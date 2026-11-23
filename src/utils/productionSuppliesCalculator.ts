@@ -179,6 +179,86 @@ export function calculateProductionSupplies(
 }
 
 /**
+ * Calcula y agrega de forma determinística los insumos de degustación cuando el usuario
+ * selecciona uno o múltiples productos en el Módulo 2 (`Cronograma`).
+ */
+export function calculateMultiProductSupplies(
+  rawProducts: readonly string[],
+  quantityInput: string | number,
+  targetSamples?: number
+): ProductionSuppliesResult {
+  const uniqueProducts = Array.from(
+    new Set(
+      rawProducts
+        .map((p) => String(p ?? '').trim())
+        .filter((p) => p.length > 0)
+    )
+  );
+
+  if (uniqueProducts.length <= 1) {
+    return calculateProductionSupplies(uniqueProducts[0] || 'MORTADELA', quantityInput, targetSamples);
+  }
+
+  const perProduct = uniqueProducts.map((prod) =>
+    calculateProductionSupplies(prod, quantityInput, undefined)
+  );
+
+  const mortadelaQty = +(
+    perProduct.reduce((acc, r) => acc + r.mortadelaQty, 0)
+  ).toFixed(2);
+  const espaldaQty = +(
+    perProduct.reduce((acc, r) => acc + r.espaldaQty, 0)
+  ).toFixed(2);
+  const arrozQty = +(
+    perProduct.reduce((acc, r) => acc + r.arrozQty, 0)
+  ).toFixed(2);
+  const azucarGrams = perProduct.reduce((acc, r) => acc + r.azucarGrams, 0);
+  const lecheGrams = perProduct.reduce((acc, r) => acc + r.lecheGrams, 0);
+  const plannedUnits = +(
+    perProduct.reduce((acc, r) => acc + r.plannedUnits, 0)
+  ).toFixed(2);
+
+  const combinedFocus = uniqueProducts.map((p) => p.toUpperCase()).join(' + ');
+  const primaryNormalized = perProduct[0]?.normalizedProduct || 'MORTADELA';
+  const hasVencampo = perProduct.some((r) => r.rowHighlight === 'green');
+
+  const estimatedPortions =
+    typeof targetSamples === 'number' && Number.isFinite(targetSamples) && targetSamples > 0
+      ? Math.min(MAX_OPERATIONAL_SAMPLES, Math.round(targetSamples))
+      : perProduct.reduce((acc, r) => acc + r.operationalSupplies.estimatedPortions, 0);
+  const servilletas = perProduct.reduce((acc, r) => acc + r.operationalSupplies.servilletas, 0);
+  const palillos = perProduct.reduce((acc, r) => acc + r.operationalSupplies.palillos, 0);
+  const envases = perProduct.reduce((acc, r) => acc + r.operationalSupplies.envases, 0);
+  const gramajeTotalG = perProduct.reduce((acc, r) => acc + r.operationalSupplies.gramajeTotalG, 0);
+
+  return {
+    normalizedProduct: primaryNormalized,
+    productFocus: combinedFocus,
+    fillProductSelection: combinedFocus,
+    fillQuantityInput: String(parseSafeQuantity(quantityInput)),
+    plannedUnits,
+    mortadelaQty,
+    espaldaQty,
+    arrozQty,
+    azucarGrams,
+    lecheGrams,
+    rowHighlight: hasVencampo ? 'green' : 'none',
+    additionalGoods: {
+      arrozKg: arrozQty,
+      azucarKg: +(azucarGrams / 1000).toFixed(3),
+      lecheKg: +(lecheGrams / 1000).toFixed(3),
+    },
+    operationalSupplies: {
+      servilletas,
+      palillos,
+      envases,
+      gramajeTotalG,
+      estimatedPortions,
+    },
+  };
+}
+
+/**
  * Normaliza un turno operativo hacia 'MAÑANA' o 'TARDE' para las columnas de la Matriz de Producción.
  */
 export function normalizeProductionShift(

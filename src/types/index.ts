@@ -58,7 +58,9 @@ export interface ScheduledVisit {
   storeId: string;
   storeName: string;
   zone: string;
-  productFocus: string; // 'MORTADELA', 'VENCAMPO', 'ESPALDA', etc.
+  productFocus: string; // 'MORTADELA', 'VENCAMPO', 'ESPALDA', o lista combinada de productos
+  /** Lista explícita de productos seleccionados para degustar en esta activación */
+  selectedProducts?: string[];
   promotoraId: string;
   promotoraName: string;
   sellerName: string;

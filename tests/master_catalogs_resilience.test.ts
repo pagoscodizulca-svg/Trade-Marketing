@@ -36,6 +36,8 @@ import {
   isValidServerServiceRoleKey,
 } from '../src/server/supabaseAdminAuth';
 import { registerMasterDataErpRoutes } from '../server';
+import { calculateMultiProductSupplies } from '../src/utils/productionSuppliesCalculator';
+import { buildBatchFillPlan, buildMatrixUpsertRowFromVisit } from '../src/services/scheduleMatrixService';
 
 function buildUnsignedJwt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
@@ -658,6 +660,64 @@ test('Guardia anti-anon en servidor: rechaza llaves públicas/anon en SUPABASE_S
     if (prevService === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     else process.env.SUPABASE_SERVICE_ROLE_KEY = prevService;
   }
+});
+
+test('Módulo 2 Multiselección de Productos: agrega insumos y persiste productos[] sin exceder límites Zod', () => {
+  const chosen = [
+    'MORTADELA ASTURIAS 0.900 KG',
+    'ARROZ BLANCO VENCAMPO 24X1KG',
+    'ESPALDA AHUMADA ASTURIAS',
+  ];
+  const calc = calculateMultiProductSupplies(chosen, '2');
+  assert.equal(calc.mortadelaQty, 2);
+  assert.equal(calc.arrozQty, 2);
+  assert.equal(calc.espaldaQty, 2);
+  assert.equal(calc.azucarGrams, 1200);
+  assert.equal(calc.lecheGrams, 1200);
+  assert.equal(calc.plannedUnits, 6);
+  assert.equal(calc.rowHighlight, 'green');
+  assert.equal(calc.productFocus, chosen.join(' + '));
+
+  const plan = buildBatchFillPlan({
+    existingVisits: [],
+    stores: [
+      {
+        id: 'store-1',
+        clientCode: 'C-001',
+        name: 'SUPERMERCADO ZULIA C.A.',
+        address: 'MARACAIBO',
+        zone: 'ZULIA',
+        city: 'MARACAIBO',
+        latitude: 10.65,
+        longitude: -71.63,
+        geofenceRadiusMeters: 150,
+        sellerName: 'MARIA BRICEÑO',
+        channel: 'Supermercado',
+      },
+    ],
+    users: [],
+    storeIds: ['store-1'],
+    product: chosen.join(' + '),
+    products: chosen,
+    quantityInput: '2',
+    shift: 'MAÑANA',
+    dayLabel: 'Lunes 23/11',
+    date: '2026-11-23',
+  });
+
+  assert.equal(plan.countCreated, 1);
+  const createdVisit = plan.affectedVisits[0]!;
+  assert.deepEqual(createdVisit.selectedProducts, chosen);
+
+  // También verifica truncado seguro de producto_resumen (<= 160 chars) con muchos productos seleccionados
+  const manyProducts = Array.from({ length: 10 }, (_, i) => `PRODUCTO DE DEGUSTACION EXTENSO NUMERO ${i + 1}`);
+  const row = buildMatrixUpsertRowFromVisit({
+    ...createdVisit,
+    selectedProducts: manyProducts,
+    productFocus: manyProducts.join(' + '),
+  });
+  assert.equal(row.productos.length, 10);
+  assert.ok(row.producto_resumen.length <= 160);
 });
 
 test('Auditoría estática de migración SQL y script ejecutable (solo authenticated, sin anon, sin DDL destructivo)', () => {

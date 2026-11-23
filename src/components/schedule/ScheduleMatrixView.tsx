@@ -63,6 +63,7 @@ export const ScheduleMatrixView: React.FC = () => {
     stores, 
     users,
     masterData,
+    masterEntities,
     activeSucursal,
     activeSucursalLabel,
     module1Bundle,
@@ -317,12 +318,33 @@ export const ScheduleMatrixView: React.FC = () => {
   // ----------------------------------------------------
   // BATCH FILL ENGINE STATE (LLENADO POR LOTE INTELIGENTE CON SEMANA AUTOMÁTICA)
   // ----------------------------------------------------
-  const [batchProduct, setBatchProduct] = useState<string>('MORTADELA');
+  const [selectedBatchProductIds, setSelectedBatchProductIds] = useState<string[]>([]);
+  const [productSearchInBatch, setProductSearchInBatch] = useState<string>('');
+  const [debouncedProductSearchInBatch, setDebouncedProductSearchInBatch] = useState<string>('');
+  const [productUnitFilter, setProductUnitFilter] = useState<string>('TODAS');
+  const [visibleBatchProductsLimit, setVisibleBatchProductsLimit] = useState<number>(60);
+  const [singleModalProduct, setSingleModalProduct] = useState<string>('MORTADELA ASTURIAS');
   const [batchQuantity, setBatchQuantity] = useState<string>('1');
   const [batchShift, setBatchShift] = useState<ShiftType>('MAÑANA');
   const [batchDate, setBatchDate] = useState<string>(() => liveClock.todayYmd);
   const [isBatchDateManual, setIsBatchDateManual] = useState<boolean>(false);
   const [batchWeekOffset, setBatchWeekOffset] = useState<number>(0);
+
+  // Debounce ligero (~150 ms) para búsqueda inteligente instantánea en catálogo de productos
+  useEffect(() => {
+    if (!productSearchInBatch.trim()) {
+      setDebouncedProductSearchInBatch('');
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedProductSearchInBatch(productSearchInBatch);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [productSearchInBatch]);
+
+  useEffect(() => {
+    setVisibleBatchProductsLimit(60);
+  }, [productUnitFilter, debouncedProductSearchInBatch]);
 
   // Avanza automáticamente la fecha de despliegue a medida que transcurren los días y semanas
   useEffect(() => {
@@ -494,6 +516,164 @@ export const ScheduleMatrixView: React.FC = () => {
   );
   const hiddenSelectedCount = selectedStoreIds.length - effectiveBatchStoreIds.length;
 
+  // Catálogo real de productos sincronizado desde Supabase (`public."Productos"` / `vw_productos_detalle`)
+  const batchProductCatalog = useMemo(() => {
+    const activeRemote = (masterEntities?.productos ?? [])
+      .filter((p) => p.activo !== false && Boolean(p.nombre?.trim()))
+      .map((p) => ({
+        id: p.id || `${p.codigo || 'PROD'}-${p.nombre}`,
+        codigo: p.codigo || '',
+        nombre: p.nombre.trim(),
+        marca: p.marca || null,
+        categoria: p.categoria || null,
+        unidad: (p.unidad_medida || 'UND').toUpperCase(),
+      }))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+
+    if (activeRemote.length > 0) return activeRemote;
+
+    return [
+      { id: 'MORTADELA', codigo: 'COD-001', nombre: 'MORTADELA ASTURIAS 0.900 KG', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
+      { id: 'VENCAMPO', codigo: 'COD-002', nombre: 'VENCAMPO ARROZ', marca: 'VENCAMPO', categoria: 'VIVERES', unidad: 'BULTO' },
+      { id: 'ESPALDA', codigo: 'COD-003', nombre: 'ESPALDA AHUMADA', marca: 'ASTURIAS', categoria: 'LINEA COCIDA', unidad: 'KG' },
+      { id: 'JAMON', codigo: 'COD-004', nombre: 'JAMÓN COCIDO SUPERIOR', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
+      { id: 'SALCHICHA', codigo: 'COD-005', nombre: 'SALCHICHAS VIENA ASTURIAS 500G', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
+    ];
+  }, [masterEntities?.productos]);
+
+  const availableProductUnits = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of batchProductCatalog) {
+      counts.set(p.unidad, (counts.get(p.unidad) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [batchProductCatalog]);
+
+  const indexedProductsForBatch = useMemo(
+    () =>
+      batchProductCatalog.map((product) => {
+        const normName = normalizeSearchText(product.nombre);
+        const normCode = normalizeSearchText(product.codigo);
+        const normFull = normalizeSearchText(
+          `${product.nombre} ${product.codigo} ${product.marca ?? ''} ${product.categoria ?? ''} ${product.unidad}`
+        );
+        const compactFull = normFull.replace(/[^a-z0-9]+/g, '');
+        return { product, normName, normCode, normFull, compactFull };
+      }),
+    [batchProductCatalog]
+  );
+
+  // Búsqueda inteligente multi-término insensible a acentos (nombre, código SKU, marca, categoría o presentación)
+  const filteredProductsForBatch = useMemo(() => {
+    const qNorm = normalizeSearchText(debouncedProductSearchInBatch);
+    const tokens = qNorm ? qNorm.split(' ').filter(Boolean) : [];
+    const qCompact = qNorm.replace(/[^a-z0-9]+/g, '');
+
+    const scored: Array<{ product: (typeof batchProductCatalog)[number]; score: number }> = [];
+    for (const item of indexedProductsForBatch) {
+      if (productUnitFilter !== 'TODAS' && item.product.unidad !== productUnitFilter) continue;
+      if (tokens.length === 0) {
+        scored.push({ product: item.product, score: 0 });
+        continue;
+      }
+
+      const allTokensMatch = tokens.every((tok) => item.normFull.includes(tok));
+      const compactMatch = qCompact.length >= 2 && item.compactFull.includes(qCompact);
+      if (!allTokensMatch && !compactMatch) continue;
+
+      let score = 10;
+      if (item.normCode && item.normCode === qNorm) score = 0;
+      else if (item.normName.startsWith(qNorm)) score = 1;
+      else if (item.normCode && item.normCode.includes(qNorm)) score = 2;
+      else if (item.normName.includes(qNorm)) score = 3;
+      else if (allTokensMatch) score = 4;
+
+      scored.push({ product: item.product, score });
+    }
+
+    if (tokens.length > 0) {
+      scored.sort(
+        (a, b) => a.score - b.score || a.product.nombre.localeCompare(b.product.nombre, 'es')
+      );
+    }
+    return scored.map((s) => s.product);
+  }, [indexedProductsForBatch, productUnitFilter, debouncedProductSearchInBatch]);
+
+  const visibleProductsInBatch = useMemo(
+    () => filteredProductsForBatch.slice(0, visibleBatchProductsLimit),
+    [filteredProductsForBatch, visibleBatchProductsLimit]
+  );
+
+  const selectedBatchProductIdSet = useMemo(
+    () => new Set(selectedBatchProductIds),
+    [selectedBatchProductIds]
+  );
+
+  const productCatalogById = useMemo(() => {
+    const map = new Map<string, (typeof batchProductCatalog)[number]>();
+    for (const p of batchProductCatalog) map.set(p.id, p);
+    return map;
+  }, [batchProductCatalog]);
+
+  const selectedBatchProducts = useMemo(
+    () =>
+      selectedBatchProductIds
+        .map((id) => productCatalogById.get(id))
+        .filter((p): p is (typeof batchProductCatalog)[number] => Boolean(p)),
+    [selectedBatchProductIds, productCatalogById]
+  );
+
+  const selectedBatchProductNames = useMemo(
+    () => selectedBatchProducts.map((p) => p.nombre),
+    [selectedBatchProducts]
+  );
+
+  const batchProduct = useMemo(
+    () =>
+      selectedBatchProductNames.length > 0
+        ? selectedBatchProductNames.join(' + ')
+        : 'SIN PRODUCTOS',
+    [selectedBatchProductNames]
+  );
+
+  const batchProductBadgeLabel = useMemo(() => {
+    if (selectedBatchProductNames.length === 0) return '0 Productos';
+    if (selectedBatchProductNames.length === 1) {
+      const first = selectedBatchProductNames[0]!;
+      return first.length > 26 ? `${first.slice(0, 24).trimEnd()}…` : first;
+    }
+    return `${selectedBatchProductNames.length} Productos`;
+  }, [selectedBatchProductNames]);
+
+  const hasVencampoSelected = useMemo(
+    () =>
+      selectedBatchProductNames.some((name) => {
+        const norm = normalizeSearchText(name);
+        return (
+          norm.includes('vencampo') ||
+          norm.includes('arroz') ||
+          norm.includes('leche') ||
+          norm.includes('avena')
+        );
+      }),
+    [selectedBatchProductNames]
+  );
+
+  const toggleBatchProductSelection = (productId: string) => {
+    setSelectedBatchProductIds((prev) =>
+      prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId]
+    );
+  };
+
+  const handleSelectAllFilteredProducts = () => {
+    const idsToSelect = filteredProductsForBatch.map((p) => p.id);
+    setSelectedBatchProductIds((prev) => Array.from(new Set([...prev, ...idsToSelect])));
+  };
+
+  const handleDeselectAllProducts = () => {
+    setSelectedBatchProductIds([]);
+  };
+
   // Estado del modal LIMPIAR POR LOTE / NUEVA CARGA (cancelación lógica auditable)
   const [isClearModalOpen, setIsClearModalOpen] = useState<boolean>(false);
   const [clearMode, setClearMode] = useState<'FILTERED' | 'ALL'>('FILTERED');
@@ -507,7 +687,13 @@ export const ScheduleMatrixView: React.FC = () => {
     const matches = visits.filter((v) => {
       if (clearMode === 'ALL') return true;
       if (clearByClients && !effectiveBatchStoreIds.includes(v.storeId)) return false;
-      if (clearByProduct && !(v.productFocus || '').toUpperCase().includes(batchProduct.toUpperCase())) return false;
+      if (clearByProduct && selectedBatchProductNames.length > 0) {
+        const focusNorm = normalizeSearchText(v.productFocus);
+        const anyMatched = selectedBatchProductNames.some((pName) =>
+          focusNorm.includes(normalizeSearchText(pName))
+        );
+        if (!anyMatched) return false;
+      }
       if (clearByShiftDate && (v.shift !== batchShift || v.date !== batchDate)) return false;
       return true;
     });
@@ -530,7 +716,10 @@ export const ScheduleMatrixView: React.FC = () => {
       const res = await clearVisitsBatch({
         mode: clearMode,
         storeIds: clearByClients ? effectiveBatchStoreIds : undefined,
-        product: clearByProduct ? batchProduct : undefined,
+        product:
+          clearByProduct && selectedBatchProductNames.length > 0
+            ? selectedBatchProductNames[0]
+            : undefined,
         shift: clearByShiftDate ? batchShift : undefined,
         date: clearByShiftDate ? batchDate : undefined,
       });
@@ -548,6 +737,10 @@ export const ScheduleMatrixView: React.FC = () => {
 
       if (clearResetSteps) {
         setSelectedStoreIds([]);
+        setSelectedBatchProductIds([]);
+        setProductSearchInBatch('');
+        setDebouncedProductSearchInBatch('');
+        setProductUnitFilter('TODAS');
         setBatchQuantity('1');
         setStoreSearchInBatch('');
         setStoreZoneFilter('TODAS');
@@ -600,6 +793,14 @@ export const ScheduleMatrixView: React.FC = () => {
       return;
     }
 
+    if (selectedBatchProductNames.length === 0) {
+      showNotification(
+        'Por favor selecciona al menos un producto a degustar en el paso 2.',
+        0
+      );
+      return;
+    }
+
     const shiftToUse = shiftOverride || batchShift;
     const promotoraToUse = batchPromotora === 'AUTO' ? undefined : batchPromotora;
 
@@ -629,6 +830,7 @@ export const ScheduleMatrixView: React.FC = () => {
       const result = await batchFillClientsProductShift({
         storeIds: effectiveBatchStoreIds,
         product: batchProduct,
+        products: selectedBatchProductNames,
         quantityInput: batchQuantity,
         shift: shiftToUse,
         dayLabel: batchDay,
@@ -649,7 +851,7 @@ export const ScheduleMatrixView: React.FC = () => {
 
       const totalProcessed = result.countUpdated + result.countCreated;
       showNotification(
-        `¡Llenado por lote persistido en Supabase! Se cargó ${batchProduct} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
+        `¡Llenado por lote persistido en Supabase! Se cargó ${batchProductBadgeLabel} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
           (hiddenSelectedCount > 0 ? ` ${hiddenSelectedCount} marcados ocultos por filtro omitidos.` : ''),
         totalProcessed,
         'Sincronizado en cronograma_degustaciones y rutas_promotoras.'
@@ -1444,69 +1646,224 @@ export const ScheduleMatrixView: React.FC = () => {
           {/* PASO 2 & 3: PRODUCTO, JORNADA Y EJECUCIÓN (Columna 7/12) */}
           <div className="lg:col-span-7 flex flex-col justify-between space-y-4">
             
-            {/* PASO 2: PRODUCTO */}
+            {/* PASO 2: PRODUCTOS A DEGUSTAR (CATÁLOGO REAL + BÚSQUEDA INTELIGENTE + MULTISELECCIÓN) */}
             <div className="bg-black border border-zinc-900 rounded-2xl p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="w-6 h-6 rounded-lg bg-red-600/20 text-red-500 font-black flex items-center justify-center text-xs border border-red-600/30">
-                  2
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-6 h-6 rounded-lg bg-red-600/20 text-red-500 font-black flex items-center justify-center text-xs border border-red-600/30 shrink-0">
+                    2
+                  </div>
+                  <h4 className="text-xs font-black text-white uppercase tracking-wider truncate">
+                    Seleccionar Productos ({selectedBatchProducts.length} elegidos)
+                  </h4>
                 </div>
-                <h4 className="text-xs font-black text-white uppercase tracking-wider">
-                  Seleccionar Producto y Cantidad
-                </h4>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="select-all-batch-products-btn"
+                    onClick={handleSelectAllFilteredProducts}
+                    className="text-[11px] font-bold text-red-400 hover:text-red-300 transition cursor-pointer"
+                  >
+                    Todos
+                  </button>
+                  <span className="text-zinc-700 text-[10px]">|</span>
+                  <button
+                    type="button"
+                    data-testid="clear-batch-products-btn"
+                    onClick={handleDeselectAllProducts}
+                    className="text-[11px] font-bold text-zinc-400 hover:text-white transition cursor-pointer"
+                  >
+                    Ninguno
+                  </button>
+                </div>
               </div>
 
-              {/* Botones de Productos Codizulca */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
-                {[
-                  { id: 'MORTADELA', label: 'MORTADELA ASTURIAS', defaultQty: '1', note: '0.900 kg' },
-                  { id: 'VENCAMPO', label: 'VENCAMPO ARROZ', defaultQty: 'ARROZ', note: '+600g Azúcar +600g Leche' },
-                  { id: 'ESPALDA', label: 'ESPALDA AHUMADA', defaultQty: '1', note: 'Línea Cocida' },
-                  { id: 'JAMON', label: 'JAMÓN COCIDO', defaultQty: '1', note: 'Superior' },
-                  { id: 'SALCHICHA', label: 'SALCHICHAS VIENA', defaultQty: '1', note: 'Asturias 500g' },
-                ].map((p) => {
-                  const isSelected = batchProduct === p.id;
-                  return (
+              {/* Barra de búsqueda inteligente + filtro de presentación */}
+              <div className="flex flex-col sm:flex-row gap-2 mb-3">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    data-testid="batch-product-search-input"
+                    value={productSearchInBatch}
+                    onChange={(e) => setProductSearchInBatch(e.target.value)}
+                    placeholder="Buscar producto por nombre, código o presentación..."
+                    className="w-full pl-8 pr-8 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
+                  />
+                  {productSearchInBatch && (
                     <button
-                      key={p.id}
                       type="button"
+                      aria-label="Limpiar búsqueda de productos"
                       onClick={() => {
-                        setBatchProduct(p.id);
-                        setBatchQuantity(p.defaultQty);
+                        setProductSearchInBatch('');
+                        setDebouncedProductSearchInBatch('');
                       }}
-                      className={`p-2.5 rounded-xl text-left border transition ${
-                        isSelected
-                          ? 'bg-red-600 text-white border-red-500 shadow-md shadow-red-950/60 font-black'
-                          : 'bg-zinc-950 text-zinc-300 border-zinc-800 hover:border-zinc-700 font-bold'
-                      }`}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition cursor-pointer"
                     >
-                      <div className="text-xs">{p.label}</div>
-                      <div className={`text-[10px] mt-0.5 ${isSelected ? 'text-white/80' : 'text-zinc-500'}`}>
-                        {p.note}
-                      </div>
+                      <X className="w-3.5 h-3.5" />
                     </button>
-                  );
-                })}
+                  )}
+                </div>
+
+                {availableProductUnits.length > 1 && (
+                  <select
+                    data-testid="batch-product-unit-filter"
+                    value={productUnitFilter}
+                    onChange={(e) => setProductUnitFilter(e.target.value)}
+                    className="sm:w-52 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-bold text-zinc-200 focus:outline-none focus:border-red-600"
+                  >
+                    <option value="TODAS">
+                      Todas las Presentaciones ({batchProductCatalog.length})
+                    </option>
+                    {availableProductUnits.map(([unit, count]) => (
+                      <option key={unit} value={unit}>
+                        {unit} ({count})
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
-              {/* Cantidad y auto-insumos */}
-              <div className="flex flex-col sm:flex-row items-center gap-3">
+              {/* Etiquetas de productos seleccionados (siempre visibles al buscar otros productos) */}
+              {selectedBatchProducts.length > 0 && (
+                <div
+                  data-testid="selected-batch-products-chips"
+                  className="flex flex-wrap gap-1.5 mb-3 p-2 rounded-xl bg-zinc-950/80 border border-red-900/40 max-h-24 overflow-y-auto custom-scrollbar"
+                >
+                  {selectedBatchProducts.map((prod) => (
+                    <span
+                      key={prod.id}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-600/20 border border-red-500/40 text-[11px] font-bold text-red-100"
+                    >
+                      <span className="truncate max-w-[200px]">{prod.nombre}</span>
+                      <button
+                        type="button"
+                        aria-label={`Quitar ${prod.nombre}`}
+                        onClick={() => toggleBatchProductSelection(prod.id)}
+                        className="text-red-300 hover:text-white transition cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Listado multiselección del catálogo real de productos */}
+              <div
+                data-testid="batch-product-list"
+                className="max-h-[210px] overflow-y-auto pr-1 custom-scrollbar space-y-1.5 mb-3"
+              >
+                {masterEntities?.isLoading && (masterEntities?.productos?.length ?? 0) === 0 ? (
+                  <div className="py-6 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                    <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+                    <span>Cargando catálogo nacional de productos...</span>
+                  </div>
+                ) : masterEntities?.entityErrors?.productos &&
+                  (masterEntities?.productos?.length ?? 0) === 0 ? (
+                  <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-700/40 flex items-center justify-between gap-2 text-xs text-amber-300">
+                    <span>{masterEntities.entityErrors.productos}</span>
+                    <button
+                      type="button"
+                      onClick={() => void masterEntities.refresh(true)}
+                      className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                    >
+                      Reintentar
+                    </button>
+                  </div>
+                ) : visibleProductsInBatch.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-zinc-500">
+                    No se encontraron productos para &ldquo;{productSearchInBatch}&rdquo;.
+                  </div>
+                ) : (
+                  <>
+                    {visibleProductsInBatch.map((prod) => {
+                      const isSelected = selectedBatchProductIdSet.has(prod.id);
+                      return (
+                        <button
+                          key={prod.id}
+                          type="button"
+                          onClick={() => toggleBatchProductSelection(prod.id)}
+                          className={`w-full px-3 py-2 rounded-xl border text-left flex items-center justify-between gap-2.5 transition cursor-pointer ${
+                            isSelected
+                              ? 'bg-red-600/20 border-red-500/70 text-white shadow-sm shadow-red-950/40'
+                              : 'bg-zinc-950 border-zinc-800/90 text-zinc-200 hover:border-zinc-700 hover:bg-zinc-900/70'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {isSelected ? (
+                              <CheckSquare className="w-4 h-4 text-red-500 shrink-0" />
+                            ) : (
+                              <Square className="w-4 h-4 text-zinc-600 shrink-0" />
+                            )}
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold leading-snug truncate">
+                                {prod.nombre}
+                              </div>
+                              <div className="text-[10px] text-zinc-500 font-mono truncate">
+                                {prod.codigo || 'SIN CÓDIGO'}
+                                {prod.marca ? ` • ${prod.marca}` : ''}
+                                {prod.categoria ? ` • ${prod.categoria}` : ''}
+                              </div>
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold shrink-0 border ${
+                              isSelected
+                                ? 'bg-red-600/30 border-red-500/50 text-red-100'
+                                : 'bg-black border-zinc-800 text-zinc-400'
+                            }`}
+                          >
+                            {prod.unidad}
+                          </span>
+                        </button>
+                      );
+                    })}
+
+                    {filteredProductsForBatch.length > visibleProductsInBatch.length && (
+                      <button
+                        type="button"
+                        onClick={() => setVisibleBatchProductsLimit((prev) => prev + 60)}
+                        className="w-full py-2 rounded-xl bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 text-[11px] font-bold text-zinc-300 transition cursor-pointer"
+                      >
+                        Mostrar más productos ({visibleProductsInBatch.length} de{' '}
+                        {filteredProductsForBatch.length})
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Cantidad, auto-insumos y contador de productos */}
+              <div className="flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-zinc-900">
                 <div className="w-full sm:w-1/2">
                   <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
-                    Cantidad a Cargar por Cliente
+                    Cantidad a Cargar por Cliente (por producto)
                   </label>
                   <input
                     type="text"
                     value={batchQuantity}
                     onChange={(e) => setBatchQuantity(e.target.value)}
-                    placeholder="Ej: 1, 2, ARROZ"
+                    placeholder="Ej: 1, 2, 0.9"
                     className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono font-bold text-white focus:outline-none focus:border-red-600"
                   />
                 </div>
 
-                {batchProduct === 'VENCAMPO' && (
+                {hasVencampoSelected ? (
                   <div className="w-full sm:w-1/2 p-2.5 rounded-xl bg-red-950/30 border border-red-800/50 text-[11px] text-zinc-200">
                     <span className="font-bold text-white block">✓ Insumos automáticos calculados:</span>
                     <span>600 g de Azúcar + 600 g de Leche en Polvo por stand.</span>
+                  </div>
+                ) : (
+                  <div className="w-full sm:w-1/2 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950/70 border border-zinc-900 text-[11px] text-zinc-400">
+                    <span className="truncate">
+                      Catálogo:{' '}
+                      <strong className="text-zinc-200 font-mono">{filteredProductsForBatch.length}</strong>{' '}
+                      visibles
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-red-600/20 text-red-300 border border-red-600/30 font-mono font-bold text-[10px] whitespace-nowrap shrink-0">
+                      {selectedBatchProducts.length} elegidos
+                    </span>
                   </div>
                 )}
               </div>
@@ -1667,7 +2024,7 @@ export const ScheduleMatrixView: React.FC = () => {
                     : 'EJECUTAR LLENADO POR LOTE A LA TABLA GENERAL'}
                 </span>
                 <span className="px-2.5 py-0.5 rounded-full bg-black/40 text-white font-mono text-xs border border-white/20">
-                  {effectiveBatchStoreIds.length} Clientes • {batchProduct} • {batchShift}
+                  {effectiveBatchStoreIds.length} Clientes • {batchProductBadgeLabel} • {batchShift}
                 </span>
               </button>
               <button
@@ -1712,7 +2069,7 @@ export const ScheduleMatrixView: React.FC = () => {
                 </label>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={clearByProduct} onChange={(e) => setClearByProduct(e.target.checked)} className="accent-red-600" />
-                  Producto activo ({batchProduct})
+                  Productos seleccionados ({batchProductBadgeLabel})
                 </label>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={clearByShiftDate} onChange={(e) => setClearByShiftDate(e.target.checked)} className="accent-red-600" />
@@ -2788,15 +3145,19 @@ export const ScheduleMatrixView: React.FC = () => {
                 <div>
                   <label className="text-xs font-bold text-zinc-300 block mb-1">Producto</label>
                   <select
-                    value={batchProduct}
-                    onChange={(e) => setBatchProduct(e.target.value)}
+                    value={
+                      batchProductCatalog.some((p) => p.nombre === singleModalProduct)
+                        ? singleModalProduct
+                        : (batchProductCatalog[0]?.nombre ?? singleModalProduct)
+                    }
+                    onChange={(e) => setSingleModalProduct(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
                   >
-                    <option value="MORTADELA">MORTADELA ESPECIAL ASTURIAS</option>
-                    <option value="VENCAMPO">CREMA DE ARROZ VENCAMPO</option>
-                    <option value="ESPALDA">ESPALDA AHUMADA ASTURIAS</option>
-                    <option value="JAMON">JAMÓN COCIDO SUPERIOR</option>
-                    <option value="SALCHICHA">SALCHICHAS VIENA ASTURIAS</option>
+                    {batchProductCatalog.map((prod) => (
+                      <option key={prod.id} value={prod.nombre}>
+                        {prod.codigo ? `${prod.codigo} · ` : ''}{prod.nombre} ({prod.unidad})
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -2920,7 +3281,7 @@ export const ScheduleMatrixView: React.FC = () => {
                     return;
                   }
 
-                  const prodUpper = batchProduct.toUpperCase();
+                  const prodUpper = (singleModalProduct || batchProductCatalog[0]?.nombre || 'MORTADELA').toUpperCase();
                   const parsedNumericQty = parseFloat(String(batchQuantity).replace(',', '.'));
                   if (
                     !prodUpper.includes('VENCAMPO') &&

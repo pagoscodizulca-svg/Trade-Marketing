@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import type { ScheduledVisit, ShiftType, Store, User } from '../types';
 import {
+  calculateMultiProductSupplies,
   calculateProductionSupplies,
   normalizeProductionShift,
 } from '../utils/productionSuppliesCalculator';
@@ -289,9 +290,25 @@ export function buildMatrixUpsertRowFromVisit(
       ? visit.id
       : null;
   const resolvedPromotoraId = isRealUuid(visit.promotoraId) ? visit.promotoraId : null;
-  const productSummary = String(visit.fillProductSelection || visit.productFocus || 'MORTADELA')
+  const rawSelectedProducts = Array.isArray(visit.selectedProducts)
+    ? Array.from(
+        new Set(
+          visit.selectedProducts
+            .map((p) => String(p ?? '').trim().toUpperCase().slice(0, 160))
+            .filter(Boolean)
+        )
+      )
+    : [];
+  const rawSummary = String(
+    rawSelectedProducts.length > 0
+      ? rawSelectedProducts.join(' + ')
+      : visit.productFocus || visit.fillProductSelection || 'MORTADELA'
+  )
     .trim()
     .toUpperCase();
+  const productSummary =
+    rawSummary.length > 160 ? `${rawSummary.slice(0, 157).trimEnd()}...` : rawSummary || 'MORTADELA';
+  const productosArray = rawSelectedProducts.length > 0 ? rawSelectedProducts : [productSummary];
   const qtyNumeric = Math.max(
     0.1,
     Number(
@@ -315,7 +332,7 @@ export function buildMatrixUpsertRowFromVisit(
     cliente_codigo: String(options?.clientCode || '').trim().toUpperCase(),
     zona_direccion: String(visit.zone || '').trim(),
     producto_resumen: productSummary,
-    productos: [productSummary],
+    productos: productosArray,
     cantidad_kilos: Number(qtyNumeric.toFixed(2)),
     personas_estimadas: Math.max(0, Math.round(visit.operationalSupplies?.estimatedPortions || 0)),
     insumos_calculados: {
@@ -326,6 +343,7 @@ export function buildMatrixUpsertRowFromVisit(
       leche_grams: visit.lecheGrams || 0,
       fill_product: visit.fillProductSelection || productSummary,
       fill_quantity: visit.fillQuantityInput || String(qtyNumeric),
+      selected_products: productosArray,
       operational_supplies: visit.operationalSupplies ?? null,
     },
     vendedor_fdv: String(visit.sellerName || '').trim(),
@@ -343,6 +361,7 @@ export function buildBatchFillPlan(params: {
   users: readonly User[];
   storeIds: readonly string[];
   product: string;
+  products?: readonly string[];
   quantityInput: string;
   shift: ShiftType;
   dayLabel: string;
@@ -357,7 +376,17 @@ export function buildBatchFillPlan(params: {
 } {
   const effectiveDate = params.date && YMD_REGEX.test(params.date) ? params.date : getTodayVeYmd();
   const effectiveDayLabel = params.dayLabel || formatDayLabelEs(effectiveDate);
-  const calc = calculateProductionSupplies(params.product, params.quantityInput);
+  const effectiveProducts = Array.from(
+    new Set(
+      (params.products && params.products.length > 0 ? params.products : [params.product])
+        .map((p) => String(p ?? '').trim())
+        .filter(Boolean)
+    )
+  );
+  const calc =
+    effectiveProducts.length > 1
+      ? calculateMultiProductSupplies(effectiveProducts, params.quantityInput)
+      : calculateProductionSupplies(effectiveProducts[0] || params.product, params.quantityInput);
   const uniqueStoreIds = Array.from(new Set(params.storeIds));
 
   const sameSlot = (v: ScheduledVisit) =>
@@ -382,6 +411,7 @@ export function buildBatchFillPlan(params: {
         date: effectiveDate,
         dayLabel: effectiveDayLabel,
         productFocus: calc.productFocus,
+        selectedProducts: effectiveProducts,
         fillProductSelection: calc.fillProductSelection,
         fillQuantityInput: calc.fillQuantityInput,
         mortadelaQty: calc.mortadelaQty,
@@ -439,6 +469,7 @@ export function buildBatchFillPlan(params: {
       storeName: storeObj.name,
       zone: storeObj.zone,
       productFocus: calc.productFocus,
+      selectedProducts: effectiveProducts,
       fillProductSelection: calc.fillProductSelection,
       fillQuantityInput: calc.fillQuantityInput,
       promotoraId: assigned.promotoraId,
