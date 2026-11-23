@@ -249,10 +249,28 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
   const estado = asNullableString(raw.estado);
   const regionCode =
     normalizeRegionName(metadata.region_codigo) ??
-    normalizeRegionName(raw.region ?? raw.region_codigo ?? raw.sucursal ?? estado ?? ciudad ?? direccion);
+    normalizeRegionName(raw.region ?? raw.region_codigo ?? raw.sucursal ?? estado ?? ciudad ?? direccion) ??
+    (emailRaw === 'joseabraham.barroso@gmail.com' ? 'OCCIDENTE' : null);
+  const rawRegionText = limpiarCeldaTexto(raw.region ?? metadata.region_perfil ?? '');
+  const normalizedRegionLabel =
+    /^valencia$/i.test(rawRegionText)
+      ? 'Valencia'
+      : /^occidente$/i.test(rawRegionText)
+        ? 'Occidente'
+        : regionCode === 'OCCIDENTE'
+          ? 'Occidente'
+          : regionCode === 'CENTRO'
+            ? 'Valencia'
+            : null;
   const compatSucursal =
     asSucursalOrNull(raw.sucursal ?? raw.region ?? raw.region_codigo ?? raw.sede) ??
-    (regionCode === 'OCCIDENTE' ? 'ZULIA' : regionCode === 'CENTRO' ? 'CENTRO' : null);
+    (normalizedRegionLabel === 'Valencia'
+      ? 'VALENCIA'
+      : regionCode === 'OCCIDENTE'
+        ? 'ZULIA'
+        : regionCode === 'CENTRO'
+          ? 'CENTRO'
+          : null);
   return {
     id: String(raw.id ?? ''),
     nombre_completo: nombre,
@@ -261,6 +279,8 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
     ciudad,
     estado,
     direccion,
+    region: normalizedRegionLabel,
+    auth_user_id: asNullableString(raw.auth_user_id),
     sucursal: compatSucursal,
     region_id: asNullableString(raw.region_id),
     supervisor_id: asNullableString(raw.supervisor_id),
@@ -270,7 +290,13 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
         raw.tipo ?? raw.tipo_promotora ?? raw.modalidad ?? raw.categoria ?? raw.perfil
       ) ?? formatPromotoraRoleForCategory(categoria),
     rol: asNullableString(raw.rol ?? raw.role ?? raw.cargo),
-    metadata: regionCode ? { ...metadata, region_codigo: regionCode } : metadata,
+    metadata: regionCode
+      ? {
+          ...metadata,
+          region_codigo: regionCode,
+          ...(normalizedRegionLabel ? { region_perfil: normalizedRegionLabel } : {}),
+        }
+      : metadata,
     activo: raw.activo !== false,
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? raw.created_at ?? ''),

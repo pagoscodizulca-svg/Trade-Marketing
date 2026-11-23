@@ -115,6 +115,8 @@ export interface ErpPromotoraRow {
   telefono?: string | null;
   correo?: string | null;
   email?: string | null;
+  region?: string | null;
+  auth_user_id?: string | null;
   ciudad?: string | null;
   estado?: string | null;
   sucursal?: string | null;
@@ -1104,10 +1106,20 @@ export function normalizeErpSupervisoresDataset(
   return out;
 }
 
+export type PromotoraRegionPerfil = 'Occidente' | 'Valencia';
+
+export function normalizePromotoraRegionPerfil(raw: unknown): PromotoraRegionPerfil | null {
+  const token = normalizeToken(raw);
+  if (!token) return null;
+  if (token === 'OCCIDENTE' || token === 'ZULIA') return 'Occidente';
+  if (token === 'VALENCIA' || token === 'CENTRO' || token === 'CAPITAL') return 'Valencia';
+  return null;
+}
+
 /**
- * 4. Normaliza `public.promotoras` (leyendo `correo ?? email`, clasificación estricta
- * `Fijas`/`Eventuales`/`Merchandising`, y resolución dinámica de `region_id` desde `"Regiones"`
- * usando `region_id` o la dirección/ciudad/sucursal sin cuarentenas falsas).
+ * 4. Normaliza `public.promotoras` (leyendo `correo ?? email`, `region` explícita
+ * `'Occidente' | 'Valencia'`, `auth_user_id`, clasificación estricta
+ * `Fijas`/`Eventuales`/`Merchandising`, y resolución dinámica de `region_id` desde `"Regiones"`).
  */
 export function normalizeErpPromotorasDataset(
   promotoras: readonly ErpPromotoraRow[],
@@ -1126,9 +1138,27 @@ export function normalizeErpPromotorasDataset(
     const direccion = cleanText(p.direccion) || null;
     const ciudad = cleanText(p.ciudad) || direccion;
     const estado = cleanText(p.estado) || null;
+    const authUserId = cleanText(p.auth_user_id) || null;
 
     let regionId = cleanText(p.region_id) || null;
     let regionCode: AllowedRegionCode | null = regionId ? byId.get(regionId)?.code ?? null : null;
+    const explicitRegionPerfil = normalizePromotoraRegionPerfil(p.region);
+
+    if (!regionCode && explicitRegionPerfil) {
+      regionCode = explicitRegionPerfil === 'Valencia' ? 'CENTRO' : 'OCCIDENTE';
+      const matchedReg = byCode.get(regionCode);
+      if (matchedReg?.id_regi) {
+        regionId = String(matchedReg.id_regi);
+      }
+    }
+
+    if (!regionCode && emailRaw === 'joseabraham.barroso@gmail.com') {
+      regionCode = 'OCCIDENTE';
+      const matchedReg = byCode.get('OCCIDENTE');
+      if (matchedReg?.id_regi) {
+        regionId = String(matchedReg.id_regi);
+      }
+    }
 
     if (!regionCode) {
       const inferred =
@@ -1145,6 +1175,14 @@ export function normalizeErpPromotorasDataset(
       }
     }
 
+    const regionPerfil: PromotoraRegionPerfil | null =
+      explicitRegionPerfil ??
+      (regionCode === 'OCCIDENTE'
+        ? 'Occidente'
+        : regionCode === 'CENTRO'
+          ? 'Valencia'
+          : null);
+
     const createdAt = p.created_at || new Date().toISOString();
     const updatedAt = p.updated_at || createdAt;
 
@@ -1156,7 +1194,12 @@ export function normalizeErpPromotorasDataset(
       ciudad,
       estado,
       direccion,
-      sucursal: mapAllowedRegionToSucursalCompat(regionCode),
+      region: regionPerfil,
+      auth_user_id: authUserId,
+      sucursal:
+        regionPerfil === 'Valencia'
+          ? 'VALENCIA'
+          : mapAllowedRegionToSucursalCompat(regionCode),
       region_id: regionId,
       supervisor_id: cleanText(p.supervisor_id) || null,
       categoria,
@@ -1165,7 +1208,8 @@ export function normalizeErpPromotorasDataset(
       metadata: {
         source: 'supabase_promotoras',
         region_codigo: regionCode,
-        region_inferred_from_address: !p.region_id && Boolean(regionCode),
+        region_perfil: regionPerfil,
+        region_inferred_from_address: !p.region_id && !p.region && Boolean(regionCode),
       },
       activo: p.activo !== false,
       created_at: createdAt,

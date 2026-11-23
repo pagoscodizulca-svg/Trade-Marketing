@@ -1,0 +1,308 @@
+[
+  {
+    "nombre_completo": "Nicole Godoy",
+    "direccion": "Coro",
+    "telefono": "0412-4392024",
+    "correo": "godoyaraujonicole@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Fernanda Leon",
+    "direccion": "La Villa",
+    "telefono": "0412-7888338",
+    "correo": "ferleon@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Nikmary Derizan",
+    "direccion": "La Villa",
+    "telefono": "0412-7800581",
+    "correo": "nikmaryderizan@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Dariannys Ferrer",
+    "direccion": "Santa Maria",
+    "telefono": "0412-1089107",
+    "correo": "dariannysferrer@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Camila Morales",
+    "direccion": "Mara",
+    "telefono": "0412-1688424",
+    "correo": "camilamorales@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Careliz Reyes",
+    "direccion": "Punto Fijo",
+    "telefono": "0414-6189171",
+    "correo": "reyescareliz@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Maria de los Angeles Almarza Arandia",
+    "direccion": "Cabimas",
+    "telefono": "+58 424-1431342",
+    "correo": "mariaalmarza@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Scarleth Piña",
+    "direccion": "Cabimas",
+    "telefono": "+58 412-6914424",
+    "correo": "scarlethpina@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Ana Echeverria",
+    "direccion": "Urb Cuatricentenario",
+    "telefono": "+58 424-6135269",
+    "correo": "anaecheverria@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Osmairy Villasmil",
+    "direccion": "El Silencio",
+    "telefono": "+58 414-6713798",
+    "correo": "osmairyvillasmil@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Tania Cardenas",
+    "direccion": "C2 Cerca del Barrio Integracion",
+    "telefono": "+58 414-6177982",
+    "correo": "taniacardenas@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Nairelis Antunez",
+    "direccion": "Barrio Dia de las Madres",
+    "telefono": "+58 424-7517214",
+    "correo": "nairelisantunez@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Jaivelin Pereira",
+    "direccion": "El Bajo",
+    "telefono": "+58 412-6848929",
+    "correo": "jaivelinpereira@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Anyelit Ruiz",
+    "direccion": "C2",
+    "telefono": "+58 414-3632182",
+    "correo": "ruizanyelit@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Valeria Acevedo",
+    "direccion": "Urb Cuatricentenario",
+    "telefono": "+58 412-6894222",
+    "correo": "valeriaacevedo@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Claudia Alvarez",
+    "direccion": "C2",
+    "telefono": "+58 424-6428958",
+    "correo": "claudiaalvarez@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Jelary Acosta",
+    "direccion": "Via El Mojan",
+    "telefono": "+58 424-6832444",
+    "correo": "jelaryacosta@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Mariangel Valdivieso",
+    "direccion": "Urb La Popular",
+    "telefono": "+58 412-6414928",
+    "correo": "mariangelvaldivieso@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Angelica Sanchez",
+    "direccion": "Plaza de las Madres",
+    "telefono": "+58 412-1692007",
+    "correo": "angelicasanchez@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Eneliangela Gonzalez",
+    "direccion": "Urb El Varillal",
+    "telefono": "+58 412-0676697",
+    "correo": "eneliangelagonzalez@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Marianyel Aranda",
+    "direccion": "San Francisco",
+    "telefono": "+58 412-6888447",
+    "correo": "marianyelaranda@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Juliannys Gil",
+    "direccion": "Av La Limpia",
+    "telefono": "+58 424-6779724",
+    "correo": "juliannys.gil@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Jose Barroso",
+    "direccion": null,
+    "telefono": "0412-0696239",
+    "correo": "joseabraham.barroso@gmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Zioreli Grangger",
+    "direccion": "Cuatricentenario 1 Etapa",
+    "telefono": "0414-6869967",
+    "correo": "zioreli.grangger@hotmail.com",
+    "region": "Occidente",
+    "activo": true,
+    "categoria": "Fijas"
+  },
+  {
+    "nombre_completo": "Paola Gabriela Maldonado Jaimes",
+    "direccion": "Los Guayos, Paraparal Urb Buenaventura manzana 6 edificio 16, Valencia",
+    "telefono": "0414-5816686",
+    "correo": "paolamaldonado1805@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Bárbara Márquez",
+    "direccion": "Periférico, La Candelaria, Valencia",
+    "telefono": "0412-8499535",
+    "correo": "barbie.marqueztorres@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Scarlett Selena León Román",
+    "direccion": "Estado Carabobo, Municipio Libertador (Tocuyito)",
+    "telefono": "0412-7933389",
+    "correo": "scarlett060219@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "América Cordero",
+    "direccion": "Calle Guaicaipuro n 58-A, La Barraca, Maracay",
+    "telefono": "0412-0450192",
+    "correo": "americac1809@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Mariana Dos Ramos",
+    "direccion": "Turmero, Maracay",
+    "telefono": "0412-9640882",
+    "correo": "dosramosmariana0@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Dajan Maiz",
+    "direccion": "Maracay",
+    "telefono": "0424-3165239",
+    "correo": "maizdajan04@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Osverlys Carolina Vera",
+    "direccion": "El Paraíso, Caracas",
+    "telefono": "0412-9954380",
+    "correo": "osverlys2025@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Geyerlis Gabriela Rodríguez Veliz",
+    "direccion": "Montalbán, Caracas",
+    "telefono": "0414-2063476",
+    "correo": "geyerlis2017@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  },
+  {
+    "nombre_completo": "Astrid Rincón",
+    "direccion": "Plaza Venezuela, Caracas",
+    "telefono": "0412-7924803",
+    "correo": "rinconastrid10@gmail.com",
+    "region": "Valencia",
+    "activo": true,
+    "categoria": "Fijas",
+    "created_at": "2026-11-19T15:20:00Z"
+  }
+]

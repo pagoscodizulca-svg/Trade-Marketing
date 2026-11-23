@@ -322,6 +322,10 @@ export interface PromotoraMaestra {
   ciudad: string | null;
   estado: string | null;
   direccion: string | null;
+  /** Región/perfil de personal oficial: `'Occidente'` | `'Valencia'` */
+  region?: 'Occidente' | 'Valencia' | string | null;
+  /** Vínculo con `auth.users(id)` en Supabase Auth */
+  auth_user_id?: string | null;
   sucursal: SucursalMaestro | null;
   region_id: string | null;
   supervisor_id: string | null;
@@ -342,6 +346,8 @@ export interface PromotoraMaestraInput {
   ciudad?: string | null;
   estado?: string | null;
   direccion?: string | null;
+  region?: 'Occidente' | 'Valencia' | string | null;
+  auth_user_id?: string | null;
   sucursal?: SucursalMaestro | null;
   region_id?: string | null;
   supervisor_id?: string | null;

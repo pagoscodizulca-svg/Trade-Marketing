@@ -118,14 +118,14 @@ export function normalizeServerSucursal(raw: unknown): ServerSucursalCodigo | nu
     /^(sucursal|sede|region|hub|estado|zona|oficina)\s+/,
     ''
   );
-  if (strippedPrefix === 'zulia') return 'ZULIA';
+  if (strippedPrefix === 'zulia' || strippedPrefix === 'occidente') return 'ZULIA';
   if (strippedPrefix === 'valencia') return 'VALENCIA';
   if (strippedPrefix === 'centro') return 'CENTRO';
   if (strippedPrefix === 'oriente') return 'ORIENTE';
   if (strippedPrefix === 'capital') return 'CAPITAL';
 
   if (
-    /\b(zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira)\b/.test(
+    /\b(occidente|zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|costa oriental|mara|guajira|coro|punto fijo|la villa)\b/.test(
       tokensText
     ) ||
     tokensText === 'col'
@@ -197,10 +197,12 @@ function normalizeServerRoleAlias(rawRole: unknown): string {
 
 function extractSucursalCandidateFromRecord(row: Record<string, unknown>): ServerSucursalCodigo | null {
   return (
+    normalizeServerSucursal(row.region) ??
     normalizeServerSucursal(row.sucursal) ??
     normalizeServerSucursal(row.zona) ??
     normalizeServerSucursal(row.ciudad) ??
     normalizeServerSucursal(row.estado) ??
+    normalizeServerSucursal(row.direccion) ??
     null
   );
 }
@@ -296,11 +298,27 @@ async function resolvePromotoraByCanonicalEmail(
 
   if (!sucursal && !explicitlyInactive) {
     try {
-      const { data: promRows, error: promErr } = await lookup
+      let promRows: unknown = null;
+      let promErr: unknown = null;
+
+      // La tabla real `public.promotoras` usa columna `correo`; respaldo a `email` solo si `correo` no existe
+      const byCorreo = await lookup
         .from('promotoras')
         .select('*')
-        .ilike('email', `%${canonicalEmail}%`)
+        .ilike('correo', `%${canonicalEmail}%`)
         .limit(10);
+
+      if (!byCorreo.error) {
+        promRows = byCorreo.data;
+      } else {
+        const byEmail = await lookup
+          .from('promotoras')
+          .select('*')
+          .ilike('email', `%${canonicalEmail}%`)
+          .limit(10);
+        promRows = byEmail.data;
+        promErr = byEmail.error;
+      }
 
       if (!promErr) {
         const list = Array.isArray(promRows)
@@ -308,7 +326,9 @@ async function resolvePromotoraByCanonicalEmail(
           : promRows && typeof promRows === 'object'
             ? [promRows as Record<string, unknown>]
             : [];
-        const promMatch = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+        const promMatch = list.find(
+          (r) => normalizeCanonicalEmail(r.correo ?? r.email) === canonicalEmail
+        );
         if (promMatch) {
           const isInactive =
             promMatch.activo === false ||
@@ -319,12 +339,21 @@ async function resolvePromotoraByCanonicalEmail(
             if (!matched) explicitlyInactive = true;
           } else {
             matched = true;
-            if (!staffId && UUID_REGEX.test(String(promMatch.id ?? ''))) {
+            if (!staffId && promMatch.id !== undefined && promMatch.id !== null) {
               staffId = String(promMatch.id);
             }
+            const rawRegion = String(promMatch.region ?? '').trim().toLowerCase();
+            const fromExplicitRegion: OperativeSucursal | null =
+              rawRegion === 'valencia'
+                ? 'VALENCIA'
+                : rawRegion === 'occidente'
+                  ? 'ZULIA'
+                  : null;
             sucursal =
               sucursal ??
-              normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(promMatch));
+              fromExplicitRegion ??
+              normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(promMatch)) ??
+              (canonicalEmail === 'joseabraham.barroso@gmail.com' ? 'ZULIA' : null);
           }
         }
       }

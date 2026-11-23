@@ -36,7 +36,8 @@
     "verify:ciclo-semanal": "tsx scripts/verifyCicloSemanalDegustaciones.ts",
     "verify:pdf-autorizacion": "tsx scripts/verifyPendingAuthorizationPdf.ts",
     "verify:maestros": "tsx scripts/verifyMasterDataSync.ts",
-    "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts"
+    "auth:provision": "tsx scripts/provisionSupabaseAuthStaff.ts",
+    "seed:promotoras": "tsx scripts/seed-promotoras.ts"
   },
   "dependencies": {
     "@google/genai": "3.1.0",

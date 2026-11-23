@@ -45,6 +45,8 @@ export interface VerifiedAuthProfile {
   sucursal: SucursalCodigo | null;
   /** UUID verificado de `public.regiones` asignado al usuario (null en `super_admin` o sin región asignada) */
   regionId?: string | null;
+  /** Región operativa de perfil para promotoras (`'Occidente'` | `'Valencia'`) */
+  regionLabel?: 'Occidente' | 'Valencia' | null;
   rawAppRole: string;
   legacyRole: UserRole;
   staffId: string | null;
@@ -240,6 +242,24 @@ function resolveSucursalForIamRole(
   return null;
 }
 
+function mapRawRegionToPromotoraLabel(raw: unknown): 'Occidente' | 'Valencia' | null {
+  const token = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!token) return null;
+  if (token === 'occidente' || token === 'zulia') return 'Occidente';
+  if (token === 'valencia' || token === 'centro' || token === 'capital') return 'Valencia';
+  return null;
+}
+
+function mapPromotoraLabelToSucursal(label: 'Occidente' | 'Valencia' | null): SucursalCodigo | null {
+  if (label === 'Occidente') return 'ZULIA';
+  if (label === 'Valencia') return 'VALENCIA';
+  return null;
+}
+
 /**
  * Extrae el perfil verificado EXCLUSIVAMENTE desde `app_metadata` (`raw_app_meta_data` firmado en servidor).
  * REGLA DE SEGURIDAD: Jamás lee roles, sucursal ni `staff_id` desde `user_metadata`.
@@ -255,7 +275,10 @@ export function extractVerifiedProfileFromAuthUser(
     .toLowerCase();
   const iamRole = normalizeManagedUserRole(rawAppRole);
   const appRole = normalizeCanonicalAppRole(rawAppRole);
-  const sucursal = resolveSucursalForIamRole(iamRole, appMeta.sucursal);
+  const regionLabel = mapRawRegionToPromotoraLabel(appMeta.region);
+  const sucursal =
+    resolveSucursalForIamRole(iamRole, appMeta.sucursal) ??
+    resolveSucursalForIamRole(iamRole, mapPromotoraLabelToSucursal(regionLabel));
 
   const rawStaffId = String(appMeta.staff_id ?? '').trim();
   const staffId = UUID_REGEX.test(rawStaffId) ? rawStaffId : null;
@@ -276,6 +299,7 @@ export function extractVerifiedProfileFromAuthUser(
     iamRole,
     sucursal,
     regionId,
+    regionLabel: regionLabel ?? (sucursal === 'ZULIA' ? 'Occidente' : sucursal === 'VALENCIA' ? 'Valencia' : null),
     rawAppRole,
     legacyRole: mapToLegacyUserRole(rawAppRole, appRole),
     staffId,
@@ -285,20 +309,101 @@ export function extractVerifiedProfileFromAuthUser(
   };
 }
 
-interface ActivePromotoraStaffMatch {
+export interface ActivePromotoraStaffMatch {
   staffId: string;
   name: string;
   email: string;
   sucursal: SucursalCodigo | null;
+  regionLabel?: 'Occidente' | 'Valencia' | null;
+  regionId?: string | null;
 }
 
-async function findActivePromotoraInStaff(
-  userId: string,
-  normalizedEmail: string
-): Promise<ActivePromotoraStaffMatch | null> {
-  if (!isSupabaseConfigured) return null;
-  const client = getSupabaseClient();
+function inferPromotoraRegionFromRow(row: Record<string, unknown>, normalizedEmail: string): 'Occidente' | 'Valencia' | null {
+  const explicit = mapRawRegionToPromotoraLabel(row.region ?? row.sucursal);
+  if (explicit) return explicit;
+  if (normalizedEmail === 'joseabraham.barroso@gmail.com') return 'Occidente';
+  const addr = String(row.direccion ?? row.ciudad ?? '').toLowerCase();
+  if (/valencia|carabobo|los guayos|tocuyito|maracay|turmero|aragua|caracas|paraiso|montalban|plaza venezuela/.test(addr)) {
+    return 'Valencia';
+  }
+  if (/coro|punto fijo|cabimas|maracaibo|san francisco|la villa|mara|mojan|cuatricentenario|varillal|la limpia|la popular|el silencio|el bajo|santa maria|plaza de las madres|dia de las madres|\bc2\b/.test(addr)) {
+    return 'Occidente';
+  }
+  return null;
+}
 
+export async function findActivePromotoraInStaff(
+  userId: string,
+  normalizedEmail: string,
+  customClient?: SupabaseClient
+): Promise<ActivePromotoraStaffMatch | null> {
+  if (!customClient && !isSupabaseConfigured) return null;
+  const client = customClient ?? getSupabaseClient();
+
+  // 1. Fuente principal en producción: tabla `public.promotoras` (por `auth_user_id` o `correo`)
+  const tryMatchPromotorasTable = async (): Promise<ActivePromotoraStaffMatch | null> => {
+    const parsePromotoraRow = (row: Record<string, unknown>): ActivePromotoraStaffMatch | null => {
+      if (row.activo === false) return null;
+      const rowEmail = normalizePortalEmail(String(row.correo ?? row.email ?? ''));
+      if (normalizedEmail && rowEmail && rowEmail !== normalizedEmail) return null;
+      const rawId = String(row.id ?? '').trim();
+      if (!rawId) return null;
+      const regionLabel = inferPromotoraRegionFromRow(row, rowEmail || normalizedEmail);
+      const sucursal =
+        normalizeSucursalCodigo(row.sucursal) ??
+        mapPromotoraLabelToSucursal(regionLabel);
+      const rawRegId = String(row.region_id ?? '').trim();
+      return {
+        staffId: rawId,
+        name: String(row.nombre_completo ?? row.nombre ?? '').trim(),
+        email: rowEmail || normalizedEmail,
+        sucursal,
+        regionLabel,
+        regionId: UUID_REGEX.test(rawRegId) ? rawRegId : null,
+      };
+    };
+
+    if (userId && UUID_REGEX.test(userId)) {
+      try {
+        const { data, error } = await client
+          .from('promotoras')
+          .select('*')
+          .eq('auth_user_id', userId)
+          .maybeSingle();
+        if (!error && data && typeof data === 'object') {
+          const hit = parsePromotoraRow(data as Record<string, unknown>);
+          if (hit) return hit;
+        }
+      } catch {
+        // Columna auth_user_id aún no migrada o tabla no accesible por este campo
+      }
+    }
+
+    if (normalizedEmail && STRICT_EMAIL_REGEX.test(normalizedEmail)) {
+      try {
+        const { data: rows, error } = await client
+          .from('promotoras')
+          .select('*')
+          .ilike('correo', normalizedEmail)
+          .limit(5);
+        if (!error && Array.isArray(rows) && rows.length > 0) {
+          for (const rawRow of rows as Array<Record<string, unknown>>) {
+            const hit = parsePromotoraRow(rawRow);
+            if (hit) return hit;
+          }
+        }
+      } catch {
+        // Continúa a tabla staff legada
+      }
+    }
+
+    return null;
+  };
+
+  const fromPromotoras = await tryMatchPromotorasTable();
+  if (fromPromotoras) return fromPromotoras;
+
+  // 2. Respaldo compatible con instancias que utilizan `public.staff`
   if (normalizedEmail && STRICT_EMAIL_REGEX.test(normalizedEmail)) {
     try {
       const { data: rows, error: emailError } = await client
@@ -321,11 +426,13 @@ async function findActivePromotoraInStaff(
         });
 
         if (matched) {
+          const suc = normalizeSucursalCodigo((matched as { sucursal?: unknown }).sucursal);
           return {
             staffId: String(matched.id),
             name: String(matched.name || '').trim(),
             email: normalizedEmail,
-            sucursal: normalizeSucursalCodigo((matched as { sucursal?: unknown }).sucursal),
+            sucursal: suc,
+            regionLabel: suc === 'VALENCIA' ? 'Valencia' : suc === 'ZULIA' ? 'Occidente' : null,
           };
         }
       }
@@ -348,11 +455,13 @@ async function findActivePromotoraInStaff(
         const isMerch = /merchandising/i.test(String(data.role || ''));
         const emailConsistent = !rowEmail || !normalizedEmail || rowEmail === normalizedEmail;
         if (!isInactive && !isMerch && emailConsistent) {
+          const suc = normalizeSucursalCodigo((data as { sucursal?: unknown }).sucursal);
           return {
             staffId: String(data.id),
             name: String(data.name || '').trim(),
             email: rowEmail || normalizedEmail,
-            sucursal: normalizeSucursalCodigo((data as { sucursal?: unknown }).sucursal),
+            sucursal: suc,
+            regionLabel: suc === 'VALENCIA' ? 'Valencia' : suc === 'ZULIA' ? 'Occidente' : null,
           };
         }
       }
@@ -462,6 +571,8 @@ export async function resolveVerifiedProfileWithStaffFallback(
       appRole: 'promotora',
       iamRole: 'promotora',
       sucursal: activeStaff.sucursal ?? base.sucursal,
+      regionId: activeStaff.regionId ?? base.regionId ?? null,
+      regionLabel: activeStaff.regionLabel ?? base.regionLabel ?? null,
       rawAppRole: base.rawAppRole || 'promotora',
       legacyRole: 'promotora',
       staffId: activeStaff.staffId,
@@ -678,6 +789,8 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
       appRole: 'promotora',
       iamRole: 'promotora',
       sucursal: activeStaff.sucursal ?? base.sucursal,
+      regionId: activeStaff.regionId ?? base.regionId ?? null,
+      regionLabel: activeStaff.regionLabel ?? base.regionLabel ?? null,
       rawAppRole: 'promotora',
       legacyRole: 'promotora',
       staffId: activeStaff.staffId,

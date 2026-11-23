@@ -28,6 +28,7 @@ import {
   getCachedAccessToken,
   getSupabaseRealtimeClient,
 } from './supabaseClient';
+import { obtenerPromotorasMaestras } from './masterCatalogSyncService';
 import {
   DEFAULT_FDV_RENDER_API_URL,
   fetchDegustacionSurveysViaSdk,
@@ -388,6 +389,8 @@ export interface StaffMemberRecord {
   email: string;
   phone: string;
   address: string;
+  region?: 'Occidente' | 'Valencia' | string | null;
+  authUserId?: string | null;
   assignedStore: string;
   status: 'Activo' | 'Inactivo';
   password: string;
@@ -1101,6 +1104,7 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
 
   const [
     rawStaff,
+    promotorasMaestrasCatalog,
     rawCheckinsPage1,
     rawCheckinsPage2,
     rawPrices,
@@ -1113,15 +1117,20 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
   ] = await Promise.all([
     supabaseGet<RawSupabaseStaff[]>(
       'staff?select=id,name,role,email,status,creatorId,uploaderEmail,created_at&order=created_at.desc&limit=1000'
-    ),
+    ).catch(() => [] as RawSupabaseStaff[]),
+    obtenerPromotorasMaestras({ soloActivas: false }).catch(() => []),
     supabaseGet<RawSupabaseCheckin[]>(
       'checkins?select=id,date,store,type,location,creatorId,promoter,created_at&order=date.desc&limit=1000&offset=0'
-    ),
+    ).catch(() => [] as RawSupabaseCheckin[]),
     supabaseGet<RawSupabaseCheckin[]>(
       'checkins?select=id,date,store,type,location,creatorId,promoter,created_at&order=date.desc&limit=1000&offset=1000'
+    ).catch(() => [] as RawSupabaseCheckin[]),
+    supabaseGet<RawSupabasePrice[]>('prices?select=*&order=date.desc&limit=1000').catch(
+      () => [] as RawSupabasePrice[]
     ),
-    supabaseGet<RawSupabasePrice[]>('prices?select=*&order=date.desc&limit=1000'),
-    supabaseGet<RawSupabaseInventory[]>('inventory?select=*&order=date.desc&limit=1000'),
+    supabaseGet<RawSupabaseInventory[]>('inventory?select=*&order=date.desc&limit=1000').catch(
+      () => [] as RawSupabaseInventory[]
+    ),
     fetchDegustacionSurveysViaSdk(),
     fetchNonDegustacionSurveysViaSdk(undefined, {
       includeConsumerSurveys: FEATURE_FLAGS.ENABLE_MODULO1_TABLAS_METRICAS,
@@ -1203,19 +1212,91 @@ export async function fetchAllModule1FromSupabase(explicitExchangeRateBs?: numbe
       email: cleanEmail,
       phone: cleanPhone,
       address: cleanAddress,
+      region:
+        String(statusObj.address || '').match(/valencia|carabobo|maracay|turmero|caracas/i)
+          ? 'Valencia'
+          : 'Occidente',
       assignedStore: assignedLoc,
       status: 'Activo',
       // Seguridad Zero Trust: jamás hidratar contraseñas de base de datos en memoria del cliente
       password: '',
       creatorId: s.creatorId ? String(s.creatorId) : undefined,
       photoUrl: validPhoto,
-      shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${cleanAddress}`,
+      shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${cleanAddress || 'Sin dirección registrada'}`,
       tastingCompleted: 0,
       salesAssisted: 0,
       activationsCount: 0,
       totalUnits: 0,
     });
   });
+
+  // Hidratar y complementar desde la tabla real `public.promotoras` (vía BFF/RLS `/api/maestros/promotoras`)
+  const formatPromotoraDisplayName = (value: string): string => {
+    const trimmed = value.replace(/\s+/g, ' ').trim();
+    if (!trimmed) return 'Sin nombre';
+    // Solo convertir a Title Case limpio si el registro viene íntegramente en MAYÚSCULAS
+    const isAllUpper = trimmed === trimmed.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(trimmed);
+    if (!isAllUpper) return trimmed;
+    const minorWords = new Set(['de', 'del', 'la', 'las', 'los', 'y']);
+    return trimmed
+      .toLowerCase()
+      .split(' ')
+      .map((word, idx) =>
+        idx > 0 && minorWords.has(word)
+          ? word
+          : word.charAt(0).toUpperCase() + word.slice(1)
+      )
+      .join(' ');
+  };
+
+  for (const p of promotorasMaestrasCatalog) {
+    if (p.activo === false) continue;
+    const cleanEmail = String(p.email || '').trim().toLowerCase();
+    const displayName = formatPromotoraDisplayName(String(p.nombre_completo || ''));
+    const cKey = canonicalStaffKey(displayName, cleanEmail);
+    if (!cKey || seenStaffCanonicalKeys.has(cKey)) continue;
+    seenStaffCanonicalKeys.add(cKey);
+
+    const catRaw = String(p.categoria || 'Fijas').trim().toLowerCase();
+    const category: StaffCategory =
+      catRaw.includes('merch')
+        ? 'merchandising'
+        : catRaw.includes('event')
+          ? 'eventual'
+          : 'fija';
+
+    const cleanAddress = p.direccion ? String(p.direccion).trim() : '';
+    const cleanPhone = p.telefono ? String(p.telefono).trim() : '';
+    const regionLabel: 'Occidente' | 'Valencia' =
+      p.region === 'Valencia' ||
+      String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
+      p.sucursal === 'VALENCIA' ||
+      p.sucursal === 'CENTRO'
+        ? 'Valencia'
+        : 'Occidente';
+
+    staffMembers.push({
+      id: String(p.id),
+      name: displayName,
+      canonicalKey: cKey,
+      role: category === 'merchandising' ? 'Promotor Merchandising' : 'Promotora',
+      category,
+      roleCategory: category === 'merchandising' ? 'MERCHANDISING' : 'PROMOTORA',
+      email: cleanEmail,
+      phone: cleanPhone,
+      address: cleanAddress,
+      region: regionLabel,
+      authUserId: p.auth_user_id ?? null,
+      assignedStore: regionLabel,
+      status: 'Activo',
+      password: '',
+      shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${regionLabel}`,
+      tastingCompleted: 0,
+      salesAssisted: 0,
+      activationsCount: 0,
+      totalUnits: 0,
+    });
+  }
 
   // Orden: categoría (Plantilla Fija -> Eventual -> Merchandising) y luego nombre. Sin padrón de respaldo: si la tabla está vacía, la lista queda vacía.
   const categoryRank: Record<StaffCategory, number> = { fija: 1, eventual: 2, merchandising: 3 };

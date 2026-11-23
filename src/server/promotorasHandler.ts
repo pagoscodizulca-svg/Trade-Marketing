@@ -56,6 +56,8 @@ export interface PromotoraServerRecord {
   ciudad: string | null;
   estado: string | null;
   direccion: string | null;
+  region?: 'Occidente' | 'Valencia' | null;
+  auth_user_id?: string | null;
   categoria: PromotoraCategoriaOficial;
   region_id: string | null;
   sucursal: string | null;
@@ -79,27 +81,57 @@ export interface PromotorasGateway {
 
 function normalizeServerPromotoraRow(raw: Record<string, unknown>): PromotoraServerRecord {
   const emailRaw = raw.email ?? raw.correo;
+  const normalizedEmail = emailRaw ? String(emailRaw).trim().toLowerCase() : null;
   const direccion = raw.direccion ? String(raw.direccion).trim() : null;
   const ciudad = raw.ciudad ? String(raw.ciudad).trim() : direccion;
   const estado = raw.estado ? String(raw.estado).trim() : null;
   const sucursalRaw = raw.sucursal ? String(raw.sucursal).trim().toUpperCase() : null;
+  const explicitRegionRaw = raw.region ? String(raw.region).trim() : '';
+  const explicitRegion: 'Occidente' | 'Valencia' | null =
+    /^valencia$/i.test(explicitRegionRaw)
+      ? 'Valencia'
+      : /^occidente$/i.test(explicitRegionRaw)
+        ? 'Occidente'
+        : null;
   const inferredRegion =
+    (explicitRegion === 'Valencia'
+      ? 'CENTRO'
+      : explicitRegion === 'Occidente'
+        ? 'OCCIDENTE'
+        : null) ??
     mapLegacySucursalToAllowedRegion(sucursalRaw) ??
     mapLegacySucursalToAllowedRegion(estado) ??
     mapLegacySucursalToAllowedRegion(ciudad) ??
-    mapLegacySucursalToAllowedRegion(direccion);
+    mapLegacySucursalToAllowedRegion(direccion) ??
+    (normalizedEmail === 'joseabraham.barroso@gmail.com' ? 'OCCIDENTE' : null);
+
+  const regionLabel: 'Occidente' | 'Valencia' | null =
+    explicitRegion ??
+    (inferredRegion === 'OCCIDENTE'
+      ? 'Occidente'
+      : inferredRegion === 'CENTRO'
+        ? 'Valencia'
+        : null);
 
   return {
     id: String(raw.id ?? ''),
     nombre_completo: String(raw.nombre_completo ?? raw.nombre ?? 'Sin nombre').trim(),
-    email: emailRaw ? String(emailRaw).trim().toLowerCase() : null,
+    email: normalizedEmail,
     telefono: raw.telefono ? String(raw.telefono).trim() : null,
     ciudad,
     estado,
     direccion,
+    region: regionLabel,
+    auth_user_id: raw.auth_user_id ? String(raw.auth_user_id).trim() : null,
     categoria: classifyPromotoraCategoriaOficial(raw),
     region_id: raw.region_id ? String(raw.region_id).trim() : null,
-    sucursal: sucursalRaw ?? (inferredRegion ? mapAllowedRegionToLegacySucursal(inferredRegion) : null),
+    sucursal:
+      sucursalRaw ??
+      (regionLabel === 'Valencia'
+        ? 'VALENCIA'
+        : inferredRegion
+          ? mapAllowedRegionToLegacySucursal(inferredRegion)
+          : null),
     supervisor_id: raw.supervisor_id ? String(raw.supervisor_id).trim() : null,
     activo: raw.activo !== false,
     created_at: raw.created_at ? String(raw.created_at) : undefined,

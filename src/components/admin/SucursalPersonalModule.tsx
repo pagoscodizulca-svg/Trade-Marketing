@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { provisionStaffAuthAccountViaBackend } from '../../services/authService';
+import { obtenerPromotorasMaestras } from '../../services/masterCatalogSyncService';
 import { getSupabaseClient, isSupabaseConfigured } from '../../services/supabaseClient';
 import {
   MANAGED_USER_ROLE_LABELS,
@@ -70,6 +71,9 @@ export interface SucursalStaffMemberRow {
   name: string;
   role: string;
   email: string;
+  phone?: string | null;
+  address?: string | null;
+  region?: 'Occidente' | 'Valencia' | string | null;
   status: string;
   categoria?: PromotoraCategoriaOficial | string | null;
   auth_user_id?: string | null;
@@ -320,6 +324,11 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
   const [bundle, setBundle] = useState(() =>
     normalizeScopedBundle(initialBundle, activeHub)
   );
+  const [regionalPromotoraCounts, setRegionalPromotoraCounts] = useState<{
+    Occidente: number;
+    Valencia: number;
+    total: number;
+  } | null>(null);
   const [loading, setLoading] = useState<boolean>(
     () => !scopedInitialBundle && Boolean(customClient || isSupabaseConfigured)
   );
@@ -378,14 +387,80 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
         p_sucursal: activeHub,
       });
 
-      if (error || !data || typeof data !== 'object') {
-        throw new Error(
-          error?.message ||
-            `No se pudo sincronizar el padrón de ${SUCURSAL_PERSONAL_MODULE_TITLES[activeHub]}.`
-        );
+      const rpcBundle =
+        !error && data && typeof data === 'object'
+          ? normalizeScopedBundle(data as SucursalPersonalBundle, activeHub)
+          : null;
+
+      if (rpcBundle && (rpcBundle.staff.length > 0 || customClient)) {
+        setBundle(rpcBundle);
+        return;
       }
 
-      setBundle(normalizeScopedBundle(data as SucursalPersonalBundle, activeHub));
+      // Respaldo real conectado a `public.promotoras` vía BFF/RLS (`/api/maestros/promotoras`)
+      const allPromotoras = await obtenerPromotorasMaestras({ soloActivas: false });
+      const minorWords = new Set(['de', 'del', 'la', 'las', 'los', 'y']);
+      const formatDisplayName = (raw: string): string => {
+        const trimmed = raw.replace(/\s+/g, ' ').trim();
+        if (!trimmed) return 'Sin nombre';
+        const isAllUpper = trimmed === trimmed.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(trimmed);
+        if (!isAllUpper) return trimmed;
+        return trimmed
+          .toLowerCase()
+          .split(' ')
+          .map((w, idx) => (idx > 0 && minorWords.has(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+          .join(' ');
+      };
+
+      const resolveRegionPerfil = (p: (typeof allPromotoras)[number]): 'Occidente' | 'Valencia' =>
+        p.region === 'Valencia' ||
+        String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
+        p.sucursal === 'VALENCIA' ||
+        p.sucursal === 'CENTRO'
+          ? 'Valencia'
+          : 'Occidente';
+
+      const occCount = allPromotoras.filter((p) => resolveRegionPerfil(p) === 'Occidente').length;
+      const valCount = allPromotoras.filter((p) => resolveRegionPerfil(p) === 'Valencia').length;
+      setRegionalPromotoraCounts({
+        Occidente: occCount,
+        Valencia: valCount,
+        total: allPromotoras.length,
+      });
+
+      const hubTargetRegion: 'Occidente' | 'Valencia' | null =
+        activeHub === 'ZULIA'
+          ? 'Occidente'
+          : activeHub === 'VALENCIA' || activeHub === 'CENTRO'
+            ? 'Valencia'
+            : null;
+
+      const scopedPromotoras: SucursalStaffMemberRow[] = allPromotoras
+        .filter((p) => (hubTargetRegion ? resolveRegionPerfil(p) === hubTargetRegion : false))
+        .map((p) => {
+          const regionLabel = resolveRegionPerfil(p);
+          return {
+            id: String(p.id),
+            name: formatDisplayName(String(p.nombre_completo || '')),
+            role: p.tipo || 'Promotora',
+            email: normalizeManagedUserEmail(p.email || ''),
+            phone: p.telefono || null,
+            address: p.direccion || null,
+            region: regionLabel,
+            status: p.activo !== false ? 'Activo' : 'Inactivo',
+            categoria: classifyPromotoraCategoriaOficial(p as unknown as Record<string, unknown>),
+            auth_user_id: p.auth_user_id ?? null,
+            sucursal: activeHub,
+            region_id: p.region_id ?? null,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+
+      setBundle({
+        ...(rpcBundle ?? normalizeScopedBundle(null, activeHub)),
+        sucursal: activeHub,
+        staff: scopedPromotoras,
+      });
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -423,7 +498,12 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
   );
 
   const filteredStaff = useMemo(() => {
-    const q = staffSearch.trim().toLowerCase();
+    const normalize = (v: unknown) =>
+      String(v ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    const q = normalize(staffSearch.trim());
     return bundle.staff.filter((s) => {
       const cat = classifyPromotoraCategoriaOficial(s as unknown as Record<string, unknown>);
       if (staffCategoryFilter !== 'TODAS' && cat !== staffCategoryFilter) {
@@ -431,10 +511,13 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
       }
       if (!q) return true;
       return (
-        s.name.toLowerCase().includes(q) ||
-        normalizeManagedUserEmail(s.email).includes(q) ||
-        String(s.role || '').toLowerCase().includes(q) ||
-        cat.toLowerCase().includes(q)
+        normalize(s.name).includes(q) ||
+        normalize(normalizeManagedUserEmail(s.email)).includes(q) ||
+        normalize(s.phone).includes(q) ||
+        normalize(s.address || 'Sin dirección registrada').includes(q) ||
+        normalize(s.region).includes(q) ||
+        normalize(s.role).includes(q) ||
+        normalize(cat).includes(q)
       );
     });
   }, [bundle.staff, staffSearch, staffCategoryFilter]);
@@ -752,13 +835,21 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
               <span>Módulos Independientes de Personal por Sucursal (5 Regiones)</span>
             </span>
             <span className="text-[11px] font-mono text-zinc-400">
-              Aislamiento estricto Zero-Mixing · {OPERATIVE_SUCURSALES.length} hubs activos
+              {regionalPromotoraCounts
+                ? `Occidente: ${regionalPromotoraCounts.Occidente} · Valencia: ${regionalPromotoraCounts.Valencia} · Total: ${regionalPromotoraCounts.total}`
+                : `Aislamiento estricto Zero-Mixing · ${OPERATIVE_SUCURSALES.length} hubs activos`}
             </span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
             {regiones.map((reg) => {
               const isSelected = reg.codigo === activeHub;
+              const regBadge =
+                regionalPromotoraCounts && reg.codigo === 'ZULIA'
+                  ? `Occidente · ${regionalPromotoraCounts.Occidente}`
+                  : regionalPromotoraCounts && reg.codigo === 'VALENCIA'
+                    ? `Valencia · ${regionalPromotoraCounts.Valencia}`
+                    : null;
               return (
                 <button
                   key={reg.codigo}
@@ -771,9 +862,16 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                       : 'bg-black/70 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-white'
                   }`}
                 >
-                  <span className="text-[10px] font-mono font-bold uppercase block text-red-400">
-                    {reg.codigo}
-                  </span>
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-[10px] font-mono font-bold uppercase text-red-400">
+                      {reg.codigo}
+                    </span>
+                    {regBadge && (
+                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-zinc-900 text-zinc-200 border border-white/10">
+                        {regBadge}
+                      </span>
+                    )}
+                  </div>
                   <span className="text-xs font-extrabold block truncate">
                     {SUCURSAL_PERSONAL_MODULE_TITLES[reg.codigo]}
                   </span>
@@ -1010,7 +1108,10 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
               <thead>
                 <tr className="bg-zinc-900/70 text-[10px] font-extrabold uppercase tracking-wider text-zinc-400">
                   <th className="py-2.5 px-3.5">Promotora</th>
+                  <th className="py-2.5 px-3.5">Dirección</th>
+                  <th className="py-2.5 px-3.5">Teléfono</th>
                   <th className="py-2.5 px-3.5">Correo Electrónico</th>
+                  <th className="py-2.5 px-3.5">Región</th>
                   <th className="py-2.5 px-3.5">Categoría</th>
                   <th className="py-2.5 px-3.5">Estado</th>
                   <th className="py-2.5 px-3.5">Credencial /portal</th>
@@ -1020,7 +1121,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
               <tbody className="divide-y divide-white/[0.06]">
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-zinc-400 font-mono">
+                    <td colSpan={9} className="py-10 text-center text-zinc-400 font-mono">
                       <span className="inline-flex items-center gap-2">
                         <Loader2 className="w-4 h-4 animate-spin text-red-500" />
                         Cargando personal de {sucursalLabel}...
@@ -1029,7 +1130,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                   </tr>
                 ) : filteredStaff.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-zinc-500">
+                    <td colSpan={9} className="py-8 text-center text-zinc-500">
                       No hay promotoras registradas para {sucursalLabel} con el filtro actual.
                     </td>
                   </tr>
@@ -1046,11 +1147,36 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
                         : rowCat === 'Eventuales'
                           ? 'bg-amber-500/15 text-amber-200 border-amber-500/35'
                           : 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35';
+                    const rowRegion =
+                      row.region ||
+                      (activeHub === 'VALENCIA' || activeHub === 'CENTRO' ? 'Valencia' : 'Occidente');
+                    const rowAddress = row.address && String(row.address).trim() ? String(row.address).trim() : null;
                     return (
                       <tr key={row.id} className="hover:bg-white/[0.02]">
                         <td className="py-2.5 px-3.5 font-semibold text-white">{row.name}</td>
+                        <td className="py-2.5 px-3.5 text-zinc-300 max-w-[220px] truncate" title={rowAddress || 'Sin dirección registrada'}>
+                          {rowAddress ? (
+                            rowAddress
+                          ) : (
+                            <span className="italic text-zinc-500">Sin dirección registrada</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3.5 font-mono text-zinc-300 whitespace-nowrap">
+                          {row.phone || '—'}
+                        </td>
                         <td className="py-2.5 px-3.5 font-mono text-zinc-300">
                           {normalizeManagedUserEmail(row.email) || '—'}
+                        </td>
+                        <td className="py-2.5 px-3.5">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              rowRegion === 'Valencia'
+                                ? 'bg-sky-500/15 text-sky-300 border-sky-500/35'
+                                : 'bg-red-500/15 text-red-300 border-red-500/35'
+                            }`}
+                          >
+                            {rowRegion}
+                          </span>
                         </td>
                         <td className="py-2.5 px-3.5">
                           <span

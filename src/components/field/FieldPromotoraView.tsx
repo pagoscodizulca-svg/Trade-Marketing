@@ -99,6 +99,7 @@ import {
   sanitizeExternalHttpsUrl,
 } from '../../services/fdvDegustacionesAdapter';
 import { provisionStaffAuthAccountViaBackend } from '../../services/authService';
+import { obtenerPromotorasMaestras } from '../../services/masterCatalogSyncService';
 import {
   assignAcceptedDegustacionToPromotoraRoute,
   buildActivePromotoraCatalog,
@@ -2507,10 +2508,13 @@ export const FieldPromotoraView: React.FC = () => {
   };
 
   // ----------------------------------------------------
-  // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (13 FIJAS + 9 EVENTUALES + 2 MERCHANDISING)
+  // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (OCCIDENTE + VALENCIA · SUPABASE `promotoras`)
   // ----------------------------------------------------
+  const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<'TODAS' | 'Occidente' | 'Valencia'>('TODAS');
   const [selectedStaffCategoryFilter, setSelectedStaffCategoryFilter] = useState<'TODAS' | StaffCategory>('TODAS');
   const [selectedStaffSearch, setSelectedStaffSearch] = useState('');
+  const [fallbackPromotorasStaff, setFallbackPromotorasStaff] = useState<StaffMemberRecord[]>([]);
+  const [loadingPersonalCatalog, setLoadingPersonalCatalog] = useState(false);
   const [uploadingPhotoStaffId, setUploadingPhotoStaffId] = useState<string | null>(null);
   const [isSavingStaffModal, setIsSavingStaffModal] = useState<boolean>(false);
   const [staffFormModal, setStaffFormModal] = useState<{
@@ -2539,21 +2543,134 @@ export const FieldPromotoraView: React.FC = () => {
     status: 'Activo',
   });
 
+  const loadFallbackPromotorasCatalog = useCallback(async (forceRefresh = false) => {
+    setLoadingPersonalCatalog(true);
+    try {
+      const rows = await obtenerPromotorasMaestras({ soloActivas: false, forzarRefresco: forceRefresh });
+      const minorWords = new Set(['de', 'del', 'la', 'las', 'los', 'y']);
+      const formatDisplayName = (raw: string): string => {
+        const trimmed = raw.replace(/\s+/g, ' ').trim();
+        if (!trimmed) return 'Sin nombre';
+        const isAllUpper = trimmed === trimmed.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(trimmed);
+        if (!isAllUpper) return trimmed;
+        return trimmed
+          .toLowerCase()
+          .split(' ')
+          .map((word, idx) =>
+            idx > 0 && minorWords.has(word)
+              ? word
+              : word.charAt(0).toUpperCase() + word.slice(1)
+          )
+          .join(' ');
+      };
+
+      const mapped: StaffMemberRecord[] = rows
+        .filter((p) => p.activo !== false)
+        .map((p) => {
+          const displayName = formatDisplayName(String(p.nombre_completo || ''));
+          const cleanEmail = String(p.email || '').trim().toLowerCase();
+          const catRaw = String(p.categoria || 'Fijas').trim().toLowerCase();
+          const category: StaffCategory = catRaw.includes('merch')
+            ? 'merchandising'
+            : catRaw.includes('event')
+              ? 'eventual'
+              : 'fija';
+          const regionLabel: 'Occidente' | 'Valencia' =
+            p.region === 'Valencia' ||
+            String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
+            p.sucursal === 'VALENCIA' ||
+            p.sucursal === 'CENTRO'
+              ? 'Valencia'
+              : 'Occidente';
+          return {
+            id: String(p.id),
+            name: displayName,
+            canonicalKey: canonicalStaffKey(displayName, cleanEmail),
+            role: category === 'merchandising' ? 'Promotor Merchandising' : 'Promotora',
+            category,
+            roleCategory: (category === 'merchandising' ? 'MERCHANDISING' : 'PROMOTORA') as
+              | 'MERCHANDISING'
+              | 'PROMOTORA',
+            email: cleanEmail,
+            phone: p.telefono ? String(p.telefono).trim() : '',
+            address: p.direccion ? String(p.direccion).trim() : '',
+            region: regionLabel,
+            authUserId: p.auth_user_id ?? null,
+            assignedStore: regionLabel,
+            status: 'Activo' as const,
+            password: '',
+            shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${regionLabel}`,
+            tastingCompleted: 0,
+            salesAssisted: 0,
+            activationsCount: 0,
+            totalUnits: 0,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+
+      setFallbackPromotorasStaff(mapped);
+    } catch {
+      // Mantiene estado previo sin romper la vista
+    } finally {
+      setLoadingPersonalCatalog(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const bundleCount = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo').length;
+    if (activeSubTab === 'personal' && bundleCount === 0 && fallbackPromotorasStaff.length === 0) {
+      void loadFallbackPromotorasCatalog(false);
+    }
+  }, [activeSubTab, module1Bundle?.staffMembers, fallbackPromotorasStaff.length, loadFallbackPromotorasCatalog]);
+
   const staffList = useMemo<StaffMemberRecord[]>(() => {
-    return (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
-  }, [module1Bundle]);
+    const fromBundle = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
+    if (fromBundle.length > 0) return fromBundle;
+    return fallbackPromotorasStaff;
+  }, [module1Bundle, fallbackPromotorasStaff]);
+
+  const resolveMemberRegion = useCallback((m: StaffMemberRecord): 'Occidente' | 'Valencia' => {
+    if (m.region === 'Valencia' || String(m.region || '').toLowerCase() === 'valencia') {
+      return 'Valencia';
+    }
+    if (m.region === 'Occidente' || String(m.region || '').toLowerCase() === 'occidente') {
+      return 'Occidente';
+    }
+    if (String(m.address || '').match(/valencia|carabobo|los guayos|tocuyito|maracay|turmero|caracas|el paraiso|montalban|plaza venezuela/i)) {
+      return 'Valencia';
+    }
+    return 'Occidente';
+  }, []);
+
+  const occidenteStaffCount = useMemo(
+    () => staffList.filter((m) => resolveMemberRegion(m) === 'Occidente').length,
+    [staffList, resolveMemberRegion]
+  );
+
+  const valenciaStaffCount = useMemo(
+    () => staffList.filter((m) => resolveMemberRegion(m) === 'Valencia').length,
+    [staffList, resolveMemberRegion]
+  );
+
+  const regionFilteredStaffList = useMemo(
+    () =>
+      selectedStaffRegionFilter === 'TODAS'
+        ? staffList
+        : staffList.filter((m) => resolveMemberRegion(m) === selectedStaffRegionFilter),
+    [staffList, selectedStaffRegionFilter, resolveMemberRegion]
+  );
 
   const fijaStaffMembers = useMemo(
-    () => staffList.filter((m) => m.category === 'fija'),
-    [staffList]
+    () => regionFilteredStaffList.filter((m) => m.category === 'fija'),
+    [regionFilteredStaffList]
   );
   const eventualStaffMembers = useMemo(
-    () => staffList.filter((m) => m.category === 'eventual'),
-    [staffList]
+    () => regionFilteredStaffList.filter((m) => m.category === 'eventual'),
+    [regionFilteredStaffList]
   );
   const merchStaffMembers = useMemo(
-    () => staffList.filter((m) => m.category === 'merchandising'),
-    [staffList]
+    () => regionFilteredStaffList.filter((m) => m.category === 'merchandising'),
+    [regionFilteredStaffList]
   );
 
   // Mapa en vivo de degustaciones activas (Semana en Curso, no históricas) asignadas a cada promotora activa
@@ -2581,17 +2698,24 @@ export const FieldPromotoraView: React.FC = () => {
   const matchesStaffSearch = useCallback(
     (m: StaffMemberRecord): boolean => {
       if (!selectedStaffSearch.trim()) return true;
-      const q = selectedStaffSearch.toLowerCase();
+      const normalize = (v: string) =>
+        String(v || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase();
+      const q = normalize(selectedStaffSearch.trim());
+      const memberRegion = resolveMemberRegion(m);
       return (
-        m.name.toLowerCase().includes(q) ||
-        m.assignedStore.toLowerCase().includes(q) ||
-        m.email.toLowerCase().includes(q) ||
-        m.phone.toLowerCase().includes(q) ||
-        m.address.toLowerCase().includes(q) ||
-        m.role.toLowerCase().includes(q)
+        normalize(m.name).includes(q) ||
+        normalize(m.assignedStore).includes(q) ||
+        normalize(m.email).includes(q) ||
+        normalize(m.phone).includes(q) ||
+        normalize(m.address || 'Sin dirección registrada').includes(q) ||
+        normalize(memberRegion).includes(q) ||
+        normalize(m.role).includes(q)
       );
     },
-    [selectedStaffSearch]
+    [selectedStaffSearch, resolveMemberRegion]
   );
 
   const compressStaffPhotoToBase64 = (file: File): Promise<string> =>
@@ -6211,7 +6335,16 @@ export const FieldPromotoraView: React.FC = () => {
                     </h4>
                     <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/35">
-                        Activo
+                        {member.status === 'Activo' ? 'Activo' : 'Inactivo'}
+                      </span>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                          resolveMemberRegion(member) === 'Valencia'
+                            ? 'bg-sky-500/15 text-sky-300 border-sky-500/35'
+                            : 'bg-red-500/15 text-red-300 border-red-500/35'
+                        }`}
+                      >
+                        {resolveMemberRegion(member)}
                       </span>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${categoryBadgeClass}`}>
                         {categoryLabel}
@@ -6240,12 +6373,18 @@ export const FieldPromotoraView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Bloque de Ficha Técnica: Teléfono, Correo, Asignación PDV, Dirección y Contraseña App */}
+              {/* Bloque de Ficha Técnica: Región, Teléfono, Correo y Dirección */}
               <div className="p-3 rounded-xl bg-zinc-950/85 border border-white/[0.06] space-y-1.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-zinc-400 shrink-0">Región:</span>
+                  <span className={`${pdvColorClass} font-bold text-right truncate max-w-[190px]`}>
+                    {resolveMemberRegion(member)}
+                  </span>
+                </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-zinc-400 shrink-0">Teléfono:</span>
                   <span className="text-zinc-100 font-semibold font-mono text-right truncate" title={member.phone}>
-                    {member.phone}
+                    {member.phone || '—'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
@@ -6255,24 +6394,19 @@ export const FieldPromotoraView: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-zinc-400 shrink-0">Asignación PDV:</span>
-                  <span
-                    className={`${pdvColorClass} font-bold text-right truncate max-w-[190px] uppercase`}
-                    title={member.assignedStore}
-                  >
-                    {member.assignedStore}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
                   <span className="text-zinc-400 shrink-0">Dirección:</span>
                   <span
-                    className="text-zinc-200 font-semibold text-right truncate max-w-[195px]"
-                    title={member.address}
+                    className={`text-right truncate max-w-[195px] ${
+                      member.address?.trim()
+                        ? 'text-zinc-200 font-semibold'
+                        : 'text-zinc-500 italic'
+                    }`}
+                    title={member.address?.trim() || 'Sin dirección registrada'}
                   >
-                    {member.address}
+                    {member.address?.trim() || 'Sin dirección registrada'}
                   </span>
                 </div>
-                              </div>
+              </div>
 
               {/* Estado en vivo del Cronograma Actual */}
               <div className="space-y-1.5">
@@ -6350,40 +6484,116 @@ export const FieldPromotoraView: React.FC = () => {
         return (
           <div className="space-y-7">
             {/* Barra superior de control y filtros del padrón activo */}
-            <div className="bg-zinc-900/80 border border-white/[0.08] rounded-2xl p-5 shadow-xl flex flex-col xl:flex-row xl:items-center justify-between gap-4 backdrop-blur-md">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider">
-                    Padrón Activo Sincronizado • Supabase `staff`
-                  </span>
-                  <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-950 text-zinc-300 border border-white/10">
-                    {fijaStaffMembers.length} Fijas · {eventualStaffMembers.length} Eventuales · {merchStaffMembers.length} Merchandising
-                  </span>
+            <div className="bg-zinc-900/80 border border-white/[0.08] rounded-2xl p-5 shadow-xl flex flex-col gap-4 backdrop-blur-md">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider">
+                      Padrón Activo Sincronizado • Supabase `promotoras`
+                    </span>
+                    <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-950 text-zinc-300 border border-white/10">
+                      Occidente: {occidenteStaffCount} · Valencia: {valenciaStaffCount}
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-black text-white mt-1.5">
+                    Personal y Promotoras Activas ({regionFilteredStaffList.length}
+                    {selectedStaffRegionFilter !== 'TODAS' ? ` de ${staffList.length}` : ''})
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    Directorio sincronizado con Supabase por región operativa (Occidente y Valencia) y vinculado a cuentas de acceso en Supabase Auth.
+                  </p>
                 </div>
-                <h3 className="text-lg font-black text-white mt-1.5">
-                  Promotoras Activas y Promotores de Merchandising ({staffList.length})
-                </h3>
-                <p className="text-xs text-zinc-400">
-                  Sincronización exacta del personal activo en campo; perfiles inactivos o retirados han sido depurados de todo el sistema.
-                </p>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      data-testid="personal-search-input"
+                      placeholder="Buscar nombre, correo, teléfono..."
+                      value={selectedStaffSearch}
+                      onChange={(e) => setSelectedStaffSearch(e.target.value)}
+                      className="pl-8 pr-3 py-1.5 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void refreshSupabaseData();
+                      void loadFallbackPromotorasCatalog(true);
+                    }}
+                    disabled={isLoadingSupabase || loadingPersonalCatalog}
+                    className="px-3 py-1.5 rounded-xl bg-zinc-950 hover:bg-zinc-800 text-zinc-200 border border-white/10 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                    title="Sincronizar padrón activo con Supabase"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isLoadingSupabase || loadingPersonalCatalog ? 'animate-spin text-red-400' : ''}`}
+                    />
+                    <span>Sincronizar</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openCreateStaffModal(
+                        selectedStaffCategoryFilter === 'TODAS' ? 'fija' : selectedStaffCategoryFilter
+                      )
+                    }
+                    className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Registrar Personal</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    placeholder="Buscar nombre, correo, PDV..."
-                    value={selectedStaffSearch}
-                    onChange={(e) => setSelectedStaffSearch(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500"
-                  />
+              {/* Selector de Región / Perfil (Occidente vs Valencia) + Categoría */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-white/[0.06]">
+                <div
+                  className="flex flex-wrap items-center bg-zinc-950 p-1 rounded-xl border border-white/10 gap-1"
+                  role="tablist"
+                  aria-label="Filtrar personal por región"
+                >
+                  {(
+                    [
+                      { id: 'TODAS', label: 'Todas las Regiones', count: staffList.length, testId: 'personal-region-tab-todas' },
+                      { id: 'Occidente', label: 'Occidente', count: occidenteStaffCount, testId: 'personal-region-tab-occidente' },
+                      { id: 'Valencia', label: 'Valencia', count: valenciaStaffCount, testId: 'personal-region-tab-valencia' },
+                    ] as const
+                  ).map((regTab) => {
+                    const active = selectedStaffRegionFilter === regTab.id;
+                    return (
+                      <button
+                        key={regTab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        data-testid={regTab.testId}
+                        onClick={() => setSelectedStaffRegionFilter(regTab.id)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                          active
+                            ? 'bg-red-600 text-white shadow'
+                            : 'text-zinc-400 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                      >
+                        <span>{regTab.label}</span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                            active ? 'bg-black/30 text-white' : 'bg-zinc-900 text-zinc-400'
+                          }`}
+                        >
+                          {regTab.count}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div className="flex flex-wrap items-center bg-zinc-950 p-1 rounded-xl border border-white/10 gap-1">
                   {(
                     [
-                      { id: 'TODAS', label: `Todas (${staffList.length})` },
+                      { id: 'TODAS', label: `Todas (${regionFilteredStaffList.length})` },
                       { id: 'fija', label: `Plantilla Fija (${fijaStaffMembers.length})` },
                       { id: 'eventual', label: `Eventual (${eventualStaffMembers.length})` },
                       { id: 'merchandising', label: `Merchandising (${merchStaffMembers.length})` },
@@ -6395,7 +6605,7 @@ export const FieldPromotoraView: React.FC = () => {
                       onClick={() => setSelectedStaffCategoryFilter(tab.id)}
                       className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                         selectedStaffCategoryFilter === tab.id
-                          ? 'bg-red-600 text-white shadow'
+                          ? 'bg-zinc-800 text-white border border-white/15 shadow'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
@@ -6403,30 +6613,6 @@ export const FieldPromotoraView: React.FC = () => {
                     </button>
                   ))}
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => refreshSupabaseData()}
-                  disabled={isLoadingSupabase}
-                  className="px-3 py-1.5 rounded-xl bg-zinc-950 hover:bg-zinc-800 text-zinc-200 border border-white/10 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                  title="Sincronizar padrón activo con Supabase"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSupabase ? 'animate-spin text-red-400' : ''}`} />
-                  <span>Sincronizar</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    openCreateStaffModal(
-                      selectedStaffCategoryFilter === 'TODAS' ? 'fija' : selectedStaffCategoryFilter
-                    )
-                  }
-                  className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-red-950/50 transition cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Registrar Personal</span>
-                </button>
               </div>
             </div>
 
