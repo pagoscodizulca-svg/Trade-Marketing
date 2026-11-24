@@ -29,17 +29,17 @@
   {
     "nombre_completo": "Dariannys Ferrer",
     "direccion": "Santa Maria",
-    "telefono": "0412-1089107",
-    "correo": "dariannysferrer@gmail.com",
+    "telefono": "04121985197",
+    "correo": "dariannysferrer23@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
   },
   {
-    "nombre_completo": "Camila Morales",
+    "nombre_completo": "Camila Vilchez",
     "direccion": "Mara",
-    "telefono": "0412-1688424",
-    "correo": "camilamorales@gmail.com",
+    "telefono": "04121680424",
+    "correo": "cv25072006@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
@@ -47,8 +47,8 @@
   {
     "nombre_completo": "Careliz Reyes",
     "direccion": "Punto Fijo",
-    "telefono": "0414-6189171",
-    "correo": "reyescareliz@gmail.com",
+    "telefono": "04146189171",
+    "correo": "reyescareliz3@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
@@ -56,11 +56,11 @@
   {
     "nombre_completo": "Maria de los Angeles Almarza Arandia",
     "direccion": "Cabimas",
-    "telefono": "+58 424-1431342",
-    "correo": "mariaalmarza@gmail.com",
+    "telefono": "+584241431342",
+    "correo": "mariaalmarza16@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Scarleth Piña",
@@ -92,8 +92,8 @@
   {
     "nombre_completo": "Tania Cardenas",
     "direccion": "C2 Cerca del Barrio Integracion",
-    "telefono": "+58 414-6177982",
-    "correo": "taniacardenas@gmail.com",
+    "telefono": "+584146177982",
+    "correo": "tataacardenas@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
@@ -101,8 +101,8 @@
   {
     "nombre_completo": "Nairelis Antunez",
     "direccion": "Barrio Dia de las Madres",
-    "telefono": "+58 424-7517214",
-    "correo": "nairelisantunez@gmail.com",
+    "telefono": "04247317216",
+    "correo": "antuneznairelis@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
@@ -110,8 +110,8 @@
   {
     "nombre_completo": "Jaivelin Pereira",
     "direccion": "El Bajo",
-    "telefono": "+58 412-6848929",
-    "correo": "jaivelinpereira@gmail.com",
+    "telefono": "04128048525",
+    "correo": "jaivelinfereira20@gmail.com",
     "region": "Occidente",
     "activo": true,
     "categoria": "Fijas"
@@ -119,101 +119,101 @@
   {
     "nombre_completo": "Anyelit Ruiz",
     "direccion": "C2",
-    "telefono": "+58 414-3632182",
+    "telefono": "+584143632182",
     "correo": "ruizanyelit@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Valeria Acevedo",
     "direccion": "Urb Cuatricentenario",
-    "telefono": "+58 412-6894222",
+    "telefono": "+584126894222",
     "correo": "valeriaacevedo@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Claudia Alvarez",
     "direccion": "C2",
-    "telefono": "+58 424-6428958",
+    "telefono": "+584246428958",
     "correo": "claudiaalvarez@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Jelary Acosta",
     "direccion": "Via El Mojan",
-    "telefono": "+58 424-6832444",
+    "telefono": "+584246832444",
     "correo": "jelaryacosta@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Mariangel Valdivieso",
     "direccion": "Urb La Popular",
-    "telefono": "+58 412-6414928",
+    "telefono": "+584126414928",
     "correo": "mariangelvaldivieso@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Angelica Sanchez",
     "direccion": "Plaza de las Madres",
-    "telefono": "+58 412-1692007",
+    "telefono": "+584121692007",
     "correo": "angelicasanchez@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Eneliangela Gonzalez",
     "direccion": "Urb El Varillal",
-    "telefono": "+58 412-0676697",
+    "telefono": "+584120676697",
     "correo": "eneliangelagonzalez@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Marianyel Aranda",
     "direccion": "San Francisco",
-    "telefono": "+58 412-6888447",
+    "telefono": "+584126888447",
     "correo": "marianyelaranda@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Juliannys Gil",
     "direccion": "Av La Limpia",
-    "telefono": "+58 424-6779724",
+    "telefono": "+584246779724",
     "correo": "juliannys.gil@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Eventuales"
   },
   {
     "nombre_completo": "Jose Barroso",
     "direccion": null,
-    "telefono": "0412-0696239",
+    "telefono": "04120696239",
     "correo": "joseabraham.barroso@gmail.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Merchandising"
   },
   {
     "nombre_completo": "Zioreli Grangger",
     "direccion": "Cuatricentenario 1 Etapa",
-    "telefono": "0414-6869967",
-    "correo": "zioreli.grangger@hotmail.com",
+    "telefono": "04146069963",
+    "correo": "ziorelis.grangger@codizulca.com",
     "region": "Occidente",
     "activo": true,
-    "categoria": "Fijas"
+    "categoria": "Merchandising"
   },
   {
     "nombre_completo": "Paola Gabriela Maldonado Jaimes",

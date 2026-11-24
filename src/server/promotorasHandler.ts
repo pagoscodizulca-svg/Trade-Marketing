@@ -89,8 +89,9 @@ export interface PromotorasGateway {
 }
 
 function normalizeServerPromotoraRow(raw: Record<string, unknown>): PromotoraServerRecord {
-  const emailRaw = raw.email ?? raw.correo;
-  const normalizedEmail = emailRaw ? String(emailRaw).trim().toLowerCase() : null;
+  const correoClean = typeof raw.correo === 'string' ? raw.correo.trim().toLowerCase() : '';
+  const emailClean = typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : '';
+  const normalizedEmail = correoClean || emailClean || null;
   const direccion = raw.direccion ? String(raw.direccion).trim() : null;
   const ciudad = raw.ciudad ? String(raw.ciudad).trim() : direccion;
   const estado = raw.estado ? String(raw.estado).trim() : null;
@@ -745,7 +746,9 @@ export function createPromotorasHandlers(options?: {
       const updatePayload: Record<string, unknown> = { ...parsed.data };
       delete updatePayload.region;
       if (parsed.data.email !== undefined) {
-        updatePayload.correo = parsed.data.email;
+        const canonicalEmail = parsed.data.email ? parsed.data.email.trim().toLowerCase() : null;
+        updatePayload.email = canonicalEmail;
+        updatePayload.correo = canonicalEmail;
       }
       if (parsed.data.region) {
         const regId = await gateway.resolveRegionIdByCode(parsed.data.region);
@@ -795,6 +798,23 @@ export function createPromotorasHandlers(options?: {
             message: detail,
           };
         }
+      } else if (!options?.gatewayFactory) {
+        serverLogger.warn('promotora_auth_sync_skipped_no_admin_client', {
+          promotoraId: updated.id,
+          emailChanged: normalizedNextEmail !== normalizedPrevEmail,
+        });
+        authSync = {
+          synced: false,
+          status: 'skipped_no_admin_client',
+          authUserId: updated.auth_user_id ?? existing.auth_user_id ?? null,
+          previousEmail: normalizedPrevEmail,
+          email: updated.email,
+          emailChanged: false,
+          profileSynced: false,
+          passwordPreserved: true,
+          message:
+            'Sincronización Auth omitida: verifica SUPABASE_SERVICE_ROLE_KEY en el servidor.',
+        };
       }
 
       res.status(200).json({

@@ -63,6 +63,7 @@ export interface SyncPromotorasEmailsReport {
   desincronizadasDetectadas: number;
   sinCuentaAuth: number;
   actualizadas: number;
+  promotorasColumnasAlineadas: number;
   conflictos: number;
   errores: number;
   driftItems: PromotoraEmailDriftItem[];
@@ -142,6 +143,7 @@ export async function runPromotorasEmailDriftSync(params: {
     desincronizadasDetectadas: 0,
     sinCuentaAuth: 0,
     actualizadas: 0,
+    promotorasColumnasAlineadas: 0,
     conflictos: 0,
     errores: 0,
     driftItems: [],
@@ -152,6 +154,13 @@ export async function runPromotorasEmailDriftSync(params: {
     const id = String(row.id ?? '').trim();
     const nombre = String(row.nombre_completo ?? '').replace(/\s+/g, ' ').trim();
     const correo = normalizeSyncEmail(row.correo ?? row.email);
+    const hasEmailColumn = 'email' in row;
+    const rawCorreoVal = typeof row.correo === 'string' ? row.correo : null;
+    const rawEmailVal = typeof row.email === 'string' ? row.email : null;
+    const needsPromotoraColumnAlign = Boolean(
+      correo &&
+        (rawCorreoVal !== correo || (hasEmailColumn && rawEmailVal !== correo))
+    );
     const regionMeta = resolveSyncRegionMetadata(row.region, row.sucursal);
     const activo = row.activo !== false;
     const authUserId = row.auth_user_id ? String(row.auth_user_id).trim() : null;
@@ -172,7 +181,12 @@ export async function runPromotorasEmailDriftSync(params: {
         profile_email: null,
         profile_full_name: null,
         profile_active: null,
-        reasons: ['unlinked_no_auth_account'],
+        reasons: [
+          'unlinked_no_auth_account',
+          ...(needsPromotoraColumnAlign
+            ? [`promotora_email_column_drift(correo=${rawCorreoVal ?? 'null'}, email=${rawEmailVal ?? 'null'} -> ${correo})`]
+            : []),
+        ],
       });
       continue;
     }
@@ -182,6 +196,11 @@ export async function runPromotorasEmailDriftSync(params: {
     const profName = String(profile?.full_name ?? '').trim();
     const reasons: string[] = [];
 
+    if (needsPromotoraColumnAlign) {
+      reasons.push(
+        `promotora_email_column_drift(correo=${rawCorreoVal ?? 'null'}, email=${rawEmailVal ?? 'null'} -> ${correo})`
+      );
+    }
     if (correo && authEmail !== correo) reasons.push(`auth_email_drift(${authEmail ?? 'null'} -> ${correo})`);
     if (!authUser.email_confirmed_at) reasons.push('auth_email_unconfirmed');
     if (correo && profEmail !== correo) reasons.push(`profile_email_drift(${profEmail ?? 'null'} -> ${correo})`);
@@ -215,6 +234,52 @@ export async function runPromotorasEmailDriftSync(params: {
 
     if (mode === 'dry-run') {
       continue;
+    }
+
+    if (needsPromotoraColumnAlign && correo) {
+      try {
+        const eqId: string | number = /^\d+$/.test(id) ? Number(id) : id;
+        const alignPayload: Record<string, unknown> = {
+          correo,
+          ...(hasEmailColumn ? { email: correo } : {}),
+          updated_at: new Date().toISOString(),
+        };
+        const promTable = client.from('promotoras') as unknown as {
+          update?: (payload: Record<string, unknown>) => {
+            eq: (col: string, val: string | number) => Promise<{ error: { message: string } | null }>;
+          };
+        };
+        if (typeof promTable.update === 'function') {
+          const { error: alignErr } = await promTable.update(alignPayload).eq('id', eqId);
+          if (alignErr) {
+            throw new Error(alignErr.message);
+          }
+          report.promotorasColumnasAlineadas += 1;
+        }
+      } catch (alignErr) {
+        report.errores += 1;
+        report.resultados.push({
+          id,
+          nombre_completo: nombre,
+          region: regionMeta.erpRegion,
+          result: {
+            synced: false,
+            status: 'error',
+            authUserId: authUser.id,
+            previousEmail: authEmail,
+            email: correo,
+            emailChanged: false,
+            profileSynced: false,
+            passwordPreserved: true,
+            message:
+              alignErr instanceof Error
+                ? `Error alineando correo/email en public.promotoras: ${alignErr.message}`
+                : 'Error alineando correo/email en public.promotoras.',
+          },
+        });
+        await sleep(delayMs);
+        continue;
+      }
     }
 
     try {

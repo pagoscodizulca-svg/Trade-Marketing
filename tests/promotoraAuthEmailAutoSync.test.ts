@@ -502,3 +502,132 @@ test('Script CLI sync-promotoras-auth-emails: dry-run no escribe y apply corrige
   assert.equal(authHarness.profiles.get(UID_DRIFT)?.email, 'new@gmail.com');
   assert.equal(authHarness.profiles.get(UID_DRIFT)?.full_name, 'Tania Nueva');
 });
+
+test('Optimización dual correo/email: detecta y alinea columna `email` nula o desalineada en public.promotoras y valida migración SQL 20261210000100', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { normalizePromotoraMasterRow } = await import('../src/services/masterCatalogSyncService');
+
+  // 1) Normalizador frontend: una columna `email` vacía jamás oculta un `correo` válido
+  const normalized = normalizePromotoraMasterRow({
+    id: 24,
+    nombre_completo: 'Zioreli Grangger',
+    correo: '  Ziorelis.Grangger@Codizulca.com ',
+    email: '',
+    region: 'OCCIDENTE',
+    categoria: 'Merchandising',
+    activo: true,
+  });
+  assert.equal(normalized.email, 'ziorelis.grangger@codizulca.com');
+
+  // 2) Script de sincronización: detecta y alinea `email: null` contra `correo` en modo apply
+  const UID_ZIORELI = '03780a07-4aff-4c6a-9be2-8a648a5a35b8';
+  const authHarness = createInMemoryAuthSyncHarness();
+  authHarness.authUsers.set(UID_ZIORELI, {
+    id: UID_ZIORELI,
+    email: 'ziorelis.grangger@codizulca.com',
+    email_confirmed_at: '2026-11-24T20:21:40Z',
+    app_metadata: {
+      role: 'promotora',
+      promotora_id: '24',
+      display_name: 'Zioreli Grangger',
+      region: 'OCCIDENTE',
+      sucursal: 'OCCIDENTE',
+    },
+    user_metadata: { nombre_completo: 'Zioreli Grangger' },
+  });
+  authHarness.profiles.set(UID_ZIORELI, {
+    id: UID_ZIORELI,
+    email: 'ziorelis.grangger@codizulca.com',
+    full_name: 'Zioreli Grangger',
+    role: 'promotora',
+    sucursal: 'ZULIA',
+    region: 'Occidente',
+    is_active: true,
+  });
+
+  const dbUpdates: Array<{ id: string | number; payload: Record<string, unknown> }> = [];
+  const dualColClient = {
+    from(table: string) {
+      assert.equal(table, 'promotoras');
+      return {
+        select() {
+          return {
+            order() {
+              return Promise.resolve({
+                data: [
+                  {
+                    id: 24,
+                    nombre_completo: 'Zioreli Grangger',
+                    correo: 'ziorelis.grangger@codizulca.com',
+                    email: null,
+                    region: 'OCCIDENTE',
+                    sucursal: 'OCCIDENTE',
+                    activo: true,
+                    auth_user_id: UID_ZIORELI,
+                  },
+                ],
+                error: null,
+              });
+            },
+          };
+        },
+        update(payload: Record<string, unknown>) {
+          return {
+            async eq(_col: string, val: string | number) {
+              dbUpdates.push({ id: val, payload });
+              return { error: null };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+
+  const dry = await runPromotorasEmailDriftSync({
+    client: dualColClient,
+    gateway: authHarness.gateway,
+    mode: 'dry-run',
+    region: 'OCCIDENTE',
+    delayMs: 0,
+  });
+  assert.equal(dry.desincronizadasDetectadas, 1);
+  assert.ok(dry.driftItems[0]!.reasons.some((r) => r.startsWith('promotora_email_column_drift')));
+  assert.equal(dbUpdates.length, 0);
+
+  const applied = await runPromotorasEmailDriftSync({
+    client: dualColClient,
+    gateway: authHarness.gateway,
+    mode: 'apply',
+    region: 'OCCIDENTE',
+    delayMs: 0,
+  });
+  assert.equal(applied.promotorasColumnasAlineadas, 1);
+  assert.equal(applied.errores, 0);
+  assert.equal(dbUpdates.length, 1);
+  assert.equal(dbUpdates[0]!.id, 24);
+  assert.equal(dbUpdates[0]!.payload.correo, 'ziorelis.grangger@codizulca.com');
+  assert.equal(dbUpdates[0]!.payload.email, 'ziorelis.grangger@codizulca.com');
+
+  // 3) Validación estática de la migración SQL 20261210000100
+  const migSql = fs.readFileSync(
+    path.resolve(
+      process.cwd(),
+      'supabase',
+      'migrations',
+      '20261210000100_sync_promotoras_correo_email_normalizacion.sql'
+    ),
+    'utf8'
+  );
+  assert.match(migSql, /fn_trg_sync_promotoras_correo_email/i);
+  assert.match(migSql, /SECURITY DEFINER/i);
+  assert.match(migSql, /SET search_path = public/i);
+  assert.match(migSql, /DROP TRIGGER IF EXISTS trg_promotoras_sync_correo_email/i);
+  assert.match(migSql, /REVOKE ALL ON TABLE public\.promotoras FROM PUBLIC, anon/i);
+  assert.match(migSql, /ENABLE ROW LEVEL SECURITY/i);
+  assert.match(migSql, /FORCE ROW LEVEL SECURITY/i);
+  assert.match(migSql, /NOTIFY pgrst, 'reload schema'/i);
+  const execSql = migSql.replace(/--.*$/gm, '');
+  assert.doesNotMatch(execSql, /\bDISABLE ROW LEVEL SECURITY\b/i);
+  assert.doesNotMatch(execSql, /\b(DROP TABLE|DROP COLUMN|TRUNCATE)\b/i);
+});

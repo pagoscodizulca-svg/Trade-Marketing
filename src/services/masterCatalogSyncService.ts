@@ -242,7 +242,9 @@ export function normalizePromotoraMasterRow(raw: Record<string, unknown>): Promo
   const nombre =
     limpiarCeldaTexto(raw.nombre_completo ?? raw.nombre ?? raw.full_name ?? raw.name ?? '') ||
     'Sin nombre';
-  const emailRaw = limpiarCeldaTexto(raw.email ?? raw.correo ?? '').toLowerCase();
+  const emailRaw = (
+    limpiarCeldaTexto(raw.correo) || limpiarCeldaTexto(raw.email)
+  ).toLowerCase();
   const categoria = classifyPromotoraCategoriaOficial(raw);
   const metadata = asObject(raw.metadata);
   const direccion = asNullableString(raw.direccion ?? raw.address);
@@ -1069,9 +1071,23 @@ async function patchPromotoraViaBackendApi(
       );
     }
 
-    const body = (await res.json()) as { item?: Record<string, unknown> };
+    const body = (await res.json()) as {
+      item?: Record<string, unknown>;
+      authSync?: { synced?: boolean; status?: string; message?: string };
+    };
     if (!body?.item || typeof body.item !== 'object') {
       return { status: 'unavailable' as const };
+    }
+    if (
+      body.authSync &&
+      body.authSync.synced === false &&
+      body.authSync.status !== 'unlinked_no_auth_account'
+    ) {
+      console.warn('[patchPromotoraViaBackendApi] Perfil guardado pero Auth/profiles requiere sincronización', {
+        promotoraId,
+        status: body.authSync.status ?? 'unknown',
+        message: body.authSync.message ?? null,
+      });
     }
 
     return {
@@ -1157,7 +1173,19 @@ export async function guardarPromotoraMaestra(
     }
   }
 
-  // Esquema real de producción (`public.promotoras` ERP multisede: correo, telefono, direccion, activo, categoria, region, sucursal, region_id; sin `email`/`ciudad`/`supervisor_id`)
+  // Esquema real de producción (`public.promotoras` ERP multisede): alinear `correo` y `email` juntos con degradación segura si falta `email`
+  const erpProdDualEmailPayload: Record<string, unknown> = {
+    nombre_completo: nombreCompleto,
+    correo: emailClean,
+    email: emailClean,
+    telefono: telefonoClean,
+    direccion: direccionClean,
+    activo: input.activo !== false,
+    categoria: validatedCategoria,
+    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
+    ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
+    ...(input.region_id ? { region_id: input.region_id } : {}),
+  };
   const erpProdPayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     correo: emailClean,
@@ -1221,8 +1249,9 @@ export async function guardarPromotoraMaestra(
     extendedBasePayload,
   ];
 
-  // Priorizar siempre el esquema real de producción (`correo` + `sucursal` canónica sin `supervisor_id` nulo)
+  // Priorizar siempre el esquema real de producción (`correo` + `email` alineados + `sucursal` canónica sin `supervisor_id` nulo)
   const attempts: Record<string, unknown>[] = [
+    erpProdDualEmailPayload,
     erpProdPayload,
     erpProdRegionOnlyPayload,
     ...extendedAttempts,
