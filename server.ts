@@ -253,9 +253,11 @@ const adminAuthRateLimiter = createRateLimiter({
   maxRequests: 30,
 });
 
+// Límite por IP compartida (CGNAT móvil / Wi-Fi sucursal): permite ingreso simultáneo de 30+ promotoras
+// mientras `handlePromotoraLogin` mantiene bloqueo estricto de 5 fallos / 15 min por par (IP, correo).
 const promotoraLoginIpRateLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  maxRequests: 25,
+  maxRequests: 120,
 });
 
 const handlePromotoraLogin = createPromotoraLoginHandler({

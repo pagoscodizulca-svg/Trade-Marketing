@@ -1742,12 +1742,46 @@ export function createMasterDataErpHandlers(
         const totalClientes = resumen.reduce((acc, s) => acc + s.total, 0);
         const scopedCounts = isGlobal
           ? snap.countsExact
-          : {
-              ...snap.countsExact,
-              clientesTotal: totalClientes,
-              clientesActivos: totalActivos,
-              regiones: regionesResumen.length,
-            };
+          : (() => {
+              const scopedClientes = filterNormalizedErpClientes(snap.clientes, {
+                soloActivos: false,
+                sucursal: scope.region || effectiveRegions ? undefined : scope.sucursal,
+                region: scope.region ?? undefined,
+                regions: effectiveRegions ?? undefined,
+              });
+              const scopedVendedores = filterNormalizedErpVendedores(snap.vendedores, {
+                soloActivos: true,
+                sucursal: scope.region || effectiveRegions ? undefined : scope.sucursal,
+                region: scope.region ?? undefined,
+                regions: effectiveRegions ?? undefined,
+              });
+              const scopedPromotoras = (snap.promotoras ?? []).filter((p) =>
+                matchesEntityRegion(p, scope.region, null, effectiveRegions)
+              );
+              const scopedSupervisores = (snap.supervisores ?? []).filter((s) =>
+                matchesEntityRegion(s, scope.region, null, effectiveRegions)
+              );
+              const scopedCadenas = (snap.cadenas ?? []).filter(
+                (c) => !c.region_id || matchesEntityRegion(c, scope.region, null, effectiveRegions)
+              );
+              const scopedZonas = (snap.zonas ?? []).filter((z) =>
+                matchesEntityRegion(z, scope.region, null, effectiveRegions)
+              );
+              return {
+                regiones: regionesResumen.length,
+                productos: (snap.productos ?? []).length,
+                clientesTotal: totalClientes,
+                clientesActivos: totalActivos,
+                clientesConGps: scopedClientes.filter(
+                  (c) => c.activo && c.latitud !== null && c.longitud !== null
+                ).length,
+                promotoras: scopedPromotoras.length,
+                supervisores: scopedSupervisores.length,
+                cadenas: scopedCadenas.length,
+                zonas: scopedZonas.length,
+                vendedores: scopedVendedores.length,
+              };
+            })();
 
         res.setHeader('Cache-Control', 'private, max-age=30');
         res.status(200).json({

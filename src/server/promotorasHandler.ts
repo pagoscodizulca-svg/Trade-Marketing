@@ -615,7 +615,7 @@ export function createPromotorasHandlers(options?: {
     }
 
     const id = String(req.params.id ?? '').trim();
-    if (!UUID_REGEX.test(id)) {
+    if (!UUID_REGEX.test(id) && !/^\d+$/.test(id)) {
       res.status(400).json({ error: 'Identificador de promotora inválido.', code: 'INVALID_ID' });
       return;
     }
@@ -682,11 +682,14 @@ export function createPromotorasHandlers(options?: {
 
       const updatePayload: Record<string, unknown> = { ...parsed.data };
       delete updatePayload.region;
+      if (parsed.data.email !== undefined) {
+        updatePayload.correo = parsed.data.email;
+      }
       if (parsed.data.region) {
         const regId = await gateway.resolveRegionIdByCode(parsed.data.region);
         if (regId) updatePayload.region_id = regId;
-        const legacySuc = mapAllowedRegionToLegacySucursal(parsed.data.region);
-        if (legacySuc) updatePayload.sucursal = legacySuc;
+        updatePayload.sucursal =
+          parsed.data.region === 'OCCIDENTE' ? 'OCCIDENTE' : 'CENTRO';
       }
 
       const updated = await gateway.updatePromotora(id, updatePayload);
