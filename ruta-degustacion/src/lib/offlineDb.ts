@@ -9,9 +9,10 @@ import type { OutboxPayload } from './deliveryOps';
  * Nunca se siembra ni se inyectan datos de ejemplo. Funciona igual en la página y en el Service Worker.
  */
 export const DB_NAME = 'rutadegustacion-offline';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 export const STORE_DELIVERIES = 'synced_deliveries' as const;
 export const STORE_OUTBOX = 'sync_outbox_queue' as const;
+export const STORE_EVIDENCE_OUTBOX = 'sync_evidence_queue' as const;
 export const STORE_META = 'meta' as const;
 const CHANNEL_NAME = 'rutadegustacion-offline-changes';
 /** Una operación «en vuelo» más antigua que esto se considera abandonada (p. ej. la pestaña se cerró). */
@@ -49,6 +50,19 @@ export interface OutboxItem {
   in_flight_since_ms?: number | null;
 }
 
+export interface PendingEvidenceItem {
+  seq?: number;
+  operation_id: string;
+  delivery_id: string;
+  file_name: string;
+  mime_type: string;
+  ext: string;
+  blob: Blob;
+  created_at_iso: string;
+  retry_count: number;
+  last_error?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Apertura y utilidades de transacción
 // ---------------------------------------------------------------------------
@@ -74,6 +88,11 @@ export function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_OUTBOX)) {
         const s = db.createObjectStore(STORE_OUTBOX, { keyPath: 'seq', autoIncrement: true });
+        s.createIndex('by_operation_id', 'operation_id', { unique: true });
+        s.createIndex('by_delivery', 'delivery_id');
+      }
+      if (!db.objectStoreNames.contains(STORE_EVIDENCE_OUTBOX)) {
+        const s = db.createObjectStore(STORE_EVIDENCE_OUTBOX, { keyPath: 'seq', autoIncrement: true });
         s.createIndex('by_operation_id', 'operation_id', { unique: true });
         s.createIndex('by_delivery', 'delivery_id');
       }
@@ -372,6 +391,99 @@ export async function dropOperation(operationId: string, deliveryId: string): Pr
 }
 
 // ---------------------------------------------------------------------------
+// sync_evidence_queue (evidencias fotográficas tomadas offline)
+// ---------------------------------------------------------------------------
+
+export async function enqueuePendingEvidence(input: {
+  delivery_id: string;
+  file_name: string;
+  mime_type: string;
+  ext: string;
+  blob: Blob;
+  created_at_iso: string;
+}): Promise<PendingEvidenceItem> {
+  const item = await run([STORE_EVIDENCE_OUTBOX], 'readwrite', async (tx) => {
+    const store = tx.objectStore(STORE_EVIDENCE_OUTBOX);
+    const prev = (await reqToPromise(
+      store.index('by_delivery').getAll(IDBKeyRange.only(input.delivery_id)),
+    )) as PendingEvidenceItem[];
+    for (const old of prev) {
+      if (old.seq !== undefined) store.delete(old.seq);
+    }
+    const created: PendingEvidenceItem = {
+      operation_id: newOperationId(),
+      delivery_id: input.delivery_id,
+      file_name: input.file_name,
+      mime_type: input.mime_type,
+      ext: input.ext,
+      blob: input.blob,
+      created_at_iso: input.created_at_iso,
+      retry_count: 0,
+      last_error: null,
+    };
+    const key = await reqToPromise(store.add(created));
+    return { ...created, seq: Number(key) } satisfies PendingEvidenceItem;
+  });
+  notifyChange('outbox');
+  return item;
+}
+
+export async function listPendingEvidences(): Promise<PendingEvidenceItem[]> {
+  return run([STORE_EVIDENCE_OUTBOX], 'readonly', (tx) =>
+    reqToPromise(tx.objectStore(STORE_EVIDENCE_OUTBOX).getAll() as IDBRequest<PendingEvidenceItem[]>),
+  );
+}
+
+export async function countPendingEvidences(): Promise<number> {
+  return run([STORE_EVIDENCE_OUTBOX], 'readonly', (tx) =>
+    reqToPromise(tx.objectStore(STORE_EVIDENCE_OUTBOX).count()),
+  );
+}
+
+export async function getPendingEvidenceByOperationId(
+  operationId: string,
+): Promise<PendingEvidenceItem | null> {
+  const found = await run([STORE_EVIDENCE_OUTBOX], 'readonly', (tx) =>
+    reqToPromise(
+      tx.objectStore(STORE_EVIDENCE_OUTBOX).index('by_operation_id').get(operationId) as IDBRequest<
+        PendingEvidenceItem | undefined
+      >,
+    ),
+  );
+  return found ?? null;
+}
+
+export async function removePendingEvidence(operationId: string): Promise<void> {
+  await run([STORE_EVIDENCE_OUTBOX], 'readwrite', async (tx) => {
+    const store = tx.objectStore(STORE_EVIDENCE_OUTBOX);
+    const found = (await reqToPromise(
+      store.index('by_operation_id').get(operationId),
+    )) as PendingEvidenceItem | undefined;
+    if (found?.seq !== undefined) store.delete(found.seq);
+  });
+  notifyChange('outbox');
+}
+
+export async function markPendingEvidenceFailure(
+  operationId: string,
+  lastError: string,
+): Promise<void> {
+  await run([STORE_EVIDENCE_OUTBOX], 'readwrite', async (tx) => {
+    const store = tx.objectStore(STORE_EVIDENCE_OUTBOX);
+    const found = (await reqToPromise(
+      store.index('by_operation_id').get(operationId),
+    )) as PendingEvidenceItem | undefined;
+    if (!found) return;
+    store.put({
+      ...found,
+      retry_count: found.retry_count + 1,
+      last_error: lastError,
+    } satisfies PendingEvidenceItem);
+  });
+  notifyChange('outbox');
+}
+
+// ---------------------------------------------------------------------------
 // meta
 // ---------------------------------------------------------------------------
 
@@ -391,9 +503,10 @@ export async function setMeta<T>(key: string, value: T): Promise<void> {
 
 /** Purga atómicamente todas las tablas locales de IndexedDB al expirar, revocarse o cerrarse una jornada. */
 export async function purgeAllOfflineData(): Promise<void> {
-  await run([STORE_DELIVERIES, STORE_OUTBOX, STORE_META], 'readwrite', async (tx) => {
+  await run([STORE_DELIVERIES, STORE_OUTBOX, STORE_EVIDENCE_OUTBOX, STORE_META], 'readwrite', async (tx) => {
     tx.objectStore(STORE_DELIVERIES).clear();
     tx.objectStore(STORE_OUTBOX).clear();
+    tx.objectStore(STORE_EVIDENCE_OUTBOX).clear();
     tx.objectStore(STORE_META).clear();
   });
   notifyChange('deliveries');

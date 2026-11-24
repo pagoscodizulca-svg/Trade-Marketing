@@ -6,6 +6,25 @@ export type Turno = (typeof TURNOS)[number];
 
 export type EstadoLogistico = 'PENDIENTE' | 'EN_RUTA' | 'ENTREGADO';
 
+export type GeoSource = 'clientes_erp' | 'zona_atlas' | 'manual_gps' | 'none';
+export type GeoPrecision = 'exacta' | 'zona' | 'manual' | 'sin_gps';
+
+export interface GeoPoint {
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  updatedAtIso?: string;
+}
+
+export interface ClientGeoRecord {
+  id_clie: string;
+  clie_nomb: string;
+  clie_rif?: string | null;
+  clie_lati: number;
+  clie_long: number;
+  sucursal?: string | null;
+}
+
 export type AppMode = 'chofer' | 'oficina';
 
 export const OPERATIVE_SUCURSALES = [
@@ -59,6 +78,17 @@ export interface Entrega {
   evidencia_subida_at?: string | null;
   /** Referencia opcional al registro origen en `cronograma_degustaciones` */
   cronograma_id?: string | null;
+  /** Zona / dirección del punto de venta (desde `cronograma_degustaciones.zona_direccion`) */
+  zona_direccion?: string | null;
+  /** Código o RIF del cliente origen (desde `cronograma_degustaciones.cliente_codigo`) */
+  cliente_codigo?: string | null;
+  /** Coordenadas GPS resueltas y cacheadas localmente para ruteo y mapa offline */
+  lat?: number | null;
+  lng?: number | null;
+  geo_source?: GeoSource;
+  geo_precision?: GeoPrecision;
+  /** true cuando existe una foto tomada sin señal esperando subida silenciosa en segundo plano */
+  evidencia_pendiente_offline?: boolean;
   notas_chofer: string;
   /** Sucursal operativa propietaria del registro (usada para filtro global de Super Admin) */
   sucursal?: OperativeSucursal;

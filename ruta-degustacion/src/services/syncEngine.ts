@@ -1,9 +1,10 @@
-import { countOutbox, subscribeChanges } from '../lib/offlineDb';
+import { countOutbox, countPendingEvidences, subscribeChanges } from '../lib/offlineDb';
 import { flushOutbox, type FlushOptions, type FlushResult } from '../lib/syncCore';
 
 /** Etiqueta del evento `sync` del Service Worker (Background Sync API). */
 export const BACKGROUND_SYNC_TAG = 'sync-deliveries-outbox';
-export const PERIODIC_CHECK_MS = 30_000;
+/** Verificador silencioso cada 15 s mientras existan datos guardados sin subir. */
+export const PERIODIC_CHECK_MS = 15_000;
 /** Tiempo máximo del intento inmediato tras el toque del chofer. */
 export const IMMEDIATE_TIMEOUT_MS = 4_000;
 
@@ -22,6 +23,8 @@ export interface EngineState {
 export interface SyncEngineHandlers {
   /** La cola quedó vacía: hay que refrescar el estado sincronizado desde el servidor. */
   onDrained: () => Promise<void>;
+  /** Vaciado silencioso complementario (p. ej. evidencias fotográficas tomadas sin conexión). */
+  onFlushExtra?: () => Promise<{ uploaded: number; remaining: number }>;
   /** Resultado de conectividad observado en una petición real. */
   onNetworkResult?: (ok: boolean) => void;
 }
@@ -84,7 +87,11 @@ export function createSyncEngine(handlers: SyncEngineHandlers) {
 
   async function refreshPending(): Promise<number> {
     try {
-      const n = await countOutbox();
+      const [outboxN, evidenceN] = await Promise.all([
+        countOutbox(),
+        countPendingEvidences().catch(() => 0),
+      ]);
+      const n = outboxN + evidenceN;
       set({ pendingCount: n });
       return n;
     } catch {
@@ -110,12 +117,37 @@ export function createSyncEngine(handlers: SyncEngineHandlers) {
           droppedMessages: [],
         };
       }
+
+      let extraUploaded = 0;
+      let extraRemaining = await countPendingEvidences().catch(() => 0);
+      if (
+        handlers.onFlushExtra &&
+        extraRemaining > 0 &&
+        res.status !== 'offline' &&
+        res.status !== 'auth-required' &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        try {
+          const extra = await handlers.onFlushExtra();
+          extraUploaded = extra.uploaded;
+          extraRemaining = extra.remaining;
+          if (extraUploaded > 0 && res.status === 'idle') {
+            res = { ...res, status: 'ok', sent: res.sent + extraUploaded };
+          }
+        } catch {
+          extraRemaining = await countPendingEvidences().catch(() => extraRemaining);
+        }
+      }
+
+      const totalRemaining = res.remaining + extraRemaining;
+      res = { ...res, remaining: totalRemaining };
+
       if (res.status === 'ok') networkOk = true;
       else if (res.status === 'offline') networkOk = false;
       const aviso = res.droppedMessages.length > 0 ? res.droppedMessages.join(' ') : state.aviso;
-      set({ pendingCount: res.remaining, lastError: res.lastError, aviso });
+      set({ pendingCount: totalRemaining, lastError: res.lastError, aviso });
       if (res.status === 'ok' || res.status === 'offline') handlers.onNetworkResult?.(res.status === 'ok');
-      if (res.remaining === 0 && (res.sent > 0 || res.dropped > 0)) {
+      if (totalRemaining === 0 && (res.sent > 0 || res.dropped > 0 || extraUploaded > 0)) {
         try {
           await handlers.onDrained();
         } catch {
@@ -151,6 +183,22 @@ export function createSyncEngine(handlers: SyncEngineHandlers) {
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
     limpiar.push(() => window.removeEventListener('online', onOnline), () => window.removeEventListener('offline', onOffline));
+
+    // (a2) Cambios de red móvil/WiFi en Android/Chrome (Network Information API)
+    const netInfo = (navigator as Navigator & {
+      connection?: EventTarget & { addEventListener?: (type: string, cb: () => void) => void; removeEventListener?: (type: string, cb: () => void) => void };
+    }).connection;
+    if (netInfo?.addEventListener && netInfo?.removeEventListener) {
+      const onNetChange = () => {
+        if (navigator.onLine) {
+          networkOk = null;
+          set({});
+          if (state.pendingCount > 0) disparar(true);
+        }
+      };
+      netInfo.addEventListener('change', onNetChange);
+      limpiar.push(() => netInfo.removeEventListener?.('change', onNetChange));
+    }
 
     // (c) La app vuelve a estar visible / recupera el foco
     const onVisible = () => {

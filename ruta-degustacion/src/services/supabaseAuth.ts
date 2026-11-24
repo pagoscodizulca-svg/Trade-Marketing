@@ -396,6 +396,13 @@ export async function verifyRutaProfileAccess(
   }
 
   const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (isOffline) {
+    const cached = readCachedProfile(session.user.id);
+    if (cached) {
+      await syncTokenToOutbox(session.access_token);
+      return { ok: true, user: cached, accessToken: session.access_token };
+    }
+  }
   const canonicalSessionEmail = String(session.user.email || '')
     .trim()
     .toLowerCase();
@@ -428,8 +435,13 @@ export async function verifyRutaProfileAccess(
   }
 
   if (error) {
-    // Modo offline real para choferes en ruta con sesión válida ya verificada previamente
-    if (isOffline) {
+    // Modo offline real (o red móvil sin salida a internet) para choferes en ruta con sesión válida ya verificada
+    const isNetworkFailure =
+      isOffline ||
+      /failed to fetch|networkerror|load failed|network request failed|fetch failed|abort|timeout|timed out/i.test(
+        String(error.message || ''),
+      );
+    if (isNetworkFailure) {
       const cached = readCachedProfile(session.user.id);
       if (cached) {
         await syncTokenToOutbox(session.access_token);

@@ -3,10 +3,15 @@ import {
   Camera,
   CheckCircle2,
   CloudCheck,
+  ExternalLink,
+  Flag,
   Image as ImageIcon,
   Loader2,
+  LocateFixed,
+  MapPin,
   MapPinCheckInside,
   MessageSquareWarning,
+  Navigation,
   SmartphoneNfc,
   Truck,
   Undo2,
@@ -14,10 +19,15 @@ import {
   UserCheck,
 } from 'lucide-react';
 import type { EntregaVista } from '../../types';
+import type { OptimizedStop } from '../../lib/routeOptimizer';
 import { estiloProducto, etiquetaProducto } from '../../utils/format';
 
 interface EntregaCardProps {
   entrega: EntregaVista;
+  routeStop?: OptimizedStop | null;
+  hasDriverGps?: boolean;
+  onSelectStartStop?: (id: string) => void;
+  onPinCurrentGps?: (id: string) => void;
   onToggle: (id: string) => void;
   onConfirmarSalida: (id: string) => void;
   onConfirmarLlegada: (id: string) => void;
@@ -31,6 +41,10 @@ interface EntregaCardProps {
 
 export function EntregaCard({
   entrega: e,
+  routeStop,
+  hasDriverGps,
+  onSelectStartStop,
+  onPinCurrentGps,
   onToggle,
   onConfirmarSalida,
   onConfirmarLlegada,
@@ -110,9 +124,30 @@ export function EntregaCard({
       }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
-        <span className="text-[11px] font-black tracking-wide text-zinc-600 bg-zinc-100 border border-zinc-300 rounded px-1.5 py-0.5">
-          {e.numero_grupo_turno}
-        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {!e.completado && routeStop && (
+            <span
+              data-testid={`orden-ruta-badge-${e.id}`}
+              className={`text-xs font-black tracking-wide rounded-full px-2.5 py-0.5 border ${
+                routeStop.orderIndex === 1
+                  ? 'bg-amber-500 border-amber-700 text-zinc-950'
+                  : 'bg-ink border-zinc-900 text-white'
+              }`}
+            >
+              #{routeStop.orderIndex}
+              {routeStop.isPinnedStart
+                ? ' · Inicio elegido'
+                : routeStop.orderIndex === 1
+                  ? ' · Siguiente parada'
+                  : routeStop.legDistanceKm != null && routeStop.legDistanceKm > 0
+                    ? ` · +${routeStop.legDistanceKm.toFixed(1)} km (~${routeStop.legDurationMin ?? 0} min)`
+                    : ' · Misma ubicación'}
+            </span>
+          )}
+          <span className="text-[11px] font-black tracking-wide text-zinc-600 bg-zinc-100 border border-zinc-300 rounded px-1.5 py-0.5">
+            {e.numero_grupo_turno}
+          </span>
+        </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {e.hora_salida && (
             <span
@@ -134,6 +169,52 @@ export function EntregaCard({
       </div>
 
       <h3 className="text-2xl font-black leading-tight text-ink break-words">{e.cliente}</h3>
+
+      {e.zona_direccion && (
+        <p className="mt-1 inline-flex items-center gap-1 text-xs font-extrabold text-zinc-700 bg-zinc-100 border border-zinc-300 rounded-md px-2 py-0.5">
+          <MapPin className="w-3.5 h-3.5 text-brand shrink-0" />
+          <span>{e.zona_direccion}</span>
+        </p>
+      )}
+
+      {!e.completado && routeStop && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {onSelectStartStop && !routeStop.isPinnedStart && (
+            <button
+              type="button"
+              data-testid={`card-iniciar-aqui-${e.id}`}
+              onClick={() => onSelectStartStop(e.id)}
+              className="min-h-9 px-3 rounded-lg border-2 border-amber-500 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-black inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Flag className="w-3.5 h-3.5" />
+              Iniciar ruta aquí
+            </button>
+          )}
+          <a
+            href={routeStop.googleMapsStopUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid={`card-google-maps-${e.id}`}
+            className="min-h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-black inline-flex items-center gap-1.5"
+          >
+            <Navigation className="w-3.5 h-3.5" />
+            Ir en Google Maps
+            <ExternalLink className="w-3 h-3" />
+          </a>
+          {hasDriverGps && onPinCurrentGps && e.geo_precision !== 'exacta' && (
+            <button
+              type="button"
+              data-testid={`card-fijar-gps-${e.id}`}
+              onClick={() => onPinCurrentGps(e.id)}
+              className="min-h-9 px-2.5 rounded-lg border border-sky-400 bg-sky-50 hover:bg-sky-100 text-sky-900 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+              title="Guardar mi posición GPS actual como coordenada exacta de este cliente (offline)"
+            >
+              <LocateFixed className="w-3.5 h-3.5" />
+              Fijar mi GPS
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="mt-2.5">
         <span
@@ -264,14 +345,21 @@ export function EntregaCard({
             <ImageIcon className="w-4 h-4 text-red-600" />
             Evidencia Fotográfica
           </span>
-          {e.evidencia_path && (
+          {e.evidencia_pendiente_offline ? (
+            <span
+              data-testid={`evidencia-offline-${e.id}`}
+              className="text-[11px] font-black text-amber-900 bg-amber-100 border border-amber-500 rounded-full px-2 py-0.5"
+            >
+              📱 Guardada offline (subirá al volver señal)
+            </span>
+          ) : e.evidencia_path ? (
             <span
               data-testid={`evidencia-ok-${e.id}`}
               className="text-[11px] font-black text-green-800 bg-green-100 border border-green-500 rounded-full px-2 py-0.5"
             >
               ✓ Evidencia registrada
             </span>
-          )}
+          ) : null}
         </div>
 
         <input

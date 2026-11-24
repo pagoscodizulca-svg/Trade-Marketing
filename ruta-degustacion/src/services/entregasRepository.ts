@@ -1,4 +1,4 @@
-import type { Entrega, EntregaVista } from '../types';
+import type { Entrega, EntregaVista, GeoPoint } from '../types';
 
 /** Estado de la conexión/sincronización con Supabase. `offline` = sin red, mostrando la copia guardada en el teléfono. */
 export type SyncStatus = 'sincronizando' | 'sincronizado' | 'offline' | 'error';
@@ -57,6 +57,8 @@ export interface EntregasRepository {
   obtenerUrlEvidencia(path: string, bucket?: string | null): Promise<string | null>;
   /** Guarda la nota/incidencia; funciona sin conexión. */
   setNota(id: string, nota: string): Promise<void>;
+  /** Fija manualmente la ubicación GPS actual del chofer sobre una parada (guardado 100 % offline). */
+  saveManualGeoPin?(id: string, point: GeoPoint): Promise<void>;
   /** Requieren conexión. */
   add(entrega: Omit<Entrega, 'id'>): Promise<void>;
   importMany(entregas: Omit<Entrega, 'id'>[], modo: 'reemplazar' | 'agregar'): Promise<void>;

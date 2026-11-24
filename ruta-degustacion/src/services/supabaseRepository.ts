@@ -1,5 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { OPERATIVE_SUCURSALES, type Entrega, type EntregaVista, type OperativeSucursal } from '../types';
+import {
+  OPERATIVE_SUCURSALES,
+  type ClientGeoRecord,
+  type Entrega,
+  type EntregaVista,
+  type GeoPoint,
+  type OperativeSucursal,
+} from '../types';
 import { MENSAJE_REQUIERE_CONEXION, newId, type EntregasRepository } from './entregasRepository';
 import { createSyncStore } from './syncStore';
 import { IMMEDIATE_TIMEOUT_MS, createSyncEngine, registerBackgroundSync } from './syncEngine';
@@ -12,11 +19,23 @@ import {
   validateEvidenceImageFile,
 } from '../lib/evidenceValidation';
 import {
+  buildClientGeoIndex,
+  isValidVenezuelaCoord,
+  normalizeRawClientGeoRows,
+  resolveEntregaCoordinates,
+} from '../lib/clientGeoMatcher';
+import {
+  countPendingEvidences,
   enqueueOperation,
+  enqueuePendingEvidence,
   getAllDeliveries,
   getMeta,
+  getPendingEvidenceByOperationId,
   listOutbox,
+  listPendingEvidences,
+  markPendingEvidenceFailure,
   patchDelivery,
+  removePendingEvidence,
   replaceDeliveries,
   setMeta,
   subscribeChanges,
@@ -35,6 +54,15 @@ const PAGE = 1000;
 const INSERT_CHUNK = 500;
 const DELETE_CHUNK = 100;
 const REFRESH_ON_FOCUS_MIN_MS = 15_000;
+const GEO_CATALOG_META_KEY = 'clientes_geo_catalog_v1';
+const MANUAL_PINS_META_KEY = 'chofer_manual_pins_v1';
+const GEO_CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
+const OFFLINE_EVIDENCE_PREFIX = 'offline-pending://';
+
+interface CachedGeoCatalog {
+  updatedAtMs: number;
+  rows: ClientGeoRecord[];
+}
 
 const mensajeDe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const esErrorDeRed = (msg: string): boolean =>
@@ -113,6 +141,31 @@ function normalizarFila(r: Record<string, unknown>): Entrega {
         : null,
     cronograma_id:
       typeof r.cronograma_id === 'string' && r.cronograma_id ? r.cronograma_id : null,
+    zona_direccion:
+      typeof r.zona_direccion === 'string' && r.zona_direccion.trim()
+        ? r.zona_direccion.trim()
+        : null,
+    cliente_codigo:
+      typeof r.cliente_codigo === 'string' && r.cliente_codigo.trim()
+        ? r.cliente_codigo.trim()
+        : null,
+    lat: isValidVenezuelaCoord(r.lat, r.lng) ? Number(r.lat) : null,
+    lng: isValidVenezuelaCoord(r.lat, r.lng) ? Number(r.lng) : null,
+    geo_source:
+      r.geo_source === 'clientes_erp' ||
+      r.geo_source === 'zona_atlas' ||
+      r.geo_source === 'manual_gps' ||
+      r.geo_source === 'none'
+        ? r.geo_source
+        : undefined,
+    geo_precision:
+      r.geo_precision === 'exacta' ||
+      r.geo_precision === 'zona' ||
+      r.geo_precision === 'manual' ||
+      r.geo_precision === 'sin_gps'
+        ? r.geo_precision
+        : undefined,
+    evidencia_pendiente_offline: r.evidencia_pendiente_offline === true,
     notas_chofer: txt(r.notas_chofer),
     ...(sucursal ? { sucursal } : {}),
     ...(rawRegion ? { region: rawRegion } : {}),
@@ -173,12 +226,185 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
 
   const engine = createSyncEngine({
     onDrained: () => cargar(false),
+    onFlushExtra: () => flushPendingEvidences(),
     onNetworkResult: () => {},
   });
   engine.subscribe(() => {
     const s = engine.getState();
     store.setState({ pendingCount: s.pendingCount, flushing: s.flushing, offline: s.offline, aviso: s.aviso });
   });
+
+  /** Sube silenciosamente en segundo plano las evidencias fotográficas tomadas sin conexión. */
+  async function flushPendingEvidences(): Promise<{ uploaded: number; remaining: number }> {
+    if (!idbOk) return { uploaded: 0, remaining: 0 };
+    const shiftToken = await readShiftToken().catch(() => null);
+    if (shiftToken) {
+      // En jornada firmada sin sesión Supabase Auth directa, se mantienen seguras hasta sincronización en línea
+      return { uploaded: 0, remaining: await countPendingEvidences().catch(() => 0) };
+    }
+    const items = await listPendingEvidences().catch(() => []);
+    if (items.length === 0) return { uploaded: 0, remaining: 0 };
+
+    let uploaded = 0;
+    let client: SupabaseClient;
+    try {
+      client = await getClient();
+      await syncSessionToken(client);
+    } catch {
+      return { uploaded: 0, remaining: items.length };
+    }
+
+    for (const item of items) {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+      const safeExt: 'jpg' | 'png' | 'webp' =
+        item.ext === 'png' || item.ext === 'webp' ? item.ext : 'jpg';
+      const objectPath = buildSafeEvidenceStoragePath(item.delivery_id, safeExt);
+      const bucket = EVIDENCIA_BUCKET_DEFAULT;
+      try {
+        const uploadRes = await client.storage.from(bucket).upload(objectPath, item.blob, {
+          contentType: item.mime_type || 'image/jpeg',
+          upsert: false,
+          cacheControl: '3600',
+        });
+        if (uploadRes.error) {
+          const msg = uploadRes.error.message || 'Error subiendo evidencia offline';
+          await markPendingEvidenceFailure(item.operation_id, msg).catch(() => undefined);
+          if (esErrorDeRed(msg)) break;
+          continue;
+        }
+
+        const nowIso = item.created_at_iso || new Date().toISOString();
+        const updRes = await client
+          .from(TABLE)
+          .update({
+            evidencia_path: objectPath,
+            evidencia_bucket: bucket,
+            evidencia_subida_at: nowIso,
+            actualizado_chofer_at: nowIso,
+          })
+          .eq('id', item.delivery_id)
+          .select('id');
+
+        const updatedRows = Array.isArray(updRes.data)
+          ? updRes.data
+          : updRes.data
+            ? [updRes.data]
+            : [];
+
+        if (updRes.error || updatedRows.length === 0) {
+          await client.storage.from(bucket).remove([objectPath]).catch(() => undefined);
+          const msg = updRes.error?.message || '0 filas actualizadas al vincular evidencia offline.';
+          await markPendingEvidenceFailure(item.operation_id, msg).catch(() => undefined);
+          if (esErrorDeRed(msg)) break;
+          continue;
+        }
+
+        await removePendingEvidence(item.operation_id);
+        uploaded += 1;
+        await serial(async () => {
+          await patchDelivery(item.delivery_id, (cur) => ({
+            ...cur,
+            evidencia_path: objectPath,
+            evidencia_bucket: bucket,
+            evidencia_subida_at: nowIso,
+            evidencia_pendiente_offline: false,
+            _sync: {
+              ...cur._sync,
+              sincronizada_at_iso: new Date().toISOString(),
+            },
+          }));
+        }).catch(() => undefined);
+      } catch (err) {
+        const msg = mensajeDe(err);
+        await markPendingEvidenceFailure(item.operation_id, msg).catch(() => undefined);
+        if (esErrorDeRed(msg)) break;
+      }
+    }
+
+    const remaining = await countPendingEvidences().catch(() => 0);
+    return { uploaded, remaining };
+  }
+
+  /** Carga/cachea el catálogo compacto de coordenadas reales de `public."Clientes"` para uso 100 % offline. */
+  async function loadClientesGeoCatalog(client?: SupabaseClient): Promise<ClientGeoRecord[]> {
+    let cached: CachedGeoCatalog | undefined;
+    if (idbOk) {
+      cached = await getMeta<CachedGeoCatalog>(GEO_CATALOG_META_KEY).catch(() => undefined);
+      if (
+        cached &&
+        Array.isArray(cached.rows) &&
+        cached.rows.length > 0 &&
+        Date.now() - cached.updatedAtMs < GEO_CATALOG_TTL_MS
+      ) {
+        return cached.rows;
+      }
+    }
+
+    const shiftClientes = idbOk
+      ? await getMeta<Record<string, unknown>[]>('shift_cached_clientes').catch(() => undefined)
+      : undefined;
+    if (!client) {
+      if (cached?.rows?.length) return cached.rows;
+      return Array.isArray(shiftClientes) ? normalizeRawClientGeoRows(shiftClientes) : [];
+    }
+
+    try {
+      const collected: ClientGeoRecord[] = [];
+      for (let desde = 0; desde < 6000; desde += PAGE) {
+        const { data, error } = await client
+          .from('Clientes')
+          .select('id_clie, clie_nomb, clie_rif, clie_lati, clie_long, sucursal')
+          .not('clie_lati', 'is', null)
+          .not('clie_long', 'is', null)
+          .neq('clie_lati', 0)
+          .neq('clie_long', 0)
+          .range(desde, desde + PAGE - 1);
+        if (error) break;
+        const rows = (data ?? []) as Record<string, unknown>[];
+        collected.push(...normalizeRawClientGeoRows(rows));
+        if (rows.length < PAGE) break;
+      }
+
+      if (collected.length > 0) {
+        if (idbOk) {
+          await setMeta<CachedGeoCatalog>(GEO_CATALOG_META_KEY, {
+            updatedAtMs: Date.now(),
+            rows: collected,
+          }).catch(() => undefined);
+        }
+        return collected;
+      }
+    } catch {
+      /* Fallback silencioso al caché previo o al atlas offline */
+    }
+
+    if (cached?.rows?.length) return cached.rows;
+    return Array.isArray(shiftClientes) ? normalizeRawClientGeoRows(shiftClientes) : [];
+  }
+
+  /** Enriquece entregas con coordenadas resueltas (pin manual -> Clientes ERP -> Atlas offline). */
+  async function enrichDeliveriesWithGeo<T extends Entrega>(
+    items: T[],
+    client?: SupabaseClient,
+  ): Promise<T[]> {
+    const [catalog, manualPins] = await Promise.all([
+      loadClientesGeoCatalog(client),
+      idbOk
+        ? getMeta<Record<string, GeoPoint>>(MANUAL_PINS_META_KEY).catch(() => undefined)
+        : Promise.resolve(undefined),
+    ]);
+    const index = catalog.length > 0 ? buildClientGeoIndex(catalog) : null;
+    return items.map((item) => {
+      const resolved = resolveEntregaCoordinates(item, index, manualPins);
+      return {
+        ...item,
+        lat: resolved.lat,
+        lng: resolved.lng,
+        geo_source: resolved.geo_source,
+        geo_precision: resolved.geo_precision,
+      };
+    });
+  }
 
   /** Relee IndexedDB y refleja el resultado en pantalla (tras ack de la cola, cambios de otra pestaña o del SW). */
   const recargarDesdeDb = () =>
@@ -236,6 +462,7 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     }
 
     // Excluir entregas cuyo cronograma origen fue cancelado o rechazado en Trade Marketing
+    // e hidratar zona_direccion + cliente_codigo para ruteo exacto y mapa offline.
     const cronogramaIds = Array.from(
       new Set(
         filas
@@ -243,29 +470,60 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
           .filter(Boolean)
       )
     );
+    const cronMetaById = new Map<
+      string,
+      { estado: string; zona_direccion: string | null; cliente_codigo: string | null }
+    >();
     if (cronogramaIds.length > 0) {
       const cancelledCronIds = new Set<string>();
       for (let i = 0; i < cronogramaIds.length; i += 200) {
         const chunk = cronogramaIds.slice(i, i + 200);
         const { data: cronRows, error: cronErr } = await client
           .from('cronograma_degustaciones')
-          .select('id, estado')
+          .select('id, estado, cliente_codigo, zona_direccion')
           .in('id', chunk);
         if (!cronErr && Array.isArray(cronRows)) {
-          for (const cr of cronRows as Array<{ id?: string; estado?: string }>) {
+          for (const cr of cronRows as Array<{
+            id?: string;
+            estado?: string;
+            cliente_codigo?: string | null;
+            zona_direccion?: string | null;
+          }>) {
+            if (!cr.id) continue;
             const st = String(cr.estado ?? '').trim().toUpperCase();
-            if (cr.id && (st === 'CANCELADA' || st === 'RECHAZADA')) {
+            cronMetaById.set(cr.id, {
+              estado: st,
+              zona_direccion:
+                typeof cr.zona_direccion === 'string' && cr.zona_direccion.trim()
+                  ? cr.zona_direccion.trim()
+                  : null,
+              cliente_codigo:
+                typeof cr.cliente_codigo === 'string' && cr.cliente_codigo.trim()
+                  ? cr.cliente_codigo.trim()
+                  : null,
+            });
+            if (st === 'CANCELADA' || st === 'RECHAZADA') {
               cancelledCronIds.add(cr.id);
             }
           }
         }
       }
-      if (cancelledCronIds.size > 0) {
-        return filas.filter((f) => {
+      const activas = filas
+        .filter((f) => {
           const cid = typeof f.cronograma_id === 'string' ? f.cronograma_id.trim() : '';
           return !cid || !cancelledCronIds.has(cid);
+        })
+        .map((f) => {
+          const cid = typeof f.cronograma_id === 'string' ? f.cronograma_id.trim() : '';
+          const meta = cid ? cronMetaById.get(cid) : undefined;
+          if (!meta) return f;
+          return {
+            ...f,
+            ...(meta.zona_direccion ? { zona_direccion: meta.zona_direccion } : {}),
+            ...(meta.cliente_codigo ? { cliente_codigo: meta.cliente_codigo } : {}),
+          };
         });
-      }
+      return activas;
     }
 
     return filas;
@@ -282,16 +540,24 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       const filas = await traerTodo();
       if (mia !== secuencia) return; // llegó una respuesta más reciente
       engine.reportNetwork(true);
-      const servidor = filas.map(normalizarFila);
+      const shiftToken = idbOk ? await readShiftToken().catch(() => null) : null;
+      const geoClient = shiftToken ? undefined : await getClient().catch(() => undefined);
+      const servidorBase = filas.map(normalizarFila);
+      const servidor = await enrichDeliveriesWithGeo(servidorBase, geoClient);
       ultimoPull = Date.now();
       const ahoraIso = new Date().toISOString();
 
       await serial(async () => {
         let pendientes: OutboxItem[] = [];
+        let pendingEvidenceDeliveryIds = new Map<string, string>();
         let previas = new Map<string, StoredDelivery>();
         if (idbOk) {
           try {
             pendientes = await listOutbox();
+            const evs = await listPendingEvidences().catch(() => []);
+            pendingEvidenceDeliveryIds = new Map(
+              evs.map((ev) => [ev.delivery_id, `${OFFLINE_EVIDENCE_PREFIX}${ev.operation_id}`]),
+            );
             previas = new Map((await getAllDeliveries()).map((d) => [d.id, d]));
           } catch (err) {
             idbOk = false;
@@ -308,13 +574,21 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
           const ops = porEntrega.get(row.id) ?? [];
           let d: Entrega = row;
           for (const op of ops) d = applyPayload(d, op.payload);
+          const pendingEvPath = pendingEvidenceDeliveryIds.get(row.id);
+          if (pendingEvPath) {
+            d = {
+              ...d,
+              evidencia_path: d.evidencia_path || pendingEvPath,
+              evidencia_pendiente_offline: true,
+            };
+          }
           const previa = previas.get(row.id);
           return {
             ...d,
             _orden: i,
             _sync: {
-              pendiente: ops.length > 0,
-              marcada_offline: previa?._sync.marcada_offline ?? false,
+              pendiente: ops.length > 0 || Boolean(pendingEvPath),
+              marcada_offline: previa?._sync.marcada_offline ?? Boolean(pendingEvPath),
               sincronizada_at_iso: previa?._sync.sincronizada_at_iso ?? null,
             },
           };
@@ -383,9 +657,11 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       const filas = await getAllDeliveries();
       const iso = await getMeta<string>('last_full_sync_iso');
       // Las marcas «Sincronizado en servidor» de la sesión anterior se limpian al abrir la app.
-      const limpias = filas.map((d) =>
+      const limpiasBase = filas.map((d) =>
         !d._sync.pendiente && d._sync.marcada_offline ? { ...d, _sync: { ...d._sync, marcada_offline: false } } : d,
       );
+      // Hidratar coordenadas desde caché local + atlas offline si alguna fila guardada aún no tenía geo
+      const limpias = await enrichDeliveriesWithGeo(limpiasBase);
       if (limpias.some((d, i) => d !== filas[i])) await replaceDeliveries(limpias);
       limpias.sort((a, b) => a._orden - b._orden);
       // Lo primero que ve el chofer es su última ruta real guardada (sin esperar a la red).
@@ -616,90 +892,182 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       if (!validation.ok) {
         throw new Error(validation.error);
       }
-      if (store.getState().offline) {
-        throw new Error(MENSAJE_REQUIERE_CONEXION);
+
+      const nowIso = new Date().toISOString();
+      const bucket = EVIDENCIA_BUCKET_DEFAULT;
+
+      const queueEvidenceOffline = async (): Promise<{
+        path: string;
+        bucket: string;
+        signedUrl: string | null;
+      }> => {
+        if (!idbOk) {
+          throw new Error(MENSAJE_REQUIERE_CONEXION);
+        }
+        const queued = await enqueuePendingEvidence({
+          delivery_id: id,
+          file_name: file.name || `evidencia.${validation.ext}`,
+          mime_type: validation.mime,
+          ext: validation.ext,
+          blob: file,
+          created_at_iso: nowIso,
+        });
+        const localPath = `${OFFLINE_EVIDENCE_PREFIX}${queued.operation_id}`;
+        const localPreviewUrl =
+          typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+            ? URL.createObjectURL(file)
+            : null;
+        store.setEntregas(
+          store.getEntregas().map((e) =>
+            e.id === id
+              ? {
+                  ...e,
+                  evidencia_path: localPath,
+                  evidencia_bucket: bucket,
+                  evidencia_subida_at: nowIso,
+                  evidencia_pendiente_offline: true,
+                  sync: 'pendiente',
+                }
+              : e,
+          ),
+        );
+        await serial(async () => {
+          await patchDelivery(id, (cur) => ({
+            ...cur,
+            evidencia_path: localPath,
+            evidencia_bucket: bucket,
+            evidencia_subida_at: nowIso,
+            evidencia_pendiente_offline: true,
+            _sync: {
+              ...cur._sync,
+              pendiente: true,
+              marcada_offline: true,
+            },
+          }));
+        }).catch(() => undefined);
+        void registerBackgroundSync();
+        void engine.refreshPending();
+        return {
+          path: localPath,
+          bucket,
+          signedUrl: localPreviewUrl,
+        };
+      };
+
+      if (store.getState().offline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        return queueEvidenceOffline();
       }
 
       const objectPath = buildSafeEvidenceStoragePath(id, validation.ext);
-      const bucket = EVIDENCIA_BUCKET_DEFAULT;
-      const nowIso = new Date().toISOString();
-      const client = await getClient();
-      await syncSessionToken(client);
+      try {
+        const client = await getClient();
+        await syncSessionToken(client);
 
-      const uploadRes = await client.storage.from(bucket).upload(objectPath, file, {
-        contentType: validation.mime,
-        upsert: false,
-        cacheControl: '3600',
-      });
-
-      if (uploadRes.error) {
-        console.error('[RutaDegustación] Error subiendo evidencia a Storage:', {
-          message: uploadRes.error.message,
-          bucket,
-          objectPath,
+        const uploadRes = await client.storage.from(bucket).upload(objectPath, file, {
+          contentType: validation.mime,
+          upsert: false,
+          cacheControl: '3600',
         });
-        throw new Error(
-          uploadRes.error.message ||
-            'No se pudo subir la evidencia fotográfica al bucket de Supabase Storage.'
-        );
-      }
 
-      const updRes = await client
-        .from(TABLE)
-        .update({
+        if (uploadRes.error) {
+          if (esErrorDeRed(uploadRes.error.message || '')) {
+            return queueEvidenceOffline();
+          }
+          console.error('[RutaDegustación] Error subiendo evidencia a Storage:', {
+            message: uploadRes.error.message,
+            bucket,
+            objectPath,
+          });
+          throw new Error(
+            uploadRes.error.message ||
+              'No se pudo subir la evidencia fotográfica al bucket de Supabase Storage.'
+          );
+        }
+
+        const updRes = await client
+          .from(TABLE)
+          .update({
+            evidencia_path: objectPath,
+            evidencia_bucket: bucket,
+            evidencia_subida_at: nowIso,
+            actualizado_chofer_at: nowIso,
+          })
+          .eq('id', id)
+          .select('id, evidencia_path, evidencia_bucket, evidencia_subida_at');
+
+        const updatedRows = Array.isArray(updRes.data)
+          ? updRes.data
+          : updRes.data
+            ? [updRes.data]
+            : [];
+
+        if (updRes.error || updatedRows.length === 0) {
+          await client.storage.from(bucket).remove([objectPath]).catch(() => undefined);
+          if (updRes.error && esErrorDeRed(updRes.error.message || '')) {
+            return queueEvidenceOffline();
+          }
+          console.error('[RutaDegustación] Error vinculando evidencia en entregas_degustacion (rollback ejecutado):', {
+            code: updRes.error?.code,
+            message: updRes.error?.message,
+            hint: updRes.error?.hint,
+            id,
+            rowsCount: updatedRows.length,
+          });
+          throw new Error(
+            updRes.error?.message ||
+              'No se pudo registrar la referencia de la evidencia en Supabase (0 filas afectadas). Verifica permisos RLS.'
+          );
+        }
+
+        const evidencePayload: OutboxPayload = {
           evidencia_path: objectPath,
           evidencia_bucket: bucket,
           evidencia_subida_at: nowIso,
-          actualizado_chofer_at: nowIso,
-        })
-        .eq('id', id)
-        .select('id, evidencia_path, evidencia_bucket, evidencia_subida_at');
-
-      const updatedRows = Array.isArray(updRes.data)
-        ? updRes.data
-        : updRes.data
-          ? [updRes.data]
-          : [];
-
-      if (updRes.error || updatedRows.length === 0) {
-        // Rollback inmediato en Storage para no dejar archivos huérfanos
-        await client.storage.from(bucket).remove([objectPath]).catch(() => undefined);
-        console.error('[RutaDegustación] Error vinculando evidencia en entregas_degustacion (rollback ejecutado):', {
-          code: updRes.error?.code,
-          message: updRes.error?.message,
-          hint: updRes.error?.hint,
-          id,
-          rowsCount: updatedRows.length,
-        });
-        throw new Error(
-          updRes.error?.message ||
-            'No se pudo registrar la referencia de la evidencia en Supabase (0 filas afectadas). Verifica permisos RLS.'
+        };
+        store.setEntregas(
+          store.getEntregas().map((e) =>
+            e.id === id ? { ...applyPayload(e, evidencePayload), evidencia_pendiente_offline: false } : e,
+          ),
         );
-      }
+        if (idbOk) {
+          await serial(async () => {
+            await patchDelivery(id, (cur) => ({
+              ...applyPayload(cur, evidencePayload),
+              evidencia_pendiente_offline: false,
+            }));
+          }).catch(() => undefined);
+        }
 
-      const evidencePayload: OutboxPayload = {
-        evidencia_path: objectPath,
-        evidencia_bucket: bucket,
-        evidencia_subida_at: nowIso,
-      };
-      store.setEntregas(
-        store.getEntregas().map((e) => (e.id === id ? applyPayload(e, evidencePayload) : e))
-      );
-      if (idbOk) {
-        await serial(async () => {
-          await patchDelivery(id, (cur) => applyPayload(cur, evidencePayload));
-        }).catch(() => undefined);
+        const signed = await client.storage.from(bucket).createSignedUrl(objectPath, 3600);
+        return {
+          path: objectPath,
+          bucket,
+          signedUrl: signed.data?.signedUrl ?? null,
+        };
+      } catch (err) {
+        const msg = mensajeDe(err);
+        if (esErrorDeRed(msg) && idbOk) {
+          return queueEvidenceOffline();
+        }
+        throw err instanceof Error ? err : new Error(msg);
       }
-
-      const signed = await client.storage.from(bucket).createSignedUrl(objectPath, 3600);
-      return {
-        path: objectPath,
-        bucket,
-        signedUrl: signed.data?.signedUrl ?? null,
-      };
     },
     async obtenerUrlEvidencia(path, bucket) {
+      if (typeof path === 'string' && path.startsWith(OFFLINE_EVIDENCE_PREFIX)) {
+        if (!idbOk) return null;
+        try {
+          const opId = path.slice(OFFLINE_EVIDENCE_PREFIX.length);
+          const item = await getPendingEvidenceByOperationId(opId);
+          if (!item?.blob) return null;
+          return typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+            ? URL.createObjectURL(item.blob)
+            : null;
+        } catch {
+          return null;
+        }
+      }
       if (!isSafeStorageObjectPath(path)) return null;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
       try {
         const client = await getClient();
         await syncSessionToken(client);
@@ -716,6 +1084,44 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
     },
     async setNota(id, nota) {
       await aplicarAccion(id, { notas_chofer: nota }, new Date().toISOString());
+    },
+    async saveManualGeoPin(id, point) {
+      if (!isValidVenezuelaCoord(point.lat, point.lng)) {
+        throw new Error('Coordenadas GPS fuera de rango operativo.');
+      }
+      const nextPin: GeoPoint = {
+        lat: Number(point.lat),
+        lng: Number(point.lng),
+        accuracy: point.accuracy,
+        updatedAtIso: new Date().toISOString(),
+      };
+      store.setEntregas(
+        store.getEntregas().map((e) =>
+          e.id === id
+            ? {
+                ...e,
+                lat: nextPin.lat,
+                lng: nextPin.lng,
+                geo_source: 'manual_gps',
+                geo_precision: 'manual',
+              }
+            : e,
+        ),
+      );
+      if (idbOk) {
+        await serial(async () => {
+          const prevPins =
+            (await getMeta<Record<string, GeoPoint>>(MANUAL_PINS_META_KEY).catch(() => undefined)) ?? {};
+          await setMeta(MANUAL_PINS_META_KEY, { ...prevPins, [id]: nextPin });
+          await patchDelivery(id, (cur) => ({
+            ...cur,
+            lat: nextPin.lat,
+            lng: nextPin.lng,
+            geo_source: 'manual_gps',
+            geo_precision: 'manual',
+          }));
+        }).catch(() => undefined);
+      }
     },
     async add(entrega) {
       const canonicalSucursal = canonicalizeDbSucursal(entrega.sucursal);
