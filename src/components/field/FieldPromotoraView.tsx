@@ -3256,15 +3256,17 @@ export const FieldPromotoraView: React.FC = () => {
         regionId: resolveRegionIdForBucket(effectiveStaffRegion),
       });
 
-      // Aprovisionar/actualizar cuenta segura en Supabase Auth (sin texto plano en public.staff)
+      // Aprovisionar/actualizar cuenta segura en Supabase Auth (compatible con UUID de staff e ID numérico de public.promotoras)
       const cleanPass = staffFormModal.password.trim();
-      if (saved.id && isValidUuid(saved.id) && (cleanPass || staffFormModal.status === 'Inactivo')) {
+      const canProvisionId = Boolean(saved.id && (isValidUuid(saved.id) || /^\d+$/.test(saved.id)));
+      if (canProvisionId && (cleanPass || staffFormModal.status === 'Inactivo')) {
         await provisionStaffAuthAccountViaBackend({
           staffId: saved.id,
           name: cleanName,
           email: staffFormModal.email.trim(),
           password: cleanPass || undefined,
           appRole: 'promotora',
+          sucursal: effectiveStaffRegion === 'Occidente' ? 'ZULIA' : 'VALENCIA',
           active: staffFormModal.status === 'Activo',
         });
       }

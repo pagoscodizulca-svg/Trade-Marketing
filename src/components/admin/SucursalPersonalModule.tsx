@@ -26,7 +26,10 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { provisionStaffAuthAccountViaBackend } from '../../services/authService';
-import { obtenerPromotorasMaestras } from '../../services/masterCatalogSyncService';
+import {
+  guardarPromotoraMaestra,
+  obtenerPromotorasMaestras,
+} from '../../services/masterCatalogSyncService';
 import { getSupabaseClient, isSupabaseConfigured } from '../../services/supabaseClient';
 import {
   MANAGED_USER_ROLE_LABELS,
@@ -627,41 +630,83 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
         ...(resolvedRegionUuid ? { region_id: resolvedRegionUuid } : {}),
       };
 
-      if (editingStaffRow) {
-        let { data, error } = await client
-          .from('staff')
-          .update({ ...baseStaffPayload, categoria: staffCategoryInput })
-          .eq('id', editingStaffRow.id)
-          .eq('sucursal', activeHub)
-          .select('*')
-          .single();
+      const isMissingStaffTableErr = (err: { code?: string; message?: string } | null | undefined) =>
+        Boolean(
+          err &&
+            /PGRST205|42P01|could not find the table .*staff|relation .*staff.* does not exist/i.test(
+              `${err.code ?? ''} ${err.message ?? ''}`
+            )
+        );
 
-        if (error && /column .*categoria|PGRST204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
-          ({ data, error } = await client
+      const persistInPromotorasFallback = async (existingId?: string): Promise<SucursalStaffMemberRow> => {
+        const savedProm = await guardarPromotoraMaestra(
+          {
+            id: existingId,
+            nombre_completo: cleanName,
+            email: cleanEmail || null,
+            categoria: staffCategoryInput,
+            activo: staffStatusInput !== 'Inactivo',
+            sucursal: activeHub,
+            ...(resolvedRegionUuid ? { region_id: resolvedRegionUuid } : {}),
+          },
+          customClient
+        );
+        return {
+          id: String(savedProm.id),
+          name: savedProm.nombre_completo,
+          email: savedProm.email || cleanEmail || '',
+          role: canonicalRole,
+          categoria: staffCategoryInput,
+          status: staffStatusInput,
+          sucursal: activeHub,
+          auth_user_id: savedProm.auth_user_id ?? editingStaffRow?.auth_user_id ?? null,
+        };
+      };
+
+      if (editingStaffRow) {
+        let updated: SucursalStaffMemberRow | null = null;
+        if (/^\d+$/.test(String(editingStaffRow.id))) {
+          updated = await persistInPromotorasFallback(editingStaffRow.id);
+        } else {
+          let { data, error } = await client
             .from('staff')
-            .update(baseStaffPayload)
+            .update({ ...baseStaffPayload, categoria: staffCategoryInput })
             .eq('id', editingStaffRow.id)
             .eq('sucursal', activeHub)
             .select('*')
-            .single());
+            .single();
+
+          if (error && /column .*categoria|PGRST204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
+            ({ data, error } = await client
+              .from('staff')
+              .update(baseStaffPayload)
+              .eq('id', editingStaffRow.id)
+              .eq('sucursal', activeHub)
+              .select('*')
+              .single());
+          }
+
+          if (isMissingStaffTableErr(error)) {
+            updated = await persistInPromotorasFallback(editingStaffRow.id);
+          } else if (error || !data) {
+            throw new Error(error?.message || 'No se pudo actualizar el registro de personal.');
+          } else {
+            updated = {
+              ...(data as SucursalStaffMemberRow),
+              categoria: staffCategoryInput,
+            };
+          }
         }
 
-        if (error || !data) {
-          throw new Error(error?.message || 'No se pudo actualizar el registro de personal.');
-        }
-
-        const updated: SucursalStaffMemberRow = {
-          ...(data as SucursalStaffMemberRow),
-          categoria: staffCategoryInput,
-        };
         setBundle((prev) => ({
           ...prev,
-          staff: prev.staff.map((s) => (s.id === updated.id ? updated : s)),
+          staff: prev.staff.map((s) => (s.id === updated!.id ? updated! : s)),
         }));
         setFeedbackMsg(
           `Promotora ${updated.name} (${staffCategoryInput}) actualizada en ${SUCURSAL_LABELS[activeHub]}.`
         );
       } else {
+        let inserted: SucursalStaffMemberRow | null = null;
         let { data, error } = await client
           .from('staff')
           .insert({ ...baseStaffPayload, categoria: staffCategoryInput })
@@ -676,17 +721,20 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
             .single());
         }
 
-        if (error || !data) {
+        if (isMissingStaffTableErr(error)) {
+          inserted = await persistInPromotorasFallback(undefined);
+        } else if (error || !data) {
           throw new Error(error?.message || 'No se pudo registrar la promotora en public.staff.');
+        } else {
+          inserted = {
+            ...(data as SucursalStaffMemberRow),
+            categoria: staffCategoryInput,
+          };
         }
 
-        const inserted: SucursalStaffMemberRow = {
-          ...(data as SucursalStaffMemberRow),
-          categoria: staffCategoryInput,
-        };
         setBundle((prev) => ({
           ...prev,
-          staff: [inserted, ...prev.staff],
+          staff: [inserted!, ...prev.staff],
         }));
         setFeedbackMsg(
           `Promotora ${inserted.name} (${staffCategoryInput}) incorporada a ${SUCURSAL_LABELS[activeHub]}.`

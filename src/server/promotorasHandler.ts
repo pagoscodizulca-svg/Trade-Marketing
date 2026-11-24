@@ -222,11 +222,23 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
     },
 
     async createPromotora(payload) {
-      const { data, error } = await client
+      let { data, error } = await client
         .from('promotoras')
         .insert(payload)
         .select('*')
         .single();
+      if (error && /PGRST204|42703|could not find the .* column|does not exist/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
+        const safePayload: Record<string, unknown> = { ...payload };
+        delete safePayload.supervisor_id;
+        delete safePayload.estado;
+        const retry = await client
+          .from('promotoras')
+          .insert(safePayload)
+          .select('*')
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
       if (error || !data) {
         throw new Error(error?.message || 'No se pudo crear la promotora.');
       }
@@ -234,12 +246,26 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
     },
 
     async updatePromotora(id, payload) {
-      const { data, error } = await client
+      const eqId: string | number = /^\d+$/.test(id) ? Number(id) : id;
+      let { data, error } = await client
         .from('promotoras')
         .update(payload)
-        .eq('id', id)
+        .eq('id', eqId)
         .select('*')
         .single();
+      if (error && /PGRST204|42703|could not find the .* column|does not exist/i.test(`${error.code ?? ''} ${error.message ?? ''}`)) {
+        const safePayload: Record<string, unknown> = { ...payload };
+        delete safePayload.supervisor_id;
+        delete safePayload.estado;
+        const retry = await client
+          .from('promotoras')
+          .update(safePayload)
+          .eq('id', eqId)
+          .select('*')
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
       if (error || !data) {
         throw new Error(error?.message || 'No se pudo actualizar la promotora.');
       }
@@ -542,7 +568,12 @@ export function createPromotorasHandlers(options?: {
         resolvedRegionId = await gateway.resolveRegionIdByCode(targetRegion);
       }
 
-      const legacySucursal = targetRegion ? mapAllowedRegionToLegacySucursal(targetRegion) : null;
+      const canonicalSucursal =
+        targetRegion === 'OCCIDENTE'
+          ? 'OCCIDENTE'
+          : targetRegion === 'CENTRO' || targetRegion === 'ANDES'
+            ? 'CENTRO'
+            : null;
       const officialRegionLabel =
         targetRegion === 'CENTRO'
           ? 'Valencia'
@@ -553,17 +584,18 @@ export function createPromotorasHandlers(options?: {
               : null;
       const created = await gateway.createPromotora({
         nombre_completo: parsed.data.nombre_completo,
+        correo: parsed.data.email ?? null,
         email: parsed.data.email ?? null,
         telefono: parsed.data.telefono ?? null,
         ciudad: parsed.data.ciudad ?? null,
         estado: parsed.data.estado ?? null,
         direccion: parsed.data.direccion ?? null,
         categoria: parsed.data.categoria,
-        supervisor_id: parsed.data.supervisor_id ?? null,
+        ...(parsed.data.supervisor_id ? { supervisor_id: parsed.data.supervisor_id } : {}),
         activo: parsed.data.activo,
         ...(officialRegionLabel ? { region: officialRegionLabel } : {}),
         ...(resolvedRegionId ? { region_id: resolvedRegionId } : {}),
-        ...(legacySucursal ? { sucursal: legacySucursal } : {}),
+        ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
       });
 
       res.status(201).json({ ok: true, item: created });

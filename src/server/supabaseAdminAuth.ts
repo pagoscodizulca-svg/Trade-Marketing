@@ -1934,9 +1934,10 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
   const requestedRole = String(body.appRole || 'promotora').trim().toLowerCase();
   const active = body.active !== false;
 
-  if (!UUID_REGEX.test(staffId) || !name) {
+  const isNumericPromotoraId = /^\d+$/.test(staffId);
+  if ((!UUID_REGEX.test(staffId) && !isNumericPromotoraId) || !name) {
     res.status(400).json({
-      error: 'Se requiere un staffId UUID válido y el nombre del integrante.',
+      error: 'Se requiere un staffId válido (UUID o ID numérico de promotora) y el nombre del integrante.',
       code: 'INVALID_STAFF_PAYLOAD',
     });
     return;
@@ -1973,15 +1974,56 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
   }
 
   try {
-    const { data: staffRow, error: staffFetchErr } = await admin
-      .from('staff')
-      .select('id, name, email, status, auth_user_id, sucursal')
-      .eq('id', staffId)
-      .maybeSingle();
+    interface ProvisionStaffRow {
+      id: string | number;
+      name?: string | null;
+      email?: string | null;
+      status?: unknown;
+      auth_user_id?: string | null;
+      sucursal?: unknown;
+    }
+    let sourceTable: 'staff' | 'promotoras' = isNumericPromotoraId ? 'promotoras' : 'staff';
+    let staffRow: ProvisionStaffRow | null = null;
 
-    if (staffFetchErr || !staffRow) {
+    if (!isNumericPromotoraId) {
+      const { data, error } = await admin
+        .from('staff')
+        .select('id, name, email, status, auth_user_id, sucursal')
+        .eq('id', staffId)
+        .maybeSingle();
+
+      if (!error && data) {
+        staffRow = data as ProvisionStaffRow;
+        sourceTable = 'staff';
+      } else {
+        sourceTable = 'promotoras';
+      }
+    }
+
+    if (sourceTable === 'promotoras') {
+      const lookupId: string | number = isNumericPromotoraId ? Number(staffId) : staffId;
+      const { data: promRow, error: promErr } = await admin
+        .from('promotoras')
+        .select('id, nombre_completo, correo, email, activo, auth_user_id, sucursal, region')
+        .eq('id', lookupId)
+        .maybeSingle();
+
+      if (!promErr && promRow) {
+        const p = promRow as Record<string, unknown>;
+        staffRow = {
+          id: (p.id as string | number) ?? lookupId,
+          name: String(p.nombre_completo ?? name).trim(),
+          email: String(p.correo ?? p.email ?? '').trim(),
+          status: p.activo === false ? 'Inactivo' : 'Activo',
+          auth_user_id: p.auth_user_id ? String(p.auth_user_id) : null,
+          sucursal: p.sucursal ?? p.region ?? null,
+        };
+      }
+    }
+
+    if (!staffRow) {
       res.status(404).json({
-        error: 'El registro de personal no existe en public.staff.',
+        error: 'El registro de personal no existe en public.staff ni en public.promotoras.',
         code: 'STAFF_NOT_FOUND',
       });
       return;
@@ -2109,11 +2151,24 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       staffId
     );
 
+    const canonicalPromotoraSucursal: 'OCCIDENTE' | 'CENTRO' =
+      effectiveSucursal === 'ZULIA' ? 'OCCIDENTE' : 'CENTRO';
+    const canonicalRegionLabel = canonicalPromotoraSucursal === 'OCCIDENTE' ? 'Occidente' : 'Valencia';
+
     const appMetadata = {
       role: effectiveProfileRole,
       app_role: effectiveProfileRole,
       sucursal: effectiveSucursal,
       staff_id: staffId,
+      ...(sourceTable === 'promotoras'
+        ? {
+            promotora_id: String(staffId),
+            region: canonicalPromotoraSucursal,
+            region_label: canonicalRegionLabel,
+            regions: [canonicalPromotoraSucursal],
+            must_change_password: false,
+          }
+        : {}),
       display_name: name,
     };
 
@@ -2161,27 +2216,41 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
       authUserId = created.user.id;
     }
 
-    // Purgar cualquier clave "password" legacy en public.staff.status y vincular auth_user_id
-    let sanitizedStatusText = staffRow.status;
-    if (typeof staffRow.status === 'string' && staffRow.status.trim().startsWith('{')) {
-      try {
-        const parsed = JSON.parse(staffRow.status) as Record<string, unknown>;
-        delete parsed.password;
-        sanitizedStatusText = JSON.stringify(parsed);
-      } catch {
-        sanitizedStatusText = staffRow.status;
+    if (sourceTable === 'promotoras') {
+      const lookupId: string | number = isNumericPromotoraId ? Number(staffId) : staffId;
+      await admin
+        .from('promotoras')
+        .update({
+          auth_user_id: authUserId,
+          correo: loginEmail,
+          email: loginEmail,
+          activo: active,
+          ...(effectiveSucursal !== 'GLOBAL' ? { sucursal: canonicalPromotoraSucursal } : {}),
+        })
+        .eq('id', lookupId);
+    } else {
+      // Purgar cualquier clave "password" legacy en public.staff.status y vincular auth_user_id
+      let sanitizedStatusText = staffRow.status;
+      if (typeof staffRow.status === 'string' && staffRow.status.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(staffRow.status) as Record<string, unknown>;
+          delete parsed.password;
+          sanitizedStatusText = JSON.stringify(parsed);
+        } catch {
+          sanitizedStatusText = staffRow.status;
+        }
       }
-    }
 
-    await admin
-      .from('staff')
-      .update({
-        auth_user_id: authUserId,
-        email: loginEmail,
-        status: sanitizedStatusText,
-        ...(effectiveSucursal !== 'GLOBAL' ? { sucursal: effectiveSucursal } : {}),
-      })
-      .eq('id', staffId);
+      await admin
+        .from('staff')
+        .update({
+          auth_user_id: authUserId,
+          email: loginEmail,
+          status: sanitizedStatusText,
+          ...(effectiveSucursal !== 'GLOBAL' ? { sucursal: effectiveSucursal } : {}),
+        })
+        .eq('id', staffId);
+    }
 
     // Mantener sincronizada la fuente única `public.profiles`
     await admin.from('profiles').upsert(
@@ -2191,6 +2260,13 @@ export async function handleProvisionStaffAuth(req: Request, res: Response): Pro
         full_name: name,
         role: effectiveProfileRole,
         sucursal: effectiveSucursal,
+        ...(sourceTable === 'promotoras'
+          ? {
+              region: canonicalRegionLabel,
+              regiones_asignadas: [canonicalPromotoraSucursal],
+              must_change_password: false,
+            }
+          : {}),
         is_active: active,
       },
       { onConflict: 'id' }

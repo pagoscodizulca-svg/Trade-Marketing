@@ -144,14 +144,23 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
             {fatalError ||
               'Por seguridad multisede, solicita el enlace actualizado a la coordinadora de tu sucursal.'}
           </p>
-          <button
-            type="button"
-            onClick={() => void loadBootstrap()}
-            className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-bold text-zinc-200 inline-flex items-center gap-2 cursor-pointer"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Reintentar validación</span>
-          </button>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-1">
+            <a
+              href="/portal"
+              data-testid="public-pdv-go-to-portal-login"
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-black uppercase tracking-wider text-white inline-flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-red-950/50"
+            >
+              <span>Ingresar a la App de Promotoras</span>
+            </a>
+            <button
+              type="button"
+              onClick={() => void loadBootstrap()}
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-xs font-bold text-zinc-200 inline-flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Reintentar validación</span>
+            </button>
+          </div>
         </div>
       </div>
     );

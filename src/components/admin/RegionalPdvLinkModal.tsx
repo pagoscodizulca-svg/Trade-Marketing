@@ -17,7 +17,10 @@ import {
   revocarEnlacePdvMiSucursal,
   type RegionalPdvLinkInfo,
 } from '../../services/publicPdvLinksService';
-import { buildPromotoraWhatsAppLink } from '../../utils/portalLinkSharing';
+import {
+  buildPromotoraWhatsAppLink,
+  getPromotorasPortalUrl,
+} from '../../utils/portalLinkSharing';
 import {
   formatCanonicalSucursalBadge,
   type CanonicalSucursal,
@@ -43,6 +46,7 @@ export const RegionalPdvLinkModal: React.FC<RegionalPdvLinkModalProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [mutating, setMutating] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const [copiedOfficialPortal, setCopiedOfficialPortal] = useState<boolean>(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -92,6 +96,19 @@ export const RegionalPdvLinkModal: React.FC<RegionalPdvLinkModalProps> = ({
   if (!isOpen) return null;
 
   const badgeLabel = formatCanonicalSucursalBadge(linkInfo?.sucursal ?? targetSucursal) ?? 'SUCURSAL';
+
+  const officialPortalUrl = getPromotorasPortalUrl();
+
+  const handleCopyOfficialPortal = async () => {
+    try {
+      await navigator.clipboard.writeText(officialPortalUrl);
+      setCopiedOfficialPortal(true);
+      setStatusMsg('Link oficial de acceso a la App de Promotoras (/portal) copiado.');
+      setTimeout(() => setCopiedOfficialPortal(false), 2500);
+    } catch {
+      setErrorMsg('No se pudo copiar automáticamente. Copia manualmente la dirección /portal.');
+    }
+  };
 
   const handleCopy = async () => {
     if (!linkInfo?.url) return;
@@ -206,6 +223,26 @@ export const RegionalPdvLinkModal: React.FC<RegionalPdvLinkModalProps> = ({
         </div>
 
         <div className="p-6 space-y-4">
+          <div className="p-3.5 rounded-xl bg-emerald-950/35 border border-emerald-500/35 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-black uppercase tracking-wider text-emerald-300">
+                Link Oficial App de Promotoras (Recomendado · Correo y Clave)
+              </span>
+              <button
+                type="button"
+                data-testid="modal-copy-official-portal-url"
+                onClick={() => void handleCopyOfficialPortal()}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                {copiedOfficialPortal ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedOfficialPortal ? '¡Copiado!' : 'Copiar /portal'}</span>
+              </button>
+            </div>
+            <p className="text-xs font-mono text-white break-all bg-black/50 border border-white/10 rounded-lg px-2.5 py-1.5">
+              {officialPortalUrl}
+            </p>
+          </div>
+
           {canSwitchSucursal && (
             <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-zinc-900 border border-white/10">
               <span className="text-xs font-semibold text-zinc-300">

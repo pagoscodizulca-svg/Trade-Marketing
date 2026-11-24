@@ -1032,7 +1032,25 @@ export async function guardarPromotoraMaestra(
           ? 'Occidente'
           : undefined;
 
-  // Esquema real de producción (`public.promotoras` ERP: id entero, correo, direccion, telefono, activo, categoria, region, region_id)
+  const rawSucursalNorm = String(input.sucursal || '').trim().toUpperCase();
+  const rawRegionNorm = String(cleanRegionLabel || '').trim().toUpperCase();
+  const canonicalSucursal: 'CENTRO' | 'OCCIDENTE' | undefined =
+    rawSucursalNorm === 'CENTRO' ||
+    rawSucursalNorm === 'VALENCIA' ||
+    rawSucursalNorm === 'CAPITAL' ||
+    rawRegionNorm === 'CENTRO' ||
+    rawRegionNorm === 'VALENCIA' ||
+    rawRegionNorm === 'ANDES'
+      ? 'CENTRO'
+      : rawSucursalNorm === 'OCCIDENTE' ||
+          rawSucursalNorm === 'ZULIA' ||
+          rawRegionNorm === 'OCCIDENTE'
+        ? 'OCCIDENTE'
+        : undefined;
+
+  const cleanSupervisorId = input.supervisor_id ? limpiarCeldaTexto(input.supervisor_id) : null;
+
+  // Esquema real de producción (`public.promotoras` ERP multisede: correo, telefono, direccion, activo, categoria, region, sucursal, region_id; sin `email`/`ciudad`/`supervisor_id`)
   const erpProdPayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     correo: emailClean,
@@ -1041,6 +1059,7 @@ export async function guardarPromotoraMaestra(
     activo: input.activo !== false,
     categoria: validatedCategoria,
     ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
+    ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
     ...(input.region_id ? { region_id: input.region_id } : {}),
   };
   const erpProdRegionOnlyPayload: Record<string, unknown> = {
@@ -1061,7 +1080,7 @@ export async function guardarPromotoraMaestra(
     ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
   };
 
-  // Esquema normalizado extendido (`email`, `ciudad`, `estado`, `supervisor_id`, `region_id`, `sucursal`)
+  // Esquema normalizado extendido (`email`, `ciudad`, `estado`, `region_id`, `sucursal`, y `supervisor_id` solo si fue indicado)
   const extendedBasePayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     email: emailClean,
@@ -1069,11 +1088,15 @@ export async function guardarPromotoraMaestra(
     ciudad: asNullableString(input.ciudad),
     estado: asNullableString(input.estado),
     direccion: direccionClean,
-    supervisor_id: input.supervisor_id ? limpiarCeldaTexto(input.supervisor_id) : null,
+    ...(cleanSupervisorId ? { supervisor_id: cleanSupervisorId } : {}),
     activo: input.activo !== false,
     ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
     ...(input.region_id ? { region_id: input.region_id } : {}),
-    ...(input.sucursal ? { sucursal: input.sucursal } : {}),
+    ...(canonicalSucursal
+      ? { sucursal: canonicalSucursal }
+      : input.sucursal
+        ? { sucursal: input.sucursal }
+        : {}),
   };
 
   const executeWrite = async (payload: Record<string, unknown>) =>
@@ -1091,11 +1114,13 @@ export async function guardarPromotoraMaestra(
     extendedBasePayload,
   ];
 
-  // Si es actualización sobre ID numérico de producción (o alta sin region_id), intentar primero el esquema real ERP (`correo`)
-  const attempts: Record<string, unknown>[] =
-    isNumericId || (!isUpdate && !input.region_id)
-      ? [erpProdPayload, erpProdRegionOnlyPayload, erpProdMinimalPayload, ...extendedAttempts]
-      : [...extendedAttempts, erpProdPayload, erpProdRegionOnlyPayload, erpProdMinimalPayload];
+  // Priorizar siempre el esquema real de producción (`correo` + `sucursal` canónica sin `supervisor_id` nulo)
+  const attempts: Record<string, unknown>[] = [
+    erpProdPayload,
+    erpProdRegionOnlyPayload,
+    ...extendedAttempts,
+    erpProdMinimalPayload,
+  ];
 
   let result = await executeWrite(attempts[0]!);
   for (let i = 1; i < attempts.length && result.error && isMissingColumnDbError(result.error); i++) {

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, Copy, Smartphone, Truck } from 'lucide-react';
-import { obtenerOCrearEnlacePdvMiSucursal } from '../../services/publicPdvLinksService';
 
 export const INTERNAL_ROUTES = {
   promotoras: '/portal',
@@ -168,20 +167,11 @@ export const PortalQuickLinksBar: React.FC = () => {
   const handleCopyLink = useCallback(
     async (routeKey: InternalPortalRouteKey, copiedAnnouncement: string) => {
       let targetUrl: string;
-      let announcement = copiedAnnouncement;
+      const announcement = copiedAnnouncement;
       try {
+        // Siempre copiar la ruta limpia oficial (`/portal` para App Promotoras y `/logistica/` para App Chofer)
+        // sin inyectar tokens públicos PDV (`?token=...`) que bloqueen el login real de promotoras.
         targetUrl = buildSafeInternalPortalUrl(routeKey);
-        if (routeKey === 'promotoras') {
-          try {
-            const regionalLink = await obtenerOCrearEnlacePdvMiSucursal();
-            if (regionalLink?.url) {
-              targetUrl = regionalLink.url;
-              announcement = `¡Enlace único copiado! SUCURSAL ${regionalLink.sucursal}.`;
-            }
-          } catch {
-            // Si aún no hay sesión o en entorno de pruebas locales sin RPC, conserva la ruta interna segura
-          }
-        }
       } catch {
         showFriendlyNotice('No fue posible preparar el enlace en este navegador.');
         return;
