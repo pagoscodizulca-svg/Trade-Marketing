@@ -13,6 +13,7 @@ export interface CapturedGeolocationFix {
   lng: number;
   accuracyMeters: number | null;
   capturedAtIso: string;
+  locationSource?: 'gps_high' | 'wifi_cell' | 'ip_fallback';
 }
 
 export interface GeofenceEvaluationResult {
@@ -127,6 +128,8 @@ export function evaluateGeofenceCheck(params: {
 
 /**
  * Captura coordenadas en vivo desde `navigator.geolocation` (con inyección opcional para pruebas).
+ * Incluye respaldo automático Capa 1 (alta precisión 5s) -> Capa 2 (triangulación Wi-Fi/celular)
+ * y `watchPosition` acotado con `clearWatch` garantizado para interiores.
  */
 export function captureBrowserGeolocation(options?: {
   timeoutMs?: number;
@@ -147,54 +150,128 @@ export function captureBrowserGeolocation(options?: {
     );
   }
 
-  const timeout = Math.max(2000, Math.min(options?.timeoutMs ?? 12000, 30000));
-  const maximumAge = Math.max(0, options?.maximumAgeMs ?? 15000);
+  const timeout = Math.max(2000, Math.min(options?.timeoutMs ?? 5000, 30000));
+  const maximumAge = Math.max(0, options?.maximumAgeMs ?? 20000);
   const enableHighAccuracy = options?.enableHighAccuracy !== false;
 
-  return new Promise<CapturedGeolocationFix>((resolve, reject) => {
-    geo.getCurrentPosition(
-      (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        if (!isValidCoordinatePair(lat, lng)) {
-          reject(new Error('El sensor GPS devolvió coordenadas inválidas.'));
-          return;
-        }
-        const acc =
-          typeof pos.coords.accuracy === 'number' && Number.isFinite(pos.coords.accuracy)
-            ? Math.round(pos.coords.accuracy * 10) / 10
-            : null;
-        resolve({
-          lat: Math.round(lat * 1_000_000) / 1_000_000,
-          lng: Math.round(lng * 1_000_000) / 1_000_000,
-          accuracyMeters: acc,
-          capturedAtIso: new Date().toISOString(),
-        });
-      },
-      (err) => {
-        if (err && err.code === 1) {
-          reject(
-            new Error(
-              'Permiso de ubicación denegado. Habilite el GPS del navegador para validar el PDV.'
-            )
-          );
-          return;
-        }
-        if (err && err.code === 3) {
-          reject(
-            new Error(
-              'Tiempo de espera agotado al obtener señal GPS. Intente ubicarse cerca de una entrada con señal.'
-            )
-          );
-          return;
-        }
-        reject(new Error('No fue posible obtener la ubicación GPS actual del dispositivo.'));
-      },
-      {
-        enableHighAccuracy,
-        timeout,
-        maximumAge,
+  const parseFix = (
+    pos: GeolocationPosition,
+    source: 'gps_high' | 'wifi_cell'
+  ): CapturedGeolocationFix | null => {
+    const lat = pos?.coords?.latitude;
+    const lng = pos?.coords?.longitude;
+    if (!isValidCoordinatePair(lat, lng)) return null;
+    const acc =
+      typeof pos.coords.accuracy === 'number' &&
+      Number.isFinite(pos.coords.accuracy) &&
+      pos.coords.accuracy >= 0
+        ? Math.round(pos.coords.accuracy * 10) / 10
+        : null;
+    return {
+      lat: Math.round(lat * 1_000_000) / 1_000_000,
+      lng: Math.round(lng * 1_000_000) / 1_000_000,
+      accuracyMeters: acc,
+      capturedAtIso: new Date().toISOString(),
+      locationSource: source,
+    };
+  };
+
+  const singleAttempt = (posOpts: PositionOptions) =>
+    new Promise<{ ok: true; pos: GeolocationPosition } | { ok: false; code: number }>((resolve) => {
+      geo.getCurrentPosition(
+        (pos) => resolve({ ok: true, pos }),
+        (err) => resolve({ ok: false, code: Number(err?.code ?? 2) }),
+        posOpts
+      );
+    });
+
+  const watchBriefAttempt = () =>
+    new Promise<{ ok: true; pos: GeolocationPosition } | { ok: false; code: number }>((resolve) => {
+      if (typeof geo.watchPosition !== 'function') {
+        resolve({ ok: false, code: 2 });
+        return;
       }
-    );
-  });
+      let settled = false;
+      let watchId: number | null = null;
+      const timer = setTimeout(() => finish({ ok: false, code: 3 }), 8000);
+      const finish = (res: { ok: true; pos: GeolocationPosition } | { ok: false; code: number }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (watchId !== null && typeof geo.clearWatch === 'function') {
+          try {
+            geo.clearWatch(watchId);
+          } catch {
+            // Ignorar
+          }
+          watchId = null;
+        }
+        resolve(res);
+      };
+      try {
+        watchId = geo.watchPosition(
+          (pos) => {
+            if (isValidCoordinatePair(pos?.coords?.latitude, pos?.coords?.longitude)) {
+              finish({ ok: true, pos });
+            }
+          },
+          (err) => {
+            if (Number(err?.code) === 1) finish({ ok: false, code: 1 });
+          },
+          { enableHighAccuracy: false, timeout: 8000, maximumAge: 120_000 }
+        );
+      } catch {
+        finish({ ok: false, code: 2 });
+      }
+    });
+
+  return (async () => {
+    // Capa 1: lectura satelital rápida
+    const first = await singleAttempt({ enableHighAccuracy, timeout, maximumAge });
+    if (first.ok) {
+      const fix = parseFix(first.pos, enableHighAccuracy ? 'gps_high' : 'wifi_cell');
+      if (!fix) throw new Error('El sensor GPS devolvió coordenadas inválidas.');
+      return fix;
+    }
+
+    if (first.code === 1) {
+      throw new Error(
+        'Permiso de ubicación denegado. Habilite el GPS del navegador para validar el PDV.'
+      );
+    }
+
+    // Capa 2: fallback automático e invisible a triangulación Wi-Fi / antenas celulares
+    if (enableHighAccuracy) {
+      const second = await singleAttempt({
+        enableHighAccuracy: false,
+        timeout: 10_000,
+        maximumAge: 120_000,
+      });
+      if (second.ok) {
+        const fix = parseFix(second.pos, 'wifi_cell');
+        if (fix) return fix;
+      } else if (second.code === 1) {
+        throw new Error(
+          'Permiso de ubicación denegado. Habilite el GPS del navegador para validar el PDV.'
+        );
+      }
+
+      const watched = await watchBriefAttempt();
+      if (watched.ok) {
+        const fix = parseFix(watched.pos, 'wifi_cell');
+        if (fix) return fix;
+      } else if (watched.code === 1) {
+        throw new Error(
+          'Permiso de ubicación denegado. Habilite el GPS del navegador para validar el PDV.'
+        );
+      }
+    }
+
+    if (first.code === 3) {
+      throw new Error(
+        'Tiempo de espera agotado al obtener señal GPS. Intente ubicarse cerca de una entrada con señal.'
+      );
+    }
+    throw new Error('No fue posible obtener la ubicación GPS actual del dispositivo.');
+  })();
 }

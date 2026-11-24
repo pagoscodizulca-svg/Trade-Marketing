@@ -73,10 +73,14 @@ import { UnassignedRegionGate } from '../auth/UnassignedRegionGate';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
 import { ControlRoomThemeToggle } from '../ui/ControlRoomThemeToggle';
 import {
-  captureBrowserGeolocation,
   evaluateGeofenceCheck,
   type CapturedGeolocationFix,
 } from '../../utils/geofenceHaversine';
+import {
+  clearDirectLocationCache,
+  prewarmBrowserGeolocationOnGesture,
+  resolveDirectLocationCascade,
+} from '../../utils/directLocationEngine';
 import type { EjecucionPdvInput } from '../../types/degustacionesPipeline';
 import {
   getSupabaseClient,
@@ -199,6 +203,10 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   }, []);
 
   const handleSelectPortalTab = useCallback((tab: PortalSubTab) => {
+    // Disparo directo dentro del gesto de usuario (iOS Safari Safe) al abrir Asistencia o Ruta
+    if (tab === 'asistencia' || tab === 'ruta') {
+      prewarmBrowserGeolocationOnGesture();
+    }
     setActivePortalTab(tab);
     navigateTo(pathForPortalSubTab(tab));
   }, []);
@@ -608,6 +616,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   };
 
   const handleSignOut = async () => {
+    clearDirectLocationCache();
     if (shiftSessionState) {
       await purgePortalOfflineSensitiveData();
       setShiftSessionState(null);
@@ -769,15 +778,30 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     setProcessingRutaId(item.id);
     setActionError(null);
 
+    const pdv = matchRutaPdvGeofence(item, geofenceCatalog);
     let fix: CapturedGeolocationFix | null = null;
     let gpsWarning = '';
-    try {
-      fix = await captureBrowserGeolocation();
-    } catch (err) {
-      gpsWarning = err instanceof Error ? err.message : 'GPS no disponible.';
+    const locOutcome = await resolveDirectLocationCascade({
+      fallbackContext: {
+        pdvNombre: item.cliente_nombre,
+        clienteId: pdv?.id ?? null,
+        region: portalContext?.region ?? null,
+        sucursal: shiftSessionState?.session.sucursal ?? profile?.sucursal ?? null,
+      },
+      enableServerFallback: !shiftSessionState,
+    });
+    if (locOutcome.ok) {
+      fix = {
+        lat: locOutcome.fix.lat,
+        lng: locOutcome.fix.lng,
+        accuracyMeters: locOutcome.fix.accuracyMeters,
+        capturedAtIso: locOutcome.fix.capturedAtIso,
+        locationSource: locOutcome.fix.locationSource,
+      };
+    } else {
+      gpsWarning = locOutcome.errorMessage || 'GPS no disponible.';
     }
 
-    const pdv = matchRutaPdvGeofence(item, geofenceCatalog);
     const evaluation = fix
       ? evaluateGeofenceCheck({
           capturedLat: fix.lat,

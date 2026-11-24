@@ -4,12 +4,14 @@ import {
   ALLOWED_ATTENDANCE_IMAGE_MIMES,
   type AsistenciaEvidenciaDbRow,
   type AsistenciaJornadaDbRow,
+  type AttendanceLocationSource,
   MAX_ATTENDANCE_EVIDENCE_BYTES,
   type PerfilAsistencia,
   type SlotFotoAsistencia,
   getCaracasTodayYmd,
   isSlotAllowedForProfile,
 } from '../types/attendanceEvidences';
+import { isValidCoordinatePair } from '../utils/geofenceHaversine';
 import type { ClienteConVendedor, ProductoMaestro } from '../types/masterData';
 import type { RutaPromotoraRecord } from '../types/degustacionesPipeline';
 import type { VerifiedAuthProfile } from './authService';
@@ -698,6 +700,7 @@ export async function submitPortalAttendanceEvidence(params: {
   lat: number;
   lng: number;
   gpsAccuracy?: number | null;
+  locationSource?: AttendanceLocationSource;
   imageFile: File | Blob;
   fechaJornada?: string;
   customFilePrefix?: string;
@@ -716,10 +719,33 @@ export async function submitPortalAttendanceEvidence(params: {
       `El hito ${slotFoto} no corresponde al perfil ${context.perfilAsistencia} asignado.`
     );
   }
+  if (!isValidCoordinatePair(params.lat, params.lng)) {
+    throw new Error('Las coordenadas de ubicación están fuera del rango WGS84 permitido.');
+  }
+  if (
+    params.gpsAccuracy !== undefined &&
+    params.gpsAccuracy !== null &&
+    (!Number.isFinite(params.gpsAccuracy) || params.gpsAccuracy < 0)
+  ) {
+    throw new Error('La precisión GPS debe ser un valor numérico mayor o igual a 0.');
+  }
+
+  const locationSource: AttendanceLocationSource =
+    params.locationSource === 'wifi_cell' || params.locationSource === 'ip_fallback'
+      ? params.locationSource
+      : 'gps_high';
+  const sourceStamp =
+    locationSource === 'gps_high' ? 'GPS' : locationSource === 'wifi_cell' ? 'WIFI' : 'RED';
+  const safeLat = Math.round(params.lat * 1_000_000) / 1_000_000;
+  const safeLng = Math.round(params.lng * 1_000_000) / 1_000_000;
+  const safeAccuracy =
+    typeof params.gpsAccuracy === 'number' && Number.isFinite(params.gpsAccuracy)
+      ? Math.min(100_000, Math.max(0, Math.round(params.gpsAccuracy)))
+      : null;
 
   const fechaJornada = params.fechaJornada || getCaracasTodayYmd();
   const clock = getCaracasClockAndPunctuality();
-  const watermark = `CODIZULCA ASISTENCIA • ${slotFoto} • ${cleanPdv.slice(0, 26)} • ${clock.formattedDate} ${clock.formattedTime} • GPS ${params.lat.toFixed(4)},${params.lng.toFixed(4)}`;
+  const watermark = `CODIZULCA ASISTENCIA • ${slotFoto} • ${cleanPdv.slice(0, 26)} • ${clock.formattedDate} ${clock.formattedTime} • ${sourceStamp} ${safeLat.toFixed(4)},${safeLng.toFixed(4)}`;
 
   const processed = await stampAndCompressImageBlob({
     file: params.imageFile,
@@ -841,30 +867,39 @@ export async function submitPortalAttendanceEvidence(params: {
     if (existingSlot.data) {
       const prev = existingSlot.data as { id: string; storage_path?: string; version?: number };
       previousStoragePath = prev.storage_path || null;
-      const updEv = await client
+      const updateBase = {
+        storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
+        storage_path: storagePath,
+        mime_type: processed.mimeType,
+        tamano_bytes: processed.blob.size,
+        sha256_hex: processed.sha256Hex,
+        ancho_px: processed.width,
+        alto_px: processed.height,
+        pdv_nombre: cleanPdv,
+        lat: safeLat,
+        lng: safeLng,
+        gps_accuracy: safeAccuracy,
+        region: context.region,
+        sucursal: context.sucursal,
+        capturado_en_servidor: nowIso,
+        cargado_por_uid: context.authUserId,
+        cargado_por_rol: actorRol,
+        version: (prev.version || 1) + 1,
+        updated_at: nowIso,
+      };
+      let updEv = await client
         .from('asistencia_evidencias')
-        .update({
-          storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
-          storage_path: storagePath,
-          mime_type: processed.mimeType,
-          tamano_bytes: processed.blob.size,
-          sha256_hex: processed.sha256Hex,
-          ancho_px: processed.width,
-          alto_px: processed.height,
-          pdv_nombre: cleanPdv,
-          lat: params.lat,
-          lng: params.lng,
-          gps_accuracy: params.gpsAccuracy ?? null,
-          region: context.region,
-          sucursal: context.sucursal,
-          capturado_en_servidor: nowIso,
-          cargado_por_uid: context.authUserId,
-          cargado_por_rol: actorRol,
-          version: (prev.version || 1) + 1,
-          updated_at: nowIso,
-        })
+        .update({ ...updateBase, location_source: locationSource })
         .eq('id', prev.id)
         .select('*');
+
+      if (updEv.error && isMissingColumnError(updEv.error)) {
+        updEv = await client
+          .from('asistencia_evidencias')
+          .update(updateBase)
+          .eq('id', prev.id)
+          .select('*');
+      }
 
       if (updEv.error) {
         throw new Error(`No se pudo reemplazar la evidencia (${updEv.error.message}).`);
@@ -875,31 +910,39 @@ export async function submitPortalAttendanceEvidence(params: {
       }
       evidenciaRow = rows[0] as AsistenciaEvidenciaDbRow;
     } else {
-      const insEv = await client
+      const insertBase = {
+        asistencia_id: jornada.id,
+        slot_foto: slotFoto,
+        storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
+        storage_path: storagePath,
+        mime_type: processed.mimeType,
+        tamano_bytes: processed.blob.size,
+        sha256_hex: processed.sha256Hex,
+        ancho_px: processed.width,
+        alto_px: processed.height,
+        pdv_nombre: cleanPdv,
+        lat: safeLat,
+        lng: safeLng,
+        gps_accuracy: safeAccuracy,
+        region: context.region,
+        sucursal: context.sucursal,
+        capturado_en_servidor: nowIso,
+        cargado_por_uid: context.authUserId,
+        cargado_por_rol: actorRol,
+        version: 1,
+        updated_at: nowIso,
+      };
+      let insEv = await client
         .from('asistencia_evidencias')
-        .insert({
-          asistencia_id: jornada.id,
-          slot_foto: slotFoto,
-          storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
-          storage_path: storagePath,
-          mime_type: processed.mimeType,
-          tamano_bytes: processed.blob.size,
-          sha256_hex: processed.sha256Hex,
-          ancho_px: processed.width,
-          alto_px: processed.height,
-          pdv_nombre: cleanPdv,
-          lat: params.lat,
-          lng: params.lng,
-          gps_accuracy: params.gpsAccuracy ?? null,
-          region: context.region,
-          sucursal: context.sucursal,
-          capturado_en_servidor: nowIso,
-          cargado_por_uid: context.authUserId,
-          cargado_por_rol: actorRol,
-          version: 1,
-          updated_at: nowIso,
-        })
+        .insert({ ...insertBase, location_source: locationSource })
         .select('*');
+
+      if (insEv.error && isMissingColumnError(insEv.error)) {
+        insEv = await client
+          .from('asistencia_evidencias')
+          .insert(insertBase)
+          .select('*');
+      }
 
       if (insEv.error) {
         throw new Error(`No se pudo registrar la evidencia (${insEv.error.message}).`);

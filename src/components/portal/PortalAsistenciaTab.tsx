@@ -17,6 +17,7 @@ import {
   SLOT_FOTO_CATALOG,
   SLOTS_FOTO_EVENTUAL,
   SLOTS_FOTO_FIJA,
+  type AttendanceLocationSource,
   type SlotFotoAsistencia,
   evaluateAttendanceCompliance,
   formatServerTimestampCaracas,
@@ -32,6 +33,11 @@ import {
   type PortalPromotoraContext,
   type PortalTodayAttendanceState,
 } from '../../services/promotoraCampoService';
+import { useDirectLocation } from '../../hooks/useDirectLocation';
+import {
+  formatLocationSourceLabel,
+  IOS_SAFARI_GPS_COMPACT_HINT,
+} from '../../utils/directLocationEngine';
 import { PortalStoreSelector } from './PortalCatalogSelectors';
 
 interface PortalAsistenciaTabProps {
@@ -42,10 +48,11 @@ interface PortalAsistenciaTabProps {
   onNotify: (message: string) => void;
 }
 
-interface CapturedGps {
+interface CapturedGpsSummary {
   lat: number;
   lng: number;
   accuracy: number;
+  locationSource: AttendanceLocationSource;
 }
 
 export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
@@ -81,10 +88,39 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     return () => window.clearInterval(id);
   }, []);
 
-  // Estado GPS
-  const [gpsLocation, setGpsLocation] = useState<CapturedGps | null>(null);
-  const [gpsError, setGpsError] = useState<string | null>(null);
-  const [isCapturingGps, setIsCapturingGps] = useState(false);
+  const selectedClientMeta = useMemo(() => {
+    const clean = activeStore.trim().toLowerCase();
+    if (!clean) return null;
+    return clients.find((c) => c.nombre.trim().toLowerCase() === clean) ?? null;
+  }, [clients, activeStore]);
+
+  // Motor de ubicación directa en cascada (3 capas + caché <60s + auto-recuperación iOS/Android)
+  const {
+    location: gpsLocation,
+    isCapturing: isCapturingGps,
+    permissionDeniedHint,
+    errorMessage: gpsError,
+    triggerDirectCapture,
+    setManualFallbackLocation,
+  } = useDirectLocation({
+    pdvNombre: activeStore,
+    clienteId: selectedClientMeta?.id ?? null,
+    region: context.region,
+    sucursal: context.sucursal,
+    enabled: true,
+    autoPrewarm: true,
+  });
+
+  // Disparo síncrono por gesto natural de usuario (cumple política User Gesture de iOS Safari WebKit)
+  const triggerGpsOnNaturalGesture = useCallback(() => {
+    if (!gpsLocation || gpsLocation.locationSource === 'ip_fallback') {
+      void triggerDirectCapture({ forceFresh: gpsLocation?.locationSource === 'ip_fallback' });
+    }
+  }, [gpsLocation, triggerDirectCapture]);
+
+  const requestGps = useCallback(() => {
+    void triggerDirectCapture({ forceFresh: true });
+  }, [triggerDirectCapture]);
 
   // Estado cámara y archivo
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -101,7 +137,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     slot: SlotFotoAsistencia;
     store: string;
     timeVe: string;
-    gps: CapturedGps;
+    gps: CapturedGpsSummary;
   } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -149,52 +185,9 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     void syncTodayAttendance();
   }, [syncTodayAttendance]);
 
-  const requestGps = useCallback(() => {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      setGpsError('Tu navegador no soporta geolocalización GPS.');
-      return;
-    }
-    setIsCapturingGps(true);
-    setGpsError(null);
-
-    const onSuccess = (pos: GeolocationPosition) => {
-      setGpsLocation({
-        lat: Number(pos.coords.latitude.toFixed(6)),
-        lng: Number(pos.coords.longitude.toFixed(6)),
-        accuracy: Math.round(pos.coords.accuracy || 15),
-      });
-      setGpsError(null);
-      setIsCapturingGps(false);
-    };
-
-    const onFinalError = (err: GeolocationPositionError) => {
-      setGpsError(
-        err.code === 1
-          ? 'Permiso de GPS denegado. Activa la ubicación en tu navegador y reintenta.'
-          : 'No se pudo obtener señal satelital GPS. Acércate a una entrada o reintenta.'
-      );
-      setIsCapturingGps(false);
-    };
-
-    navigator.geolocation.getCurrentPosition(
-      onSuccess,
-      () => {
-        navigator.geolocation.getCurrentPosition(onSuccess, onFinalError, {
-          enableHighAccuracy: false,
-          timeout: 12_000,
-          maximumAge: 60_000,
-        });
-      },
-      { enableHighAccuracy: true, timeout: 8_000, maximumAge: 15_000 }
-    );
-  }, []);
-
-  useEffect(() => {
-    requestGps();
-  }, [requestGps]);
-
   const startInAppCamera = async (mode: 'user' | 'environment' = facingMode) => {
     setFileError(null);
+    triggerGpsOnNaturalGesture();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       nativeCameraInputRef.current?.click();
       return;
@@ -268,10 +261,6 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
       setSubmitError('Selecciona el Punto de Venta (PDV) antes de certificar asistencia.');
       return;
     }
-    if (!gpsLocation) {
-      setSubmitError('Se requiere validación GPS antes de registrar asistencia.');
-      return;
-    }
     if (!selectedFile) {
       setSubmitError('Toma una fotografía o selecciona una evidencia válida (JPEG/PNG/WebP).');
       return;
@@ -280,14 +269,23 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
+      const resolvedLoc = gpsLocation ?? (await triggerDirectCapture({ forceFresh: true }));
+      if (!resolvedLoc) {
+        setSubmitError(
+          'No se pudo obtener ubicación (ni GPS ni respaldo de red). Verifica tu conexión y reintenta.'
+        );
+        return;
+      }
+
       const result = await submitPortalAttendanceEvidence({
         context,
         slotFoto: selectedSlot,
         pdvNombre: activeStore.trim(),
         zona: selectedZona,
-        lat: gpsLocation.lat,
-        lng: gpsLocation.lng,
-        gpsAccuracy: gpsLocation.accuracy,
+        lat: resolvedLoc.lat,
+        lng: resolvedLoc.lng,
+        gpsAccuracy: resolvedLoc.accuracyMeters,
+        locationSource: resolvedLoc.locationSource,
         imageFile: selectedFile,
         fechaJornada: todayYmd,
       });
@@ -297,7 +295,12 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
         slot: selectedSlot,
         store: activeStore.trim(),
         timeVe,
-        gps: gpsLocation,
+        gps: {
+          lat: resolvedLoc.lat,
+          lng: resolvedLoc.lng,
+          accuracy: resolvedLoc.accuracyMeters,
+          locationSource: resolvedLoc.locationSource,
+        },
       });
       onNotify(
         `Asistencia registrada (${SLOT_FOTO_CATALOG[selectedSlot].shortBadge}) • ${timeVe} UTC-4`
@@ -383,7 +386,8 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
               <strong>Comercio:</strong> {savedSummary.store}
             </p>
             <p className="text-emerald-400 text-[11px]">
-              <strong>Hora VE:</strong> {savedSummary.timeVe} • <strong>GPS:</strong>{' '}
+              <strong>Hora VE:</strong> {savedSummary.timeVe} •{' '}
+              <strong>{formatLocationSourceLabel(savedSummary.gps.locationSource)}:</strong>{' '}
               {savedSummary.gps.lat}, {savedSummary.gps.lng} (±{savedSummary.gps.accuracy}m)
             </p>
           </div>
@@ -470,7 +474,10 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                     key={slot}
                     type="button"
                     data-testid={`slot-btn-${slot}`}
-                    onClick={() => setSelectedSlot(slot)}
+                    onClick={() => {
+                      setSelectedSlot(slot);
+                      triggerGpsOnNaturalGesture();
+                    }}
                     className={`p-2 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
                       ev
                         ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
@@ -512,7 +519,10 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                 <button
                   key={slot}
                   type="button"
-                  onClick={() => setSelectedSlot(slot)}
+                  onClick={() => {
+                    setSelectedSlot(slot);
+                    triggerGpsOnNaturalGesture();
+                  }}
                   className={`py-2.5 px-2 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
                     selectedSlot === slot
                       ? 'bg-red-600 border-red-500 text-white shadow-lg shadow-red-950/60'
@@ -544,21 +554,67 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
             </div>
 
             {gpsLocation ? (
-              <div className="p-3 bg-[#171717] rounded-xl border border-emerald-500/40 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-950 text-emerald-400 flex items-center justify-center">
-                    <ShieldCheck className="w-4 h-4" />
+              <div className="space-y-2">
+                <div
+                  data-testid="asistencia-gps-validated"
+                  data-location-source={gpsLocation.locationSource}
+                  className={`p-3 bg-[#171717] rounded-xl border flex items-center justify-between gap-2 ${
+                    gpsLocation.locationSource === 'ip_fallback'
+                      ? 'border-amber-500/45'
+                      : 'border-emerald-500/40'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                        gpsLocation.locationSource === 'ip_fallback'
+                          ? 'bg-amber-950/70 text-amber-400'
+                          : 'bg-emerald-950 text-emerald-400'
+                      }`}
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <span
+                        className={`text-xs font-bold block font-mono truncate ${
+                          gpsLocation.locationSource === 'ip_fallback'
+                            ? 'text-amber-300'
+                            : 'text-emerald-400'
+                        }`}
+                      >
+                        {gpsLocation.locationSource === 'gps_high'
+                          ? `GPS Validado (±${gpsLocation.accuracyMeters}m)`
+                          : gpsLocation.locationSource === 'wifi_cell'
+                            ? `Ubicación Wi-Fi / Red Validada (±${gpsLocation.accuracyMeters}m)`
+                            : `Respaldo Auditado Activo (±${gpsLocation.accuracyMeters}m)`}
+                      </span>
+                      <span className="text-[10px] text-neutral-400 font-mono block truncate">
+                        Lat: {gpsLocation.lat} • Lng: {gpsLocation.lng}
+                        {gpsLocation.label ? ` • ${gpsLocation.label}` : ''}
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-emerald-400 text-xs font-bold block font-mono">
-                      GPS Validado (±{gpsLocation.accuracy}m)
-                    </span>
-                    <span className="text-[10px] text-neutral-400 font-mono">
-                      Lat: {gpsLocation.lat} • Lng: {gpsLocation.lng}
-                    </span>
-                  </div>
+                  <MapPin
+                    className={`w-4 h-4 shrink-0 ${
+                      gpsLocation.locationSource === 'ip_fallback'
+                        ? 'text-amber-400'
+                        : 'text-emerald-400'
+                    }`}
+                  />
                 </div>
-                <MapPin className="w-4 h-4 text-emerald-400" />
+                {permissionDeniedHint && gpsLocation.locationSource === 'ip_fallback' && (
+                  <p
+                    data-testid="asistencia-safari-gps-hint"
+                    className="text-[10px] text-neutral-400 font-mono leading-snug px-1"
+                  >
+                    {IOS_SAFARI_GPS_COMPACT_HINT}
+                  </p>
+                )}
+              </div>
+            ) : isCapturingGps ? (
+              <div className="p-3 bg-[#171717] rounded-xl border border-neutral-800 flex items-center justify-center gap-2 text-xs text-neutral-400 font-mono">
+                <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+                <span>Obteniendo coordenadas directas (GPS / Red)...</span>
               </div>
             ) : gpsError ? (
               <div className="p-3 bg-red-950/40 border border-red-500/40 rounded-xl space-y-2">
@@ -566,6 +622,14 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                   <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
                   <span>{gpsError}</span>
                 </div>
+                {permissionDeniedHint && (
+                  <p
+                    data-testid="asistencia-safari-gps-hint"
+                    className="text-[10px] text-neutral-300 font-mono leading-snug"
+                  >
+                    {IOS_SAFARI_GPS_COMPACT_HINT}
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -579,12 +643,15 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                       type="button"
                       data-testid="asistencia-gps-supervision-fallback"
                       onClick={() => {
-                        setGpsLocation({
+                        setManualFallbackLocation({
                           lat: context.region === 'Valencia' ? 10.16202 : 10.65445,
                           lng: context.region === 'Valencia' ? -68.00765 : -71.64058,
-                          accuracy: 25,
+                          accuracyMeters: 25,
+                          locationSource: 'ip_fallback',
+                          capturedAtMs: Date.now(),
+                          capturedAtIso: new Date().toISOString(),
+                          label: `Sede ${context.region}`,
                         });
-                        setGpsError(null);
                       }}
                       className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 text-neutral-200 rounded-lg text-[11px] font-bold cursor-pointer"
                     >
@@ -705,7 +772,10 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => nativeCameraInputRef.current?.click()}
+                  onClick={() => {
+                    triggerGpsOnNaturalGesture();
+                    nativeCameraInputRef.current?.click();
+                  }}
                   className="py-2.5 px-3 rounded-xl bg-[#171717] hover:bg-neutral-800 border border-neutral-700 text-white font-bold text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Camera className="w-3.5 h-3.5 text-emerald-400" />
@@ -714,7 +784,10 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                 <button
                   type="button"
                   data-testid="portal-asistencia-gallery-btn"
-                  onClick={() => galleryInputRef.current?.click()}
+                  onClick={() => {
+                    triggerGpsOnNaturalGesture();
+                    galleryInputRef.current?.click();
+                  }}
                   className="py-2.5 px-3 rounded-xl bg-[#171717] hover:bg-neutral-800 border border-neutral-700 text-neutral-200 font-bold text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
@@ -748,9 +821,9 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
             type="button"
             data-testid="portal-asistencia-submit"
             onClick={() => void handleSubmitAttendance()}
-            disabled={!gpsLocation || !selectedFile || !activeStore.trim() || isSubmitting}
+            disabled={!selectedFile || !activeStore.trim() || isSubmitting}
             className={`w-full py-4 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg transition-all ${
-              !gpsLocation || !selectedFile || !activeStore.trim() || isSubmitting
+              !selectedFile || !activeStore.trim() || isSubmitting
                 ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed'
                 : 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-red-600/30 cursor-pointer'
             }`}

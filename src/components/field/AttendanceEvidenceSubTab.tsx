@@ -46,6 +46,7 @@ import {
 } from '../../services/supabaseModule1';
 import { useOptionalApp } from '../../context/AppContext';
 import { normalizeSearchText } from '../../utils/textSearch';
+import { formatLocationSourceLabel } from '../../utils/directLocationEngine';
 
 export { normalizeSearchText };
 
@@ -615,7 +616,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
           ev.lat !== undefined && ev.lng !== undefined
             ? `${ev.lat.toFixed(6)}, ${ev.lng.toFixed(6)}${
                 ev.gpsAccuracy !== undefined ? ` (±${ev.gpsAccuracy}m)` : ''
-              }`
+              }${ev.locationSource ? ` · ${formatLocationSourceLabel(ev.locationSource)}` : ''}`
             : undefined,
       });
     },
@@ -701,6 +702,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
             lat: resp.evidencia.lat,
             lng: resp.evidencia.lng,
             gps_accuracy: resp.evidencia.gpsAccuracy,
+            location_source: resp.evidencia.locationSource ?? null,
             capturado_en_servidor: resp.evidencia.capturadoEnServidorIso,
             cargado_por_uid: null,
             cargado_por_rol: 'coordinadora',

@@ -2,6 +2,7 @@ import {
   type AsistenciaEvidenciaDbRow,
   type AsistenciaJornadaDbRow,
   type AttendanceComplianceSummary,
+  type AttendanceLocationSource,
   type AttendanceSlotEvidenceItem,
   type DailyPromotoraAttendanceViewModel,
   evaluateAttendanceCompliance,
@@ -51,6 +52,7 @@ export interface UploadAttendanceEvidenceResponse {
     lat: number | null;
     lng: number | null;
     gpsAccuracy: number | null;
+    locationSource?: AttendanceLocationSource | null;
     signedUrl: string;
     signedUrlExpiresAtIso: string;
   };
@@ -369,6 +371,7 @@ function mapDbEvidenceRowToItem(
     lat,
     lng,
     gpsAccuracy,
+    locationSource: row.location_source ?? undefined,
     mapsUrl,
     signedUrl: getCachedEvidenceSignedUrl(row.id) || undefined,
   };

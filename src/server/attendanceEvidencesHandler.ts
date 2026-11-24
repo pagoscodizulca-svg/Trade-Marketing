@@ -4,6 +4,7 @@ import {
   ASISTENCIA_PRIVATE_BUCKET_ID,
   type AsistenciaEvidenciaDbRow,
   type AsistenciaJornadaDbRow,
+  type AttendanceLocationSource,
   BatchSignedUrlsRequestSchema,
   DEFAULT_SIGNED_URL_TTL_SECONDS,
   evaluateAttendanceCompliance,
@@ -84,6 +85,7 @@ export interface UpsertSlotEvidenceParams {
   lat: number | null;
   lng: number | null;
   gpsAccuracy: number | null;
+  locationSource?: AttendanceLocationSource | null;
   sucursal?: OperativeSucursal | null;
   capturadoEnServidorIso: string;
   cargadoPorUid: string;
@@ -234,8 +236,8 @@ function isMissingVersionColumnError(
   return (
     code === '42703' ||
     code === 'PGRST204' ||
-    /column ["']?(version|updated_at)["']?.*does not exist/i.test(msg) ||
-    /Could not find the '(version|updated_at)' column/i.test(msg)
+    /column ["']?(version|updated_at|location_source)["']?.*does not exist/i.test(msg) ||
+    /Could not find the '(version|updated_at|location_source)' column/i.test(msg)
   );
 }
 
@@ -455,6 +457,22 @@ function createSupabaseAttendanceGateway(
           });
         }
         if ((payload.status === 'INSERTED' || payload.status === 'UPDATED') && payload.evidencia) {
+          if (params.locationSource && payload.evidencia.id) {
+            const locPatch = await client
+              .from('asistencia_evidencias')
+              .update({ location_source: params.locationSource })
+              .eq('id', payload.evidencia.id)
+              .select('location_source')
+              .maybeSingle();
+            if (!locPatch.error && locPatch.data) {
+              return {
+                ...payload.evidencia,
+                location_source:
+                  (locPatch.data as { location_source?: AttendanceLocationSource | null })
+                    .location_source ?? params.locationSource,
+              };
+            }
+          }
           return payload.evidencia;
         }
       } else if (rpcResp.error && !isMissingRpcError(rpcResp.error)) {
@@ -482,12 +500,16 @@ function createSupabaseAttendanceGateway(
         cargado_por_uid: params.cargadoPorUid,
         cargado_por_rol: params.cargadoPorRol,
       };
+      const extendedOptionalColumns = {
+        ...(params.locationSource ? { location_source: params.locationSource } : {}),
+      };
 
       if (!isReplacement) {
         const insertPayload = {
           asistencia_id: params.asistenciaId,
           slot_foto: params.slotFoto,
           ...baseColumns,
+          ...extendedOptionalColumns,
           version: 1,
           updated_at: params.capturadoEnServidorIso,
         };
@@ -529,6 +551,7 @@ function createSupabaseAttendanceGateway(
         .from('asistencia_evidencias')
         .update({
           ...baseColumns,
+          ...extendedOptionalColumns,
           version: nextVersion,
           updated_at: params.capturadoEnServidorIso,
         })
@@ -1013,6 +1036,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           lat: meta.lat ?? null,
           lng: meta.lng ?? null,
           gpsAccuracy: meta.gpsAccuracy ?? null,
+          locationSource: meta.locationSource ?? null,
           sucursal:
             normalizeRegionalSucursal(jornada.sucursal) ??
             effectiveActorScope ??
@@ -1128,6 +1152,7 @@ export function createAttendanceEvidencesHandlers(deps?: AttendanceHandlersDepen
           lat: savedEvidence.lat,
           lng: savedEvidence.lng,
           gpsAccuracy: savedEvidence.gps_accuracy,
+          locationSource: savedEvidence.location_source ?? meta.locationSource ?? null,
           signedUrl,
           signedUrlExpiresAtIso,
         },

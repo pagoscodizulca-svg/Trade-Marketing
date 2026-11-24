@@ -31,6 +31,9 @@ export const ALLOWED_ATTENDANCE_IMAGE_MIMES = [
 ] as const;
 export type AllowedAttendanceImageMime = (typeof ALLOWED_ATTENDANCE_IMAGE_MIMES)[number];
 
+export const ATTENDANCE_LOCATION_SOURCES = ['gps_high', 'wifi_cell', 'ip_fallback'] as const;
+export type AttendanceLocationSource = (typeof ATTENDANCE_LOCATION_SOURCES)[number];
+
 export const MAX_ATTENDANCE_EVIDENCE_BYTES = 5 * 1024 * 1024; // 5 MB exactos (5_242_880 bytes)
 export const ASISTENCIA_PRIVATE_BUCKET_ID = 'asistencia-evidencias';
 export const DEFAULT_SIGNED_URL_TTL_SECONDS = 900; // 15 minutos
@@ -158,6 +161,7 @@ export interface AsistenciaEvidenciaDbRow {
   lat: number | null;
   lng: number | null;
   gps_accuracy: number | null;
+  location_source?: AttendanceLocationSource | null;
   region?: 'Occidente' | 'Valencia' | string | null;
   sucursal?: 'ZULIA' | 'VALENCIA' | 'CENTRO' | 'ORIENTE' | 'CAPITAL' | null;
   capturado_en_servidor: string;
@@ -185,6 +189,7 @@ export interface AttendanceSlotEvidenceItem {
   lat?: number;
   lng?: number;
   gpsAccuracy?: number;
+  locationSource?: AttendanceLocationSource;
   mapsUrl?: string;
   signedUrl?: string;
 }
@@ -293,6 +298,7 @@ export function formatYmdToLongEs(ymd: string): string {
 
 export const PerfilAsistenciaSchema = z.enum(PERFILES_ASISTENCIA);
 export const SlotFotoAsistenciaSchema = z.enum(ALL_SLOTS_FOTO_ASISTENCIA);
+export const AttendanceLocationSourceSchema = z.enum(ATTENDANCE_LOCATION_SOURCES);
 
 export const UploadAttendanceEvidenceMetadataSchema = z.object({
   promotoraId: z
@@ -322,6 +328,7 @@ export const UploadAttendanceEvidenceMetadataSchema = z.object({
   lat: z.coerce.number().min(-90).max(90).optional().nullable(),
   lng: z.coerce.number().min(-180).max(180).optional().nullable(),
   gpsAccuracy: z.coerce.number().min(0).max(100000).optional().nullable(),
+  locationSource: AttendanceLocationSourceSchema.optional().nullable(),
   sucursal: z.string().trim().max(64).optional(),
   expectedVersion: z.coerce.number().int().min(1).max(1_000_000).optional().nullable(),
 });

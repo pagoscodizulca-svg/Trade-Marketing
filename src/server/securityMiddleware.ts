@@ -99,9 +99,67 @@ export function buildApiOriginGuard(options: {
   };
 }
 
+export function buildPermissionsPolicyValue(allowedOrigins?: readonly string[]): string {
+  const safeHttpsOrigins = Array.from(
+    new Set(
+      (allowedOrigins ?? [])
+        .map((raw) => {
+          try {
+            const u = new URL(String(raw ?? '').trim());
+            return u.protocol === 'https:' ? `"${u.origin}"` : '';
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean)
+    )
+  );
+  const allowList = safeHttpsOrigins.length > 0 ? `(self ${safeHttpsOrigins.join(' ')})` : '(self)';
+  return `geolocation=${allowList}, camera=${allowList}, microphone=()`;
+}
+
+const LOOPBACK_HOST_REGEX = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+const SAFE_HOSTNAME_REGEX = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::\d{1,5})?$/i;
+
+/**
+ * En producción detrás de Render/reverse proxy, fuerza HTTPS para garantizar
+ * `window.isSecureContext === true` (indispensable para `navigator.geolocation` en iOS/Android).
+ * Excluye `/api/health` y hosts loopback locales.
+ */
+export function buildHttpsEnforceMiddleware(options: { isProduction: boolean }): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!options.isProduction) {
+      next();
+      return;
+    }
+    if (req.path === '/api/health') {
+      next();
+      return;
+    }
+    const rawHost = String(req.headers['x-forwarded-host'] ?? req.headers.host ?? '')
+      .split(',')[0]
+      .trim();
+    if (!rawHost || LOOPBACK_HOST_REGEX.test(rawHost) || !SAFE_HOSTNAME_REGEX.test(rawHost)) {
+      next();
+      return;
+    }
+    const rawForwardedProto = String(req.headers['x-forwarded-proto'] ?? '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    if (rawForwardedProto === 'http') {
+      const safePath = req.originalUrl && req.originalUrl.startsWith('/') ? req.originalUrl : '/';
+      res.redirect(301, `https://${rawHost}${safePath}`);
+      return;
+    }
+    next();
+  };
+}
+
 export function buildSecurityHeaders(options: {
   isProduction: boolean;
   extraConnectSrc?: readonly string[];
+  allowedOrigins?: readonly string[];
 }): RequestHandler[] {
   const connectSrc = [
     "'self'",
@@ -139,8 +197,9 @@ export function buildSecurityHeaders(options: {
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   });
 
+  const permissionsPolicyValue = buildPermissionsPolicyValue(options.allowedOrigins);
   const permissionsPolicy: RequestHandler = (_req, res, next) => {
-    res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=()');
+    res.setHeader('Permissions-Policy', permissionsPolicyValue);
     next();
   };
 

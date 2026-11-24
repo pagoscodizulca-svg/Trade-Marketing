@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import {
   buildApiOriginGuard,
   buildCorsMiddleware,
+  buildHttpsEnforceMiddleware,
   buildRequestLogger,
   buildSecurityHeaders,
   parseAllowedOrigins,
@@ -61,6 +62,7 @@ import { defaultMasterDataErpHandlers } from './src/server/masterDataErpHandler'
 import { defaultBcvRateHandlers } from './src/server/bcvRateHandler';
 import { defaultPriceOcrHandlers } from './src/server/priceOcrHandler';
 import { defaultPriceAlertsHandlers } from './src/server/priceAlertsHandler';
+import { defaultGeoFallbackHandler } from './src/server/geoFallbackHandler';
 import {
   createGracefulShutdownController,
   registerProcessShutdownHandlers,
@@ -76,16 +78,17 @@ const PROJECT_ROOT =
   path.basename(__dirname) === 'dist-server' ? path.resolve(__dirname, '..') : __dirname;
 export const app = express();
 app.disable('x-powered-by');
-// Detrás de un proxy (Render, nginx, Docker) `req.ip` debe reflejar al cliente real para el limitador
-const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '', 10);
-if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
-  app.set('trust proxy', trustProxyHops);
-}
-
 const parsedPort = parseInt(process.env.PORT ?? '', 10);
 const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
 const CHOFER_PORT = 5174;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// Detrás de un proxy (Render, nginx, Docker) `req.ip` y `req.protocol` reflejan al cliente real
+const rawTrustProxy = (process.env.TRUST_PROXY_HOPS ?? '').trim();
+const trustProxyHops = rawTrustProxy ? parseInt(rawTrustProxy, 10) : IS_PRODUCTION ? 1 : 0;
+if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
+  app.set('trust proxy', trustProxyHops);
+}
 
 function getLanIpv4(): string | null {
   const nets = os.networkInterfaces();
@@ -191,8 +194,12 @@ const shutdownController = createGracefulShutdownController({
   logger: serverLogger,
 });
 
-// Cabeceras de seguridad (helmet + CSP en producción), CORS por origen y trazas JSON (P-04 / M-05)
+// Cabeceras de seguridad (helmet + CSP en producción), HTTPS obligatorio en Render, CORS por origen y trazas JSON (P-04 / M-05)
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
+const PUBLIC_APP_ORIGIN_PARSED = parseAllowedOrigins(process.env.PUBLIC_APP_ORIGIN);
+const PERMISSIONS_POLICY_ORIGINS = Array.from(
+  new Set([...ALLOWED_ORIGINS, ...PUBLIC_APP_ORIGIN_PARSED])
+);
 const SUPABASE_PUBLIC_ORIGIN = (() => {
   try {
     const raw = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
@@ -202,9 +209,11 @@ const SUPABASE_PUBLIC_ORIGIN = (() => {
   }
 })();
 
+app.use(buildHttpsEnforceMiddleware({ isProduction: IS_PRODUCTION }));
 for (const mw of buildSecurityHeaders({
   isProduction: IS_PRODUCTION,
   extraConnectSrc: SUPABASE_PUBLIC_ORIGIN ? [SUPABASE_PUBLIC_ORIGIN] : [],
+  allowedOrigins: PERMISSIONS_POLICY_ORIGINS,
 })) {
   app.use(mw);
 }
@@ -794,6 +803,40 @@ export function registerPriceIntelligenceRoutes(
 }
 
 registerPriceIntelligenceRoutes(app);
+
+// ============================================================================
+// 1.O. RESPALDO GEOGRÁFICO AUDITADO (CAPA 3 · CERO BLOQUEO GPS EN MÓVIL)
+//      Requiere JWT válido + rate limit; resuelve PDV bajo RLS / cabeceras proxy / hub regional.
+// ============================================================================
+const geoFallbackRateLimiter = createRateLimiter({
+  name: 'geo-fallback-location',
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+export interface GeoFallbackRouteDeps {
+  rateLimiter: express.RequestHandler;
+  authMiddleware: express.RequestHandler;
+  handler: express.RequestHandler;
+}
+
+export function registerGeoFallbackRoutes(
+  targetApp: express.Express,
+  deps: GeoFallbackRouteDeps = {
+    rateLimiter: geoFallbackRateLimiter,
+    authMiddleware: requireAttendanceActorAuth,
+    handler: defaultGeoFallbackHandler,
+  }
+): void {
+  targetApp.post(
+    '/api/geo/fallback-location',
+    deps.rateLimiter,
+    deps.authMiddleware,
+    deps.handler
+  );
+}
+
+registerGeoFallbackRoutes(app);
 
 // ============================================================================
 // 2. API 404 + MANEJO DE ERRORES
