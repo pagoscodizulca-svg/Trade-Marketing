@@ -1173,19 +1173,7 @@ export async function guardarPromotoraMaestra(
     }
   }
 
-  // Esquema real de producción (`public.promotoras` ERP multisede): alinear `correo` y `email` juntos con degradación segura si falta `email`
-  const erpProdDualEmailPayload: Record<string, unknown> = {
-    nombre_completo: nombreCompleto,
-    correo: emailClean,
-    email: emailClean,
-    telefono: telefonoClean,
-    direccion: direccionClean,
-    activo: input.activo !== false,
-    categoria: validatedCategoria,
-    ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
-    ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
-    ...(input.region_id ? { region_id: input.region_id } : {}),
-  };
+  // Esquema real de producción (`public.promotoras` ERP multisede: correo, telefono, direccion, activo, categoria, region, sucursal, region_id; sin `email`/`ciudad`/`supervisor_id`; el trigger SQL sincroniza `correo` -> `email`)
   const erpProdPayload: Record<string, unknown> = {
     nombre_completo: nombreCompleto,
     correo: emailClean,
@@ -1249,9 +1237,8 @@ export async function guardarPromotoraMaestra(
     extendedBasePayload,
   ];
 
-  // Priorizar siempre el esquema real de producción (`correo` + `email` alineados + `sucursal` canónica sin `supervisor_id` nulo)
+  // Priorizar siempre el esquema real de producción (`correo` + `sucursal` canónica sin `supervisor_id` nulo)
   const attempts: Record<string, unknown>[] = [
-    erpProdDualEmailPayload,
     erpProdPayload,
     erpProdRegionOnlyPayload,
     ...extendedAttempts,
