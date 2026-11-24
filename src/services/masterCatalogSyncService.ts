@@ -997,6 +997,77 @@ function formatPromotoraWriteError(
   return new Error(message || fallbackMessage);
 }
 
+async function patchPromotoraViaBackendApi(
+  promotoraId: string,
+  payload: Record<string, unknown>,
+  client: SupabaseClient
+): Promise<
+  | { status: 'ok'; item: PromotoraMaestra }
+  | { status: 'no_token' }
+  | { status: 'unavailable' }
+> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') {
+    return { status: 'unavailable' };
+  }
+  const initialToken = await resolveBearerTokenForCatalogApi(client);
+  if (!initialToken) {
+    return { status: 'no_token' };
+  }
+
+  const activeSucursal = getActiveClientSucursalHeader();
+  const url = `/api/promotoras/${encodeURIComponent(promotoraId)}`;
+
+  return executeWithSessionRefreshRetry(client, 'maestros', async (token) => {
+    const bearer = token || initialToken;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'PATCH',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bearer}`,
+          ...(activeSucursal ? { 'x-sucursal-activa': activeSucursal } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return { status: 'unavailable' as const };
+    }
+
+    if (res.status === 401) {
+      throw { status: 401, code: 'AUTH_SESSION_EXPIRED', message: 'Sesión inválida o expirada.' };
+    }
+
+    if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+      return { status: 'unavailable' as const };
+    }
+
+    if (!res.ok) {
+      let serverMsg = '';
+      try {
+        const errBody = (await res.json()) as { error?: string };
+        serverMsg = errBody?.error ? String(errBody.error) : '';
+      } catch {
+        // Sin cuerpo JSON
+      }
+      throw new Error(
+        serverMsg || `Error HTTP ${res.status} actualizando el perfil de la promotora en el servidor.`
+      );
+    }
+
+    const body = (await res.json()) as { item?: Record<string, unknown> };
+    if (!body?.item || typeof body.item !== 'object') {
+      return { status: 'unavailable' as const };
+    }
+
+    return {
+      status: 'ok' as const,
+      item: normalizePromotoraMasterRow(body.item),
+    };
+  });
+}
+
 export async function guardarPromotoraMaestra(
   input: PromotoraMaestraInput,
   customClient?: SupabaseClient | null
@@ -1049,6 +1120,29 @@ export async function guardarPromotoraMaestra(
         : undefined;
 
   const cleanSupervisorId = input.supervisor_id ? limpiarCeldaTexto(input.supervisor_id) : null;
+
+  // En navegador para actualizaciones (`isUpdate`), enrutar primero por `PATCH /api/promotoras/:id`
+  // para propagar automáticamente cambios de correo, nombre o estado hacia `auth.users` y `public.profiles`.
+  if (!customClient && isUpdate) {
+    const apiPatchPayload: Record<string, unknown> = {
+      nombre_completo: nombreCompleto,
+      email: emailClean,
+      telefono: telefonoClean,
+      direccion: direccionClean,
+      activo: input.activo !== false,
+      categoria: validatedCategoria,
+      ...(input.ciudad !== undefined ? { ciudad: asNullableString(input.ciudad) } : {}),
+      ...(input.estado !== undefined ? { estado: asNullableString(input.estado) } : {}),
+      ...(input.region_id ? { region_id: input.region_id } : {}),
+      ...(cleanRegionLabel ? { region: cleanRegionLabel } : {}),
+    };
+
+    const apiRes = await patchPromotoraViaBackendApi(rawId, apiPatchPayload, client);
+    if (apiRes.status === 'ok') {
+      invalidateMasterCatalogCaches();
+      return { ...apiRes.item, categoria: validatedCategoria };
+    }
+  }
 
   // Esquema real de producción (`public.promotoras` ERP multisede: correo, telefono, direccion, activo, categoria, region, sucursal, region_id; sin `email`/`ciudad`/`supervisor_id`)
   const erpProdPayload: Record<string, unknown> = {
@@ -1179,6 +1273,15 @@ export async function cambiarEstadoPromotoraMaestra(
 
   const rawId = String(id || '').trim();
   const eqId: string | number = /^\d+$/.test(rawId) ? Number(rawId) : rawId;
+
+  // En navegador, enrutar primero por `PATCH /api/promotoras/:id` para sincronizar `public.profiles.is_active`.
+  if (!customClient && rawId) {
+    const apiRes = await patchPromotoraViaBackendApi(rawId, { activo }, client);
+    if (apiRes.status === 'ok') {
+      invalidateMasterCatalogCaches();
+      return apiRes.item;
+    }
+  }
 
   const { data, error } = await client
     .from('promotoras')

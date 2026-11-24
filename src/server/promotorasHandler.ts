@@ -17,6 +17,15 @@ import {
   createUserScopedSupabaseClient,
   getAdminSupabaseClient,
 } from './supabaseAdminAuth';
+import { invalidateMasterDataErpServerCache } from './masterDataErpHandler';
+import { serverLogger } from './logger';
+import {
+  checkPromotoraEmailAvailability,
+  createSupabasePromotoraAuthSyncGateway,
+  syncPromotoraIdentityToSupabaseAuth,
+  type PromotoraAuthSyncGateway,
+  type PromotoraAuthSyncResult,
+} from './promotoraAuthSync';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -147,8 +156,12 @@ function normalizeServerPromotoraRow(raw: Record<string, unknown>): PromotoraSer
   };
 }
 
-function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway | null {
-  const client = createUserScopedSupabaseClient(accessToken) || getAdminSupabaseClient();
+function createSupabasePromotorasGateway(
+  accessToken: string,
+  activeSucursalHeader?: string | null
+): PromotorasGateway | null {
+  const client =
+    createUserScopedSupabaseClient(accessToken, activeSucursalHeader) || getAdminSupabaseClient();
   if (!client) return null;
 
   return {
@@ -212,10 +225,11 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
     },
 
     async getPromotoraById(id) {
+      const eqId: string | number = /^\d+$/.test(id) ? Number(id) : id;
       const { data, error } = await client
         .from('promotoras')
         .select('*')
-        .eq('id', id)
+        .eq('id', eqId)
         .maybeSingle();
       if (error || !data) return null;
       return normalizeServerPromotoraRow(data as Record<string, unknown>);
@@ -231,6 +245,7 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
         const safePayload: Record<string, unknown> = { ...payload };
         delete safePayload.supervisor_id;
         delete safePayload.estado;
+        if ('correo' in safePayload) delete safePayload.email;
         const retry = await client
           .from('promotoras')
           .insert(safePayload)
@@ -257,6 +272,8 @@ function createSupabasePromotorasGateway(accessToken: string): PromotorasGateway
         const safePayload: Record<string, unknown> = { ...payload };
         delete safePayload.supervisor_id;
         delete safePayload.estado;
+        delete safePayload.ciudad;
+        if ('correo' in safePayload) delete safePayload.email;
         const retry = await client
           .from('promotoras')
           .update(safePayload)
@@ -323,11 +340,19 @@ function extractRequestedHeaderRegion(req: Request): AllowedRegionCode | null {
 
 export function createPromotorasHandlers(options?: {
   gatewayFactory?: (req: Request) => PromotorasGateway | null;
+  authSyncGateway?: PromotoraAuthSyncGateway | null;
 }) {
   const resolveGateway = (req: Request): PromotorasGateway | null => {
     if (options?.gatewayFactory) return options.gatewayFactory(req);
     const token = req.authUser?.accessToken ?? '';
-    return createSupabasePromotorasGateway(token);
+    return createSupabasePromotorasGateway(token, req.authUser?.activeSucursalHeader ?? null);
+  };
+
+  const resolveAuthSyncGateway = (): PromotoraAuthSyncGateway | null => {
+    if (options?.authSyncGateway !== undefined) return options.authSyncGateway;
+    // Cuando un test inyecta gatewayFactory sin authSyncGateway, evitar llamadas reales de red
+    if (options?.gatewayFactory) return null;
+    return createSupabasePromotoraAuthSyncGateway();
   };
 
   const handleListPromotoras = async (req: Request, res: Response): Promise<void> => {
@@ -598,6 +623,7 @@ export function createPromotorasHandlers(options?: {
         ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
       });
 
+      invalidateMasterDataErpServerCache();
       res.status(201).json({ ok: true, item: created });
     } catch (err) {
       res.status(500).json({
@@ -622,6 +648,13 @@ export function createPromotorasHandlers(options?: {
 
     const rawBody =
       req.body && typeof req.body === 'object' ? { ...(req.body as Record<string, unknown>) } : {};
+    if (rawBody.email === undefined && rawBody.correo !== undefined) {
+      rawBody.email = rawBody.correo;
+    }
+    delete rawBody.correo;
+    if (typeof rawBody.email === 'string' && !rawBody.email.trim()) {
+      rawBody.email = null;
+    }
     if (typeof rawBody.region === 'string' && rawBody.region.trim()) {
       const normalizedRegion = mapLegacySucursalToAllowedRegion(rawBody.region);
       if (normalizedRegion) {
@@ -662,7 +695,7 @@ export function createPromotorasHandlers(options?: {
         const resolvedIds = await Promise.all(
           actorScope.assignedRegions.map((code) => gateway.resolveRegionIdByCode(code))
         );
-        const allowedIdSet = new Set(resolvedIds.filter((id): id is string => Boolean(id)));
+        const allowedIdSet = new Set(resolvedIds.filter((rid): rid is string => Boolean(rid)));
         const existingAllowed = existingRegion
           ? actorScope.assignedRegions.includes(existingRegion)
           : Boolean(existing.region_id && allowedIdSet.has(existing.region_id));
@@ -675,6 +708,34 @@ export function createPromotorasHandlers(options?: {
           res.status(403).json({
             error: 'Acceso denegado por aislamiento regional.',
             code: 'FORBIDDEN_REGION_ACCESS',
+          });
+          return;
+        }
+      }
+
+      const authSyncGateway = resolveAuthSyncGateway();
+      const normalizedPrevEmail = existing.email ? existing.email.trim().toLowerCase() : null;
+      const normalizedNextEmail =
+        parsed.data.email !== undefined
+          ? parsed.data.email
+            ? parsed.data.email.trim().toLowerCase()
+            : null
+          : normalizedPrevEmail;
+
+      // Pre-validar colisión en Supabase Auth ANTES de escribir en public.promotoras (evita estados a medias)
+      if (authSyncGateway && normalizedNextEmail && normalizedNextEmail !== normalizedPrevEmail) {
+        const collision = await checkPromotoraEmailAvailability({
+          gateway: authSyncGateway,
+          promotoraId: existing.id,
+          currentAuthUserId: existing.auth_user_id ?? null,
+          newEmail: normalizedNextEmail,
+        });
+        if (!collision.available) {
+          res.status(409).json({
+            error:
+              collision.message ||
+              'El correo electrónico ya está asignado a otra cuenta en Supabase Auth.',
+            code: 'EMAIL_ALREADY_IN_USE',
           });
           return;
         }
@@ -693,7 +754,53 @@ export function createPromotorasHandlers(options?: {
       }
 
       const updated = await gateway.updatePromotora(id, updatePayload);
-      res.status(200).json({ ok: true, item: updated });
+      invalidateMasterDataErpServerCache();
+
+      let authSync: PromotoraAuthSyncResult | undefined;
+      if (authSyncGateway) {
+        try {
+          authSync = await syncPromotoraIdentityToSupabaseAuth({
+            gateway: authSyncGateway,
+            promotora: {
+              id: updated.id,
+              nombre_completo: updated.nombre_completo,
+              email: updated.email,
+              region: updated.region ?? existing.region ?? null,
+              region_id: updated.region_id ?? existing.region_id ?? null,
+              sucursal: updated.sucursal ?? existing.sucursal ?? null,
+              activo: updated.activo,
+              auth_user_id: updated.auth_user_id ?? existing.auth_user_id ?? null,
+            },
+            previousEmail: normalizedPrevEmail,
+          });
+        } catch (syncErr) {
+          const detail =
+            syncErr instanceof Error
+              ? syncErr.message
+              : 'Error sincronizando identidad en Supabase Auth.';
+          serverLogger.error('promotora_auth_sync_failed', {
+            promotoraId: updated.id,
+            detail,
+          });
+          authSync = {
+            synced: false,
+            status: 'error',
+            authUserId: updated.auth_user_id ?? existing.auth_user_id ?? null,
+            previousEmail: normalizedPrevEmail,
+            email: updated.email,
+            emailChanged: false,
+            profileSynced: false,
+            passwordPreserved: true,
+            message: detail,
+          };
+        }
+      }
+
+      res.status(200).json({
+        ok: true,
+        item: updated,
+        ...(authSync ? { authSync } : {}),
+      });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Error actualizando promotora.',
@@ -702,10 +809,106 @@ export function createPromotorasHandlers(options?: {
     }
   };
 
+  const handleSyncPromotoraAuth = async (req: Request, res: Response): Promise<void> => {
+    const authUser = req.authUser;
+    if (!authUser) {
+      res.status(401).json({ error: 'Autenticación requerida.', code: 'AUTH_REQUIRED' });
+      return;
+    }
+
+    const id = String(req.params.id ?? '').trim();
+    if (!UUID_REGEX.test(id) && !/^\d+$/.test(id)) {
+      res.status(400).json({ error: 'Identificador de promotora inválido.', code: 'INVALID_ID' });
+      return;
+    }
+
+    const gateway = resolveGateway(req);
+    if (!gateway) {
+      res.status(503).json({
+        error: 'Conexión a Supabase no disponible en el servidor.',
+        code: 'SUPABASE_UNCONFIGURED',
+      });
+      return;
+    }
+
+    const authSyncGateway = resolveAuthSyncGateway();
+    if (!authSyncGateway) {
+      res.status(503).json({
+        error: 'Cliente administrativo de Supabase Auth no configurado en el servidor.',
+        code: 'AUTH_ADMIN_UNCONFIGURED',
+      });
+      return;
+    }
+
+    try {
+      const existing = await gateway.getPromotoraById(id);
+      if (!existing) {
+        res.status(404).json({ error: 'Promotora no encontrada.', code: 'PROMOTORA_NOT_FOUND' });
+        return;
+      }
+
+      const actorScope = resolveActorAllowedRegion(req);
+      if (!actorScope.isGlobal) {
+        const existingRegion = mapLegacySucursalToAllowedRegion(
+          existing.region ?? existing.sucursal ?? existing.estado ?? existing.ciudad ?? existing.direccion
+        );
+        const resolvedIds = await Promise.all(
+          actorScope.assignedRegions.map((code) => gateway.resolveRegionIdByCode(code))
+        );
+        const allowedIdSet = new Set(resolvedIds.filter((rid): rid is string => Boolean(rid)));
+        const existingAllowed = existingRegion
+          ? actorScope.assignedRegions.includes(existingRegion)
+          : Boolean(existing.region_id && allowedIdSet.has(existing.region_id));
+        if (actorScope.assignedRegions.length === 0 || !existingAllowed) {
+          res.status(403).json({
+            error: 'Acceso denegado por aislamiento regional.',
+            code: 'FORBIDDEN_REGION_ACCESS',
+          });
+          return;
+        }
+      }
+
+      const authSync = await syncPromotoraIdentityToSupabaseAuth({
+        gateway: authSyncGateway,
+        promotora: {
+          id: existing.id,
+          nombre_completo: existing.nombre_completo,
+          email: existing.email,
+          region: existing.region ?? null,
+          region_id: existing.region_id ?? null,
+          sucursal: existing.sucursal ?? null,
+          activo: existing.activo,
+          auth_user_id: existing.auth_user_id ?? null,
+        },
+      });
+
+      if (
+        authSync.status === 'conflict_email_in_use' ||
+        authSync.status === 'conflict_non_promotora_account'
+      ) {
+        res.status(409).json({
+          error: authSync.message || 'Conflicto de identidad en Supabase Auth.',
+          code: 'EMAIL_ALREADY_IN_USE',
+          authSync,
+        });
+        return;
+      }
+
+      invalidateMasterDataErpServerCache();
+      res.status(200).json({ ok: true, item: existing, authSync });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Error sincronizando identidad de promotora.',
+        code: 'PROMOTORAS_AUTH_SYNC_ERROR',
+      });
+    }
+  };
+
   return {
     handleListPromotoras,
     handleCreatePromotora,
     handleUpdatePromotora,
+    handleSyncPromotoraAuth,
   };
 }
 

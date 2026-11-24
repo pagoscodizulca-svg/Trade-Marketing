@@ -627,6 +627,7 @@ export interface PromotorasRouteDeps {
   listHandler: express.RequestHandler;
   createHandler: express.RequestHandler;
   updateHandler: express.RequestHandler;
+  syncAuthHandler?: express.RequestHandler;
 }
 
 export function registerPromotorasRoutes(
@@ -637,11 +638,20 @@ export function registerPromotorasRoutes(
     listHandler: defaultPromotorasHandlers.handleListPromotoras,
     createHandler: defaultPromotorasHandlers.handleCreatePromotora,
     updateHandler: defaultPromotorasHandlers.handleUpdatePromotora,
+    syncAuthHandler: defaultPromotorasHandlers.handleSyncPromotoraAuth,
   }
 ): void {
+  const syncAuthHandler =
+    deps.syncAuthHandler ?? defaultPromotorasHandlers.handleSyncPromotoraAuth;
   targetApp.get('/api/promotoras', deps.rateLimiter, deps.authMiddleware, deps.listHandler);
   targetApp.post('/api/promotoras', deps.rateLimiter, deps.authMiddleware, deps.createHandler);
   targetApp.patch('/api/promotoras/:id', deps.rateLimiter, deps.authMiddleware, deps.updateHandler);
+  targetApp.post(
+    '/api/promotoras/:id/sync-auth',
+    deps.rateLimiter,
+    deps.authMiddleware,
+    syncAuthHandler
+  );
 }
 
 registerPromotorasRoutes(app);
