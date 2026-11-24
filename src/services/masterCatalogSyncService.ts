@@ -880,6 +880,8 @@ export async function obtenerPromotorasMaestras(
   const client = resolveClient(options.client);
   if (!client) return [];
 
+  const activeRegionFilter = normalizeRegionName(getActiveClientSucursalHeader());
+
   const cacheKey = `${getScopeKey()}:${options.soloActivas ? '1' : '0'}:${parsedCategoria}:${options.regionId ?? ''}`;
   if (!options.forzarRefresco) {
     const cached = readTimedCache(promotorasCache, cacheKey);
@@ -893,16 +895,28 @@ export async function obtenerPromotorasMaestras(
         soloActivas: options.soloActivas ? true : undefined,
         categoria: parsedCategoria !== 'TODAS' ? parsedCategoria : undefined,
         regionId: options.regionId || undefined,
+        region: !options.regionId && activeRegionFilter ? activeRegionFilter : undefined,
         forzarRefresco: options.forzarRefresco ? '1' : undefined,
       },
       client
     );
     if (apiRes.status === 'ok') {
-      const normalized = apiRes.data.map((r) =>
+      let normalized = apiRes.data.map((r) =>
         normalizePromotoraMasterRow(r as unknown as Record<string, unknown>)
       );
-      writeTimedCache(promotorasCache, cacheKey, normalized);
-      return normalized;
+      if (activeRegionFilter && !options.regionId) {
+        normalized = normalized.filter(
+          (r) =>
+            normalizeRegionName(r.metadata?.region_codigo ?? r.region ?? r.sucursal) ===
+            activeRegionFilter
+        );
+      }
+      // Si el BFF devolvió 0 filas en una consulta abierta (posible caché vacía/degradación transitoria),
+      // cae automáticamente a consulta directa autenticada bajo RLS en `public.promotoras`.
+      if (normalized.length > 0 || Boolean(options.regionId) || parsedCategoria !== 'TODAS') {
+        writeTimedCache(promotorasCache, cacheKey, normalized);
+        return normalized;
+      }
     }
   }
 
@@ -963,7 +977,6 @@ export async function obtenerPromotorasMaestras(
           .map(normalizePromotoraMasterRow)
           .sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'));
 
-  const activeRegionFilter = normalizeRegionName(getActiveClientSucursalHeader());
   if (activeRegionFilter && !options.regionId) {
     rows = rows.filter(
       (r) =>

@@ -234,6 +234,40 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       filas.push(...((data ?? []) as Record<string, unknown>[]));
       if (!data || data.length < PAGE) break;
     }
+
+    // Excluir entregas cuyo cronograma origen fue cancelado o rechazado en Trade Marketing
+    const cronogramaIds = Array.from(
+      new Set(
+        filas
+          .map((f) => (typeof f.cronograma_id === 'string' ? f.cronograma_id.trim() : ''))
+          .filter(Boolean)
+      )
+    );
+    if (cronogramaIds.length > 0) {
+      const cancelledCronIds = new Set<string>();
+      for (let i = 0; i < cronogramaIds.length; i += 200) {
+        const chunk = cronogramaIds.slice(i, i + 200);
+        const { data: cronRows, error: cronErr } = await client
+          .from('cronograma_degustaciones')
+          .select('id, estado')
+          .in('id', chunk);
+        if (!cronErr && Array.isArray(cronRows)) {
+          for (const cr of cronRows as Array<{ id?: string; estado?: string }>) {
+            const st = String(cr.estado ?? '').trim().toUpperCase();
+            if (cr.id && (st === 'CANCELADA' || st === 'RECHAZADA')) {
+              cancelledCronIds.add(cr.id);
+            }
+          }
+        }
+      }
+      if (cancelledCronIds.size > 0) {
+        return filas.filter((f) => {
+          const cid = typeof f.cronograma_id === 'string' ? f.cronograma_id.trim() : '';
+          return !cid || !cancelledCronIds.has(cid);
+        });
+      }
+    }
+
     return filas;
   }
 

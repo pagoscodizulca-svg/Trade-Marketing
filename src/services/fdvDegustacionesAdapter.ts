@@ -2,7 +2,12 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DegustacionResultadoReport, ShiftType } from '../types';
 import { normalizeExcelDate } from '../utils/excelDateNormalizer';
 import { isDangerousObjectKey } from '../utils/excelDateParser';
-import { assertSupabaseConfigured, getSupabaseRealtimeClient } from './supabaseClient';
+import {
+  assertSupabaseConfigured,
+  getActiveClientSucursalHeader,
+  getAuthenticatedSessionToken,
+  getSupabaseRealtimeClient,
+} from './supabaseClient';
 import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
 import type { RawSupabaseSurvey } from './supabaseModule1';
 
@@ -12,6 +17,24 @@ import type { RawSupabaseSurvey } from './supabaseModule1';
 export const DEFAULT_FDV_RENDER_ORIGIN = 'https://dashboard-fdv-planificador.onrender.com';
 export const DEFAULT_FDV_RENDER_API_URL = `${DEFAULT_FDV_RENDER_ORIGIN}/api/degustaciones`;
 export const FDV_RENDER_VIRTUAL_ID_PREFIX = 'fdv-render:';
+export const IMPULSO_VIRTUAL_ID_PREFIX = 'impulso-';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isVirtualImpulsoSurveyId(rawId: unknown): boolean {
+  return typeof rawId === 'string' && rawId.trim().toLowerCase().startsWith(IMPULSO_VIRTUAL_ID_PREFIX);
+}
+
+export function extractImpulsoIdEnvio(
+  surveyId?: unknown,
+  comments?: Record<string, unknown> | null
+): string | null {
+  const fromComments = String(comments?.idEnvio ?? comments?.impulsoId ?? '').trim();
+  if (UUID_REGEX.test(fromComments)) return fromComments;
+  const raw = String(surveyId ?? '').trim();
+  const match = /^impulso-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(raw);
+  return match ? match[1]! : null;
+}
 
 const CONTROL_CHARS_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const MAX_JSON_CLONE_DEPTH = 12;
@@ -902,16 +925,160 @@ export async function fetchNonDegustacionSurveysViaSdk(
 let inFlightRenderGetPromise: Promise<RawSupabaseSurvey[]> | null = null;
 let lastRenderCacheAt = 0;
 let lastRenderCachedRows: RawSupabaseSurvey[] = [];
+let renderAuthRejectedUntilMs = 0;
 const RENDER_CACHE_TTL_MS = 12_000;
+const RENDER_AUTH_REJECT_BACKOFF_MS = 5 * 60_000;
+
+let inFlightImpulsosGetPromise: Promise<RawSupabaseSurvey[]> | null = null;
+let lastImpulsosCacheAt = 0;
+let lastImpulsosCacheScope = '';
+let lastImpulsosCachedRows: RawSupabaseSurvey[] = [];
+const IMPULSOS_CACHE_TTL_MS = 15_000;
 
 export function clearFdvRenderAdapterCache(): void {
   inFlightRenderGetPromise = null;
   lastRenderCacheAt = 0;
   lastRenderCachedRows = [];
+  renderAuthRejectedUntilMs = 0;
+  inFlightImpulsosGetPromise = null;
+  lastImpulsosCacheAt = 0;
+  lastImpulsosCacheScope = '';
+  lastImpulsosCachedRows = [];
   resetFdvSchemaCapabilitiesCache();
 }
 
 registerMemoryCachePurgeCallback(clearFdvRenderAdapterCache);
+
+/**
+ * Sincroniza en tiempo real las solicitudes reales enviadas por los vendedores (Occidente y Centro)
+ * desde la App de Vendedores (`public."Impulsos_Actividades"`) vía BFF autenticado.
+ */
+export async function fetchImpulsosVendedoresDegustaciones(options?: {
+  timeoutMs?: number;
+  forceRefresh?: boolean;
+  signal?: AbortSignal;
+}): Promise<RawSupabaseSurvey[]> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') {
+    return [];
+  }
+  const externalSignal = options?.signal;
+  if (externalSignal?.aborted) {
+    throw createAbortError();
+  }
+
+  const activeSucursal = getActiveClientSucursalHeader();
+  const scopeKey = activeSucursal ?? 'GLOBAL';
+  const now = Date.now();
+  if (
+    !options?.forceRefresh &&
+    lastImpulsosCacheScope === scopeKey &&
+    now - lastImpulsosCacheAt < IMPULSOS_CACHE_TTL_MS
+  ) {
+    return lastImpulsosCachedRows;
+  }
+
+  if (!options?.forceRefresh && !externalSignal && inFlightImpulsosGetPromise && lastImpulsosCacheScope === scopeKey) {
+    return inFlightImpulsosGetPromise;
+  }
+
+  const runner = (async (): Promise<RawSupabaseSurvey[]> => {
+    const token = await getAuthenticatedSessionToken();
+    if (!token) return [];
+
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1500, Math.min(20_000, options?.timeoutMs ?? 8000));
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        clearTimeout(timer);
+        throw createAbortError();
+      }
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    try {
+      const res = await fetch('/api/fdv/impulsos-degustaciones', {
+        method: 'GET',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+          ...(activeSucursal ? { 'x-sucursal-activa': activeSucursal } : {}),
+        },
+        signal: controller.signal,
+      });
+      if (!res.ok) return [];
+      const payload = (await res.json()) as { data?: unknown };
+      const rows = Array.isArray(payload?.data) ? (payload.data as RawSupabaseSurvey[]) : [];
+      lastImpulsosCacheScope = scopeKey;
+      lastImpulsosCachedRows = rows;
+      lastImpulsosCacheAt = Date.now();
+      return rows;
+    } catch (err) {
+      if (externalSignal?.aborted) {
+        throw createAbortError();
+      }
+      void err;
+      return [];
+    } finally {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
+  })();
+
+  if (!externalSignal) {
+    lastImpulsosCacheScope = scopeKey;
+    inFlightImpulsosGetPromise = runner.finally(() => {
+      inFlightImpulsosGetPromise = null;
+    });
+    return inFlightImpulsosGetPromise;
+  }
+
+  return runner;
+}
+
+/**
+ * Sincroniza bidireccionalmente la decisión de Trade Marketing hacia `public."Impulsos_Actividades"`.
+ */
+export async function syncDecisionToImpulsosVendedores(
+  idEnvio: string,
+  payload: {
+    estado: 'APROBADA' | 'NO_AUTORIZADA' | 'RECHAZADA' | 'CANCELADA' | 'EN_CURSO' | 'COMPLETADA';
+    promotoraAsignada?: string;
+    promotoraTelefono?: string;
+    notasTradeMarketing?: string;
+    motivoCancelacion?: string;
+  }
+): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') return false;
+  if (!UUID_REGEX.test(idEnvio)) return false;
+
+  try {
+    const token = await getAuthenticatedSessionToken();
+    if (!token) return false;
+    const activeSucursal = getActiveClientSucursalHeader();
+    const res = await fetch(
+      `/api/fdv/impulsos-degustaciones/${encodeURIComponent(idEnvio)}/sync-estado`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+          ...(activeSucursal ? { 'x-sucursal-activa': activeSucursal } : {}),
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (res.ok) {
+      lastImpulsosCacheAt = 0;
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
   endpointUrl?: string;
@@ -928,6 +1095,9 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
   if (!safeEndpoint) return [];
 
   const now = Date.now();
+  if (!options?.fetchImpl && now < renderAuthRejectedUntilMs) {
+    return lastRenderCachedRows;
+  }
   if (
     !options?.forceRefresh &&
     !options?.fetchImpl &&
@@ -964,7 +1134,12 @@ export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
       if (externalSignal?.aborted) {
         throw createAbortError();
       }
-      if (!res.ok) return lastRenderCachedRows;
+      if (!res.ok) {
+        if (!options?.fetchImpl && (res.status === 401 || res.status === 403)) {
+          renderAuthRejectedUntilMs = Date.now() + RENDER_AUTH_REJECT_BACKOFF_MS;
+        }
+        return lastRenderCachedRows;
+      }
 
       const rawText = await res.text();
       if (externalSignal?.aborted) {

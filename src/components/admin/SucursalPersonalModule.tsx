@@ -401,7 +401,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
       }
 
       // Respaldo real conectado a `public.promotoras` vía BFF/RLS (`/api/maestros/promotoras`)
-      const allPromotoras = await obtenerPromotorasMaestras({ soloActivas: false });
+      const allPromotoras = await obtenerPromotorasMaestras({ soloActivas: false, forzarRefresco: true });
       const minorWords = new Set(['de', 'del', 'la', 'las', 'los', 'y']);
       const formatDisplayName = (raw: string): string => {
         const trimmed = raw.replace(/\s+/g, ' ').trim();
@@ -426,7 +426,7 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
           regUpper === 'ANDES' ||
           p.sucursal === 'VALENCIA' ||
           p.sucursal === 'CENTRO' ||
-          /san diego|naguanagua|el saman|el samán|guacara|cagua|mariara|tocuyito|los guayos|valencia|carabobo|maracay|turmero|aragua|caracas|miranda|andes|merida|mérida|tachira|táchira|centro/i.test(
+          /san diego|naguanagua|el saman|el samán|guacara|cagua|mariara|tocuyito|los guayos|paraparal|valencia|carabobo|maracay|la barraca|turmero|aragua|caracas|el paraiso|el paraíso|montalban|montalbán|plaza venezuela|caricuao|la candelaria|miranda|andes|merida|mérida|tachira|táchira|centro/i.test(
             addrText
           )
         ) {

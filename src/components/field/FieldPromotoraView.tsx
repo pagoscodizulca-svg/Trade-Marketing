@@ -296,6 +296,7 @@ export const FieldPromotoraView: React.FC = () => {
     isRegionalRestricted,
     canSwitchAmongAssignedRegions,
     canSwitchSucursal,
+    activeRegionScope,
     activeCanonicalSucursal,
     activeRegiones,
     verifiedRegionId,
@@ -2347,7 +2348,7 @@ export const FieldPromotoraView: React.FC = () => {
         return 'Andes';
       }
       if (
-        /valencia|carabobo|los guayos|tocuyito|maracay|turmero|caracas|el paraiso|montalban|plaza venezuela/i.test(
+        /valencia|carabobo|los guayos|paraparal|tocuyito|libertador|san diego|naguanagua|guacara|mariara|cagua|maracay|la barraca|turmero|el saman|el samán|aragua|caracas|el paraiso|el paraíso|montalban|montalbán|plaza venezuela|caricuao|la candelaria|miranda/i.test(
           addr
         )
       ) {
@@ -2400,8 +2401,17 @@ export const FieldPromotoraView: React.FC = () => {
     return 'Mis Regiones';
   }, [assignedRegions, allowedRegionBuckets]);
 
+  const globalSelectedRegionBucket: FieldRegionBucket | null = useMemo(() => {
+    if (activeRegionScope === 'CENTRO') return 'Centro';
+    if (activeRegionScope === 'OCCIDENTE') return 'Occidente';
+    if (activeRegionScope === 'ANDES') return 'Andes';
+    return null;
+  }, [activeRegionScope]);
+
   const defaultFieldRegionFilter: FieldRegionFilter =
-    singleLockedRegionBucket ?? (isMultiRegionScope ? 'ASSIGNED' : 'TODAS');
+    singleLockedRegionBucket ??
+    globalSelectedRegionBucket ??
+    (isMultiRegionScope ? 'ASSIGNED' : 'TODAS');
 
   const editableRegionBuckets: FieldRegionBucket[] = useMemo(
     () => allowedRegionBuckets ?? ['Occidente', 'Centro', 'Andes'],
@@ -2455,6 +2465,7 @@ export const FieldPromotoraView: React.FC = () => {
   useEffect(() => {
     setInvRegionFilter((prev) => {
       if (singleLockedRegionBucket) return singleLockedRegionBucket;
+      if (globalSelectedRegionBucket) return globalSelectedRegionBucket;
       if (isMultiRegionScope) {
         if (prev === 'ASSIGNED') return 'ASSIGNED';
         if (
@@ -2468,7 +2479,7 @@ export const FieldPromotoraView: React.FC = () => {
       }
       return prev === 'ASSIGNED' ? 'TODAS' : prev;
     });
-  }, [singleLockedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
+  }, [singleLockedRegionBucket, globalSelectedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
 
   // Estados sincronizados para Inventario y Degustación
   const [editingInventoryObs, setEditingInventoryObs] = useState<{ id: string; text: string } | null>(null);
@@ -2595,6 +2606,41 @@ export const FieldPromotoraView: React.FC = () => {
     normalizeFieldRegionBucket,
   ]);
 
+  const scopedAsistenciaJornadas = useMemo(() => {
+    const raw = module1Bundle?.asistenciaJornadas || [];
+    if (!allowedRegionBuckets && !globalSelectedRegionBucket) return raw;
+    return raw.filter((j) => {
+      const bucket = normalizeFieldRegionBucket(j.sucursal || j.region, j.zona);
+      if (allowedRegionBuckets) return allowedRegionBuckets.includes(bucket);
+      if (globalSelectedRegionBucket) return bucket === globalSelectedRegionBucket;
+      return true;
+    });
+  }, [
+    module1Bundle?.asistenciaJornadas,
+    allowedRegionBuckets,
+    globalSelectedRegionBucket,
+    normalizeFieldRegionBucket,
+  ]);
+
+  const scopedAsistenciaEvidencias = useMemo(() => {
+    const raw = module1Bundle?.asistenciaEvidencias || [];
+    if (!allowedRegionBuckets && !globalSelectedRegionBucket) return raw;
+    const validIds = new Set(scopedAsistenciaJornadas.map((j) => j.id));
+    return raw.filter((e) => {
+      if (!validIds.has(e.asistencia_id)) return false;
+      const bucket = normalizeFieldRegionBucket(e.sucursal || e.region, e.pdv_nombre);
+      if (allowedRegionBuckets) return allowedRegionBuckets.includes(bucket);
+      if (globalSelectedRegionBucket) return bucket === globalSelectedRegionBucket;
+      return true;
+    });
+  }, [
+    module1Bundle?.asistenciaEvidencias,
+    scopedAsistenciaJornadas,
+    allowedRegionBuckets,
+    globalSelectedRegionBucket,
+    normalizeFieldRegionBucket,
+  ]);
+
   const attendanceRecords = useMemo<AttendanceRecord[]>(() => {
     return module1Bundle?.attendanceRecords || [];
   }, [module1Bundle]);
@@ -2709,9 +2755,9 @@ export const FieldPromotoraView: React.FC = () => {
         ],
       ];
       const exportModels = buildDailyPromotoraAttendanceViewModels({
-        staffMembers: module1Bundle?.staffMembers || [],
-        asistenciaJornadas: module1Bundle?.asistenciaJornadas || [],
-        asistenciaEvidencias: module1Bundle?.asistenciaEvidencias || [],
+        staffMembers: staffList,
+        asistenciaJornadas: scopedAsistenciaJornadas,
+        asistenciaEvidencias: scopedAsistenciaEvidencias,
         legacyAttendanceRecords: attendanceRecords,
         selectedDateYmd: null,
       });
@@ -2887,13 +2933,14 @@ export const FieldPromotoraView: React.FC = () => {
   // SUBMÓDULO 4: PERSONAL ACTIVO SINCRONIZADO (OCCIDENTE + CENTRO + ANDES · SUPABASE `promotoras`)
   // ----------------------------------------------------
   const [selectedStaffRegionFilter, setSelectedStaffRegionFilter] = useState<FieldRegionFilter>(
-    () => defaultFieldRegionFilter
+    () => singleLockedRegionBucket ?? globalSelectedRegionBucket ?? defaultFieldRegionFilter
   );
   const [selectedStaffCategoryFilter, setSelectedStaffCategoryFilter] = useState<'TODAS' | StaffCategory>('TODAS');
 
   useEffect(() => {
     setSelectedStaffRegionFilter((prev) => {
       if (singleLockedRegionBucket) return singleLockedRegionBucket;
+      if (globalSelectedRegionBucket) return globalSelectedRegionBucket;
       if (isMultiRegionScope) {
         if (prev === 'ASSIGNED') return 'ASSIGNED';
         if (
@@ -2907,10 +2954,17 @@ export const FieldPromotoraView: React.FC = () => {
       }
       return prev === 'ASSIGNED' ? 'TODAS' : prev;
     });
-  }, [singleLockedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
+  }, [singleLockedRegionBucket, globalSelectedRegionBucket, isMultiRegionScope, allowedRegionBuckets]);
   const [selectedStaffSearch, setSelectedStaffSearch] = useState('');
   const [fallbackPromotorasStaff, setFallbackPromotorasStaff] = useState<StaffMemberRecord[]>([]);
   const [loadingPersonalCatalog, setLoadingPersonalCatalog] = useState(false);
+  const fallbackLoadedScopeRef = useRef<string | null>(null);
+
+  // Limpiar respaldo local al cambiar de región para impedir mezcla entre Occidente y Centro
+  useEffect(() => {
+    setFallbackPromotorasStaff([]);
+    fallbackLoadedScopeRef.current = null;
+  }, [activeRegionScope, activeCanonicalSucursal]);
   const [uploadingPhotoStaffId, setUploadingPhotoStaffId] = useState<string | null>(null);
   const [isSavingStaffModal, setIsSavingStaffModal] = useState<boolean>(false);
   const [staffFormError, setStaffFormError] = useState<string | null>(null);
@@ -2942,10 +2996,8 @@ export const FieldPromotoraView: React.FC = () => {
     status: 'Activo',
   });
 
-  const loadFallbackPromotorasCatalog = useCallback(async (forceRefresh = false) => {
-    setLoadingPersonalCatalog(true);
-    try {
-      const rows = await obtenerPromotorasMaestras({ soloActivas: false, forzarRefresco: forceRefresh });
+  const mapMasterPromotoraToStaffRecord = useCallback(
+    (p: (typeof masterEntities.promotoras)[number]): StaffMemberRecord => {
       const minorWords = new Set(['de', 'del', 'la', 'las', 'los', 'y']);
       const formatDisplayName = (raw: string): string => {
         const trimmed = raw.replace(/\s+/g, ' ').trim();
@@ -2963,67 +3015,70 @@ export const FieldPromotoraView: React.FC = () => {
           .join(' ');
       };
 
-      const mapped: StaffMemberRecord[] = rows
-        .filter((p) => p.activo !== false)
-        .map((p) => {
-          const displayName = formatDisplayName(String(p.nombre_completo || ''));
-          const cleanEmail = String(p.email || '').trim().toLowerCase();
-          const catRaw = String(p.categoria || 'Fijas').trim().toLowerCase();
-          const category: StaffCategory = catRaw.includes('merch')
-            ? 'merchandising'
-            : catRaw.includes('event')
-              ? 'eventual'
-              : 'fija';
-          const regionLabel: FieldRegionBucket = normalizeFieldRegionBucket(
-            String(
-              p.region ||
-                p.metadata?.region_codigo ||
-                p.metadata?.region_perfil ||
-                p.sucursal ||
-                ''
-            ),
-            String(p.direccion || p.ciudad || '')
-          );
-          return {
-            id: String(p.id),
-            name: displayName,
-            canonicalKey: canonicalStaffKey(displayName, cleanEmail),
-            role: category === 'merchandising' ? 'Promotor Merchandising' : 'Promotora',
-            category,
-            roleCategory: (category === 'merchandising' ? 'MERCHANDISING' : 'PROMOTORA') as
-              | 'MERCHANDISING'
-              | 'PROMOTORA',
-            email: cleanEmail,
-            phone: p.telefono ? String(p.telefono).trim() : '',
-            address: p.direccion ? String(p.direccion).trim() : '',
-            region: regionLabel,
-            authUserId: p.auth_user_id ?? null,
-            assignedStore: regionLabel,
-            status: 'Activo' as const,
-            password: '',
-            shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${regionLabel}`,
-            tastingCompleted: 0,
-            salesAssisted: 0,
-            activationsCount: 0,
-            totalUnits: 0,
-          };
-        })
-        .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+      const displayName = formatDisplayName(String(p.nombre_completo || ''));
+      const cleanEmail = String(p.email || '').trim().toLowerCase();
+      const catRaw = String(p.categoria || 'Fijas').trim().toLowerCase();
+      const category: StaffCategory = catRaw.includes('merch')
+        ? 'merchandising'
+        : catRaw.includes('event')
+          ? 'eventual'
+          : 'fija';
+      const regionLabel: FieldRegionBucket = normalizeFieldRegionBucket(
+        String(
+          p.region ||
+            p.metadata?.region_codigo ||
+            p.metadata?.region_perfil ||
+            p.sucursal ||
+            ''
+        ),
+        String(p.direccion || p.ciudad || '')
+      );
+      return {
+        id: String(p.id),
+        name: displayName,
+        canonicalKey: canonicalStaffKey(displayName, cleanEmail),
+        role: category === 'merchandising' ? 'Promotor Merchandising' : 'Promotora',
+        category,
+        roleCategory: (category === 'merchandising' ? 'MERCHANDISING' : 'PROMOTORA') as
+          | 'MERCHANDISING'
+          | 'PROMOTORA',
+        email: cleanEmail,
+        phone: p.telefono ? String(p.telefono).trim() : '',
+        address: p.direccion ? String(p.direccion).trim() : '',
+        region: regionLabel,
+        authUserId: p.auth_user_id ?? null,
+        assignedStore: regionLabel,
+        status: 'Activo' as const,
+        password: '',
+        shift: `${category === 'fija' ? 'Plantilla Fija' : category === 'eventual' ? 'Plantilla Eventual' : 'Merchandising'} • ${regionLabel}`,
+        tastingCompleted: 0,
+        salesAssisted: 0,
+        activationsCount: 0,
+        totalUnits: 0,
+      };
+    },
+    [normalizeFieldRegionBucket]
+  );
 
-      setFallbackPromotorasStaff(mapped);
-    } catch {
-      // Mantiene estado previo sin romper la vista
-    } finally {
-      setLoadingPersonalCatalog(false);
-    }
-  }, []);
+  const loadFallbackPromotorasCatalog = useCallback(
+    async (forceRefresh = false) => {
+      setLoadingPersonalCatalog(true);
+      try {
+        const rows = await obtenerPromotorasMaestras({ soloActivas: false, forzarRefresco: forceRefresh });
+        const mapped: StaffMemberRecord[] = rows
+          .filter((p) => p.activo !== false)
+          .map(mapMasterPromotoraToStaffRecord)
+          .sort((a, b) => a.name.localeCompare(b.name, 'es'));
 
-  useEffect(() => {
-    const bundleCount = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo').length;
-    if (activeSubTab === 'personal' && bundleCount === 0 && fallbackPromotorasStaff.length === 0) {
-      void loadFallbackPromotorasCatalog(false);
-    }
-  }, [activeSubTab, module1Bundle?.staffMembers, fallbackPromotorasStaff.length, loadFallbackPromotorasCatalog]);
+        setFallbackPromotorasStaff(mapped);
+      } catch {
+        // Mantiene estado previo sin romper la vista
+      } finally {
+        setLoadingPersonalCatalog(false);
+      }
+    },
+    [mapMasterPromotoraToStaffRecord]
+  );
 
   const resolveMemberRegion = useCallback(
     (m: StaffMemberRecord): FieldRegionBucket => {
@@ -3032,12 +3087,71 @@ export const FieldPromotoraView: React.FC = () => {
     [normalizeFieldRegionBucket]
   );
 
+  const masterPromotorasAsStaff = useMemo<StaffMemberRecord[]>(
+    () =>
+      (masterEntities?.promotoras || [])
+        .filter((p) => p.activo !== false)
+        .map(mapMasterPromotoraToStaffRecord)
+        .sort((a, b) => a.name.localeCompare(b.name, 'es')),
+    [masterEntities?.promotoras, mapMasterPromotoraToStaffRecord]
+  );
+
   const staffList = useMemo<StaffMemberRecord[]>(() => {
-    const fromBundle = (module1Bundle?.staffMembers || []).filter((s) => s.status === 'Activo');
-    const base = fromBundle.length > 0 ? fromBundle : fallbackPromotorasStaff;
-    if (!allowedRegionBuckets) return base;
-    return base.filter((m) => allowedRegionBuckets.includes(resolveMemberRegion(m)));
-  }, [module1Bundle, fallbackPromotorasStaff, allowedRegionBuckets, resolveMemberRegion]);
+    const byKey = new Map<string, StaffMemberRecord>();
+    const ingest = (items: StaffMemberRecord[]) => {
+      for (const item of items) {
+        if (item.status !== 'Activo') continue;
+        const key = item.canonicalKey || canonicalStaffKey(item.name, item.email);
+        if (!key) continue;
+        if (!byKey.has(key)) {
+          byKey.set(key, item);
+        }
+      }
+    };
+
+    // Priorizar el padrón fresco de `masterEntities.promotoras` + `module1Bundle.staffMembers` + respaldo directo
+    ingest(module1Bundle?.staffMembers || []);
+    ingest(masterPromotorasAsStaff);
+    ingest(fallbackPromotorasStaff);
+
+    const base = Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+
+    // Aislamiento estricto por región activa: cero mezcla entre Occidente y Centro
+    if (allowedRegionBuckets) {
+      return base.filter((m) => allowedRegionBuckets.includes(resolveMemberRegion(m)));
+    }
+    if (globalSelectedRegionBucket) {
+      return base.filter((m) => resolveMemberRegion(m) === globalSelectedRegionBucket);
+    }
+    return base;
+  }, [
+    module1Bundle?.staffMembers,
+    masterPromotorasAsStaff,
+    fallbackPromotorasStaff,
+    allowedRegionBuckets,
+    globalSelectedRegionBucket,
+    resolveMemberRegion,
+  ]);
+
+  useEffect(() => {
+    const scopeToken = `${activeRegionScope ?? 'ALL'}:${activeCanonicalSucursal ?? 'NONE'}`;
+    if (
+      activeSubTab === 'personal' &&
+      staffList.length === 0 &&
+      !loadingPersonalCatalog &&
+      fallbackLoadedScopeRef.current !== scopeToken
+    ) {
+      fallbackLoadedScopeRef.current = scopeToken;
+      void loadFallbackPromotorasCatalog(true);
+    }
+  }, [
+    activeSubTab,
+    staffList.length,
+    loadingPersonalCatalog,
+    activeRegionScope,
+    activeCanonicalSucursal,
+    loadFallbackPromotorasCatalog,
+  ]);
 
   const occidenteStaffCount = useMemo(
     () => staffList.filter((m) => resolveMemberRegion(m) === 'Occidente').length,
@@ -6174,8 +6288,8 @@ export const FieldPromotoraView: React.FC = () => {
           {activeReportTab === 'asistencia' && (
             <AttendanceEvidenceSubTab
               staffMembers={staffList}
-              asistenciaJornadas={module1Bundle?.asistenciaJornadas || []}
-              asistenciaEvidencias={module1Bundle?.asistenciaEvidencias || []}
+              asistenciaJornadas={scopedAsistenciaJornadas}
+              asistenciaEvidencias={scopedAsistenciaEvidencias}
               legacyAttendanceRecords={attendanceRecords}
               searchQuery={reportSearchQuery}
               onSearchQueryChange={setReportSearchQuery}
@@ -6195,6 +6309,7 @@ export const FieldPromotoraView: React.FC = () => {
               assignedRegionCodes={assignedRegionCodes}
               assignedRegions={assignedRegions}
               canSwitchAmongAssignedRegions={canSwitchAmongAssignedRegions}
+              activeRegionScope={activeRegionScope}
               onNotify={showToast}
             />
           )}

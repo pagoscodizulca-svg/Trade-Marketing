@@ -61,7 +61,7 @@ const DEFAULT_ERP_CACHE_TTL_MS = 60_000;
 const MAX_USER_SCOPED_CACHE_ENTRIES = 32;
 
 const PROMOTORAS_FULL_SELECT =
-  'id,nombre_completo,direccion,telefono,correo,activo,created_at,updated_at,categoria,region,region_id,auth_user_id';
+  'id,nombre_completo,direccion,telefono,correo,activo,created_at,updated_at,categoria,region,sucursal,region_id,auth_user_id';
 const PROMOTORAS_BASE_SELECT =
   'id,nombre_completo,direccion,telefono,correo,activo,created_at,updated_at,categoria';
 
@@ -326,6 +326,81 @@ async function fetchOptionalTablePages<T>(
   }
 }
 
+async function fetchPromotorasRowsResilient(
+  client: SupabaseClient
+): Promise<{ rows: ErpPromotoraRow[]; exactCount: number; degraded: boolean }> {
+  try {
+    const res = await fetchAllTablePages<ErpPromotoraRow>(
+      client,
+      'promotoras',
+      PROMOTORAS_FULL_SELECT,
+      'id',
+      PROMOTORAS_BASE_SELECT
+    );
+    return { ...res, degraded: false };
+  } catch (err) {
+    const classified = classifyServerErpError(err, 'promotoras');
+    // Solo ignorar si la tabla no existe en entorno de prueba/esquema reducido;
+    // errores de red/timeout/RLS se marcan como degradados para no envenenar el caché global.
+    const isMissingTable =
+      classified.technicalCode === 'PGRST205' ||
+      classified.technicalCode === '42P01' ||
+      /could not find the table|does not exist/i.test(classified.message);
+    if (!isMissingTable) {
+      serverLogger.warn('master_data_promotoras_fetch_degraded', {
+        code: classified.technicalCode,
+        message: classified.message,
+      });
+    }
+    return { rows: [], exactCount: 0, degraded: !isMissingTable };
+  }
+}
+
+async function loadFastPromotorasSnapshotForActor(
+  options: MasterDataSnapshotLoadOptions
+): Promise<{ regiones: RegionMaestra[]; promotoras: PromotoraMaestra[]; source: 'supabase_erp_clientes' } | null> {
+  const adminClient = getAdminSupabaseClient();
+  const userToken = String(options.accessToken ?? '').trim();
+  const userClient = userToken
+    ? createUserScopedSupabaseClient(userToken, options.activeSucursalHeader)
+    : null;
+  const primaryClient = adminClient || userClient;
+  if (!primaryClient) return null;
+
+  const tryLoad = async (client: SupabaseClient) => {
+    const [regRes, promRes] = await Promise.all([
+      fetchAllTablePages<ErpRegionRow>(client, 'Regiones', 'id_regi,created_at,regi_desd,regi_saba', 'id_regi'),
+      fetchPromotorasRowsResilient(client),
+    ]);
+    if (promRes.degraded) {
+      throw new ServerMasterDataError({
+        message: 'Consulta directa a promotoras degradada temporalmente.',
+        categoryCode: 'UPSTREAM_503',
+        technicalCode: 'PROMOTORAS_DEGRADED',
+        table: 'promotoras',
+      });
+    }
+    return {
+      regiones: normalizeErpRegionesDataset(regRes.rows),
+      promotoras: normalizeErpPromotorasDataset(promRes.rows, regRes.rows),
+      source: 'supabase_erp_clientes' as const,
+    };
+  };
+
+  try {
+    return await tryLoad(primaryClient);
+  } catch (err) {
+    if (adminClient && userClient) {
+      try {
+        return await tryLoad(userClient);
+      } catch {
+        throw err;
+      }
+    }
+    throw err;
+  }
+}
+
 /**
  * Carga y normaliza TODAS las entidades maestras de CODIZULCA desde Supabase
  * paginando automáticamente en bloques de 1,000 filas con orden determinístico por PK
@@ -395,13 +470,7 @@ export async function loadErpMasterSnapshotFromClient(
       'id_prod,codigo,producto,orden,activo,marca,marca_propia,familia,grupo,regiones,n_regiones,created_at',
       'id_prod'
     ),
-    fetchOptionalTablePages<ErpPromotoraRow>(
-      client,
-      'promotoras',
-      PROMOTORAS_FULL_SELECT,
-      'id',
-      PROMOTORAS_BASE_SELECT
-    ),
+    fetchPromotorasRowsResilient(client),
   ]);
 
   const dataset: ErpMasterDataset = {
@@ -517,10 +586,12 @@ export function createDefaultMasterDataErpGateway(
 
         const userPromise = loadErpMasterSnapshotFromClient(userClient)
           .then((snap) => {
-            if (userScopedSnapshotCache.size >= MAX_USER_SCOPED_CACHE_ENTRIES) {
-              userScopedSnapshotCache.clear();
+            if ((snap.promotoras?.length ?? 0) > 0) {
+              if (userScopedSnapshotCache.size >= MAX_USER_SCOPED_CACHE_ENTRIES) {
+                userScopedSnapshotCache.clear();
+              }
+              userScopedSnapshotCache.set(scopeKey, snap);
             }
-            userScopedSnapshotCache.set(scopeKey, snap);
             return snap;
           })
           .finally(() => {
@@ -537,6 +608,7 @@ export function createDefaultMasterDataErpGateway(
         if (
           !options.forceRefresh &&
           cachedSnapshot &&
+          (cachedSnapshot.promotoras?.length ?? 0) > 0 &&
           now - cachedSnapshot.fetchedAtMs < cacheTtlMs
         ) {
           return cachedSnapshot;
@@ -561,7 +633,9 @@ export function createDefaultMasterDataErpGateway(
 
         const promise = loadErpMasterSnapshotFromClient(adminClient)
           .then((snap) => {
-            cachedSnapshot = snap;
+            if ((snap.promotoras?.length ?? 0) > 0) {
+              cachedSnapshot = snap;
+            }
             return snap;
           })
           .finally(() => {
@@ -987,11 +1061,12 @@ export function resolveAuthorizedSucursalScope(
   }
 
   if (actor.activeSucursalHeader && isOperativeServerSucursal(actor.activeSucursalHeader)) {
+    const headerRegion = normalizeRegionName(actor.activeSucursalHeader);
     return {
       ok: true,
       sucursal: actor.activeSucursalHeader,
-      region: null,
-      regions: null,
+      region: headerRegion,
+      regions: headerRegion ? [headerRegion] : null,
     };
   }
 
@@ -999,8 +1074,10 @@ export function resolveAuthorizedSucursalScope(
 }
 
 export function createMasterDataErpHandlers(
-  gateway: MasterDataErpGateway = createDefaultMasterDataErpGateway()
+  customGateway?: MasterDataErpGateway
 ) {
+  const isDefaultGateway = !customGateway;
+  const gateway: MasterDataErpGateway = customGateway ?? createDefaultMasterDataErpGateway();
   const buildLoadOpts = (
     actor: AuthenticatedServerUser,
     forceRefresh: boolean
@@ -1287,8 +1364,9 @@ export function createMasterDataErpHandlers(
         const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
 
         const isGlobal = isGlobalMasterActor(actor);
+        const sucursalFallbackRegion = scope.sucursal ? normalizeRegionName(scope.sucursal) : null;
         const regionFilter = isGlobal
-          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? null)
+          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? sucursalFallbackRegion ?? null)
           : scope.region;
         const regionsFilter = scope.regions ?? (regionFilter ? [regionFilter] : null);
         const authRegionId = resolveAuthorizedRegionIdFilter({
@@ -1354,11 +1432,42 @@ export function createMasterDataErpHandlers(
         const categoriaRaw =
           typeof req.query.categoria === 'string' ? req.query.categoria.trim() : 'TODAS';
         const busqueda = typeof req.query.busqueda === 'string' ? req.query.busqueda : '';
-        const snap = await gateway.loadSnapshot(buildLoadOpts(actor, forceRefresh));
+        const loadOpts = buildLoadOpts(actor, forceRefresh);
+
+        // Vía rápida directa (`Regiones` + `promotoras`) para evitar bloqueo por las 13 tablas ERP
+        // cuando se usa el gateway real en producción; en pruebas unitarias con mockGateway usa loadSnapshot().
+        let regionesList: RegionMaestra[] = [];
+        let promotorasList: PromotoraMaestra[] = [];
+        let sourceTag: 'supabase_erp_clientes' = 'supabase_erp_clientes';
+        let loadedViaFastPath = false;
+
+        if (isDefaultGateway) {
+          try {
+            const fastSnap = await loadFastPromotorasSnapshotForActor(loadOpts);
+            if (fastSnap) {
+              regionesList = fastSnap.regiones;
+              promotorasList = fastSnap.promotoras;
+              sourceTag = fastSnap.source;
+              loadedViaFastPath = true;
+            }
+          } catch (fastErr) {
+            serverLogger.warn('master_data_promotoras_fast_path_fallback', {
+              message: fastErr instanceof Error ? fastErr.message : String(fastErr),
+            });
+          }
+        }
+
+        if (!loadedViaFastPath) {
+          const snap = await gateway.loadSnapshot(loadOpts);
+          regionesList = snap.regiones ?? [];
+          promotorasList = snap.promotoras ?? [];
+          sourceTag = snap.source;
+        }
 
         const isGlobal = isGlobalMasterActor(actor);
+        const sucursalFallbackRegion = scope.sucursal ? normalizeRegionName(scope.sucursal) : null;
         const regionFilter = isGlobal
-          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? null)
+          ? (scope.region ?? parseOptionalRegionParam(req.query.region) ?? sucursalFallbackRegion ?? null)
           : scope.region;
         const regionsFilter = scope.regions ?? (regionFilter ? [regionFilter] : null);
         const authRegionId = resolveAuthorizedRegionIdFilter({
@@ -1366,7 +1475,7 @@ export function createMasterDataErpHandlers(
           scopeRegion: regionFilter,
           scopeRegions: regionsFilter,
           rawRequestedRegionId: req.query.regionId,
-          regiones: snap.regiones ?? [],
+          regiones: regionesList,
         });
         if (!authRegionId.ok) {
           res.status(authRegionId.status).json({ error: authRegionId.error, code: authRegionId.code });
@@ -1374,7 +1483,7 @@ export function createMasterDataErpHandlers(
         }
         const regionIdFilter = authRegionId.regionId;
 
-        const filtered = (snap.promotoras ?? []).filter((p) => {
+        const filtered = promotorasList.filter((p) => {
           if (soloActivas && !p.activo) return false;
           if (!matchesEntityRegion(p, regionFilter, regionIdFilter, regionsFilter, authRegionId.allowedRegionIds)) return false;
           if (categoriaRaw && categoriaRaw.toUpperCase() !== 'TODAS') {
@@ -1395,7 +1504,7 @@ export function createMasterDataErpHandlers(
 
         res.setHeader('Cache-Control', 'no-store');
         res.status(200).json({
-          source: snap.source,
+          source: sourceTag,
           region: regionFilter ?? 'ALL',
           total: filtered.length,
           data: filtered,

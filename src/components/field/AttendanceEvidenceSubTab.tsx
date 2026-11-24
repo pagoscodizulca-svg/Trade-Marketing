@@ -240,14 +240,29 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   const appCtx = useOptionalApp();
   const isRegionalRestricted = Boolean(appCtx?.isRegionalRestricted);
   const assignedRegionCodes = appCtx?.assignedRegionCodes ?? [];
+  const activeRegionScope = appCtx?.activeRegionScope ?? null;
   const isMultiRegionRestricted = isRegionalRestricted && assignedRegionCodes.length >= 2;
   const lockedRegion: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' | null =
     isRegionalRestricted && !isMultiRegionRestricted && appCtx?.assignedRegion
       ? appCtx.assignedRegion
       : null;
+  const globalScopedRegionFilter: AttendanceRegionFilter | null =
+    !isRegionalRestricted && activeRegionScope && activeRegionScope !== 'ALL' && activeRegionScope !== 'ASSIGNED'
+      ? activeRegionScope === 'OCCIDENTE'
+        ? 'Occidente'
+        : activeRegionScope === 'CENTRO'
+          ? 'Centro'
+          : 'Andes'
+      : null;
+  const effectiveAllowedRegionCodes: readonly ('OCCIDENTE' | 'CENTRO' | 'ANDES')[] | null =
+    isRegionalRestricted
+      ? assignedRegionCodes
+      : activeRegionScope && activeRegionScope !== 'ALL' && activeRegionScope !== 'ASSIGNED'
+        ? [activeRegionScope]
+        : null;
   const defaultRegionFilter: AttendanceRegionFilter = isMultiRegionRestricted
     ? 'ASSIGNED'
-    : lockedRegion ?? 'TODAS';
+    : lockedRegion ?? globalScopedRegionFilter ?? 'TODAS';
 
   const todayCaracasYmd = useMemo(() => getCaracasTodayYmd(), []);
 
@@ -266,14 +281,19 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   useEffect(() => {
     if (lockedRegion) {
       setRegionFilter(lockedRegion);
+    } else if (globalScopedRegionFilter) {
+      setRegionFilter(globalScopedRegionFilter);
     } else if (isMultiRegionRestricted) {
       setRegionFilter((prev) => {
         if (prev === 'ASSIGNED') return prev;
         const code = normalizeAttendanceRegionCode(prev);
         return assignedRegionCodes.includes(code) ? prev : 'ASSIGNED';
       });
+    } else if (activeRegionScope === 'ALL') {
+      setRegionFilter('TODAS');
     }
-  }, [lockedRegion, isMultiRegionRestricted, assignedRegionCodes]);
+    setPromoterFilter('TODAS');
+  }, [lockedRegion, globalScopedRegionFilter, isMultiRegionRestricted, assignedRegionCodes, activeRegionScope]);
 
   // Estado optimista local tras subidas/reemplazos inmediatos
   const [optimisticJornadas, setOptimisticJornadas] = useState<
@@ -336,14 +356,26 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     return Array.from(map.values());
   }, [asistenciaEvidencias, optimisticEvidencias]);
 
+  // Purgar estado optimista al cambiar de región activa (cero mezcla Occidente <-> Centro)
+  useEffect(() => {
+    setOptimisticJornadas({});
+    setOptimisticEvidencias({});
+  }, [activeRegionScope]);
+
   const allViewModels = useMemo<DailyPromotoraAttendanceViewModel[]>(() => {
-    return buildDailyPromotoraAttendanceViewModels({
+    const built = buildDailyPromotoraAttendanceViewModels({
       staffMembers,
       asistenciaJornadas: mergedJornadas,
       asistenciaEvidencias: mergedEvidencias,
       legacyAttendanceRecords,
       selectedDateYmd: dateFilterMode === 'fecha' ? selectedDateYmd : null,
     });
+    if (!effectiveAllowedRegionCodes || effectiveAllowedRegionCodes.length === 0) {
+      return built;
+    }
+    return built.filter((vm) =>
+      effectiveAllowedRegionCodes.includes(normalizeAttendanceRegionCode(vm.region || 'Occidente'))
+    );
   }, [
     staffMembers,
     mergedJornadas,
@@ -351,9 +383,10 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     legacyAttendanceRecords,
     dateFilterMode,
     selectedDateYmd,
+    effectiveAllowedRegionCodes,
   ]);
 
-  // Métricas KPI superiores basadas en el universo de la vista activa (sin "Pausas de Almuerzo")
+  // Métricas KPI superiores basadas en el universo de la región activa (sin "Pausas de Almuerzo")
   const kpiStats = useMemo(() => {
     const fijas = allViewModels.filter((m) => m.perfilAplicado === 'FIJA');
     const eventuales = allViewModels.filter((m) => m.perfilAplicado === 'EVENTUAL');
@@ -393,7 +426,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
       searchQuery,
       profileFilter,
       regionFilter,
-      allowedRegionCodes: isRegionalRestricted ? assignedRegionCodes : null,
+      allowedRegionCodes: effectiveAllowedRegionCodes,
       promoterFilter,
       dateFrom: dateFilterMode === 'historial' ? dateFrom : '',
       dateTo: dateFilterMode === 'historial' ? dateTo : '',
@@ -403,8 +436,7 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
     allViewModels,
     profileFilter,
     regionFilter,
-    isRegionalRestricted,
-    assignedRegionCodes,
+    effectiveAllowedRegionCodes,
     promoterFilter,
     dateFilterMode,
     dateFrom,

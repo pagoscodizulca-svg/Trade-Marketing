@@ -39,8 +39,10 @@ import {
 } from './masterCatalogSyncService';
 import {
   DEFAULT_FDV_RENDER_API_URL,
+  extractImpulsoIdEnvio,
   fetchDegustacionSurveysViaSdk,
   fetchFdvPlanificadorRenderDegustaciones,
+  fetchImpulsosVendedoresDegustaciones,
   fetchNonDegustacionSurveysViaSdk,
   getCronogramaTableSupport,
   getSurveysArchiveColumnsSupport,
@@ -48,6 +50,7 @@ import {
   isMissingColumnPostgrestError,
   isMissingTablePostgrestError,
   isVirtualFdvRenderSurveyId,
+  isVirtualImpulsoSurveyId,
   mergeSupabaseAndRenderDegustacionRows,
   normalizeCanonicalFdvId,
   normalizeFdvCalendarDateYmd,
@@ -59,6 +62,7 @@ import {
   setSurveysArchiveColumnsSupport,
   setSurveysLeidoTradeSupport,
   syncDecisionToFdvPlanificadorRender,
+  syncDecisionToImpulsosVendedores,
   validateFdvRenderEndpoint,
 } from './fdvDegustacionesAdapter';
 
@@ -1065,6 +1069,9 @@ function parseResultadoReport(rawResultado: unknown): DegustacionResultadoReport
 function isSellerOriginComments(c: Record<string, any>): boolean {
   return (
     c.source === 'vendedor_app' ||
+    c.source === 'vendedor_app_api' ||
+    c.source === 'app_vendedores_impulsos' ||
+    c.origin === 'app_vendedores_impulsos' ||
     Boolean(c.degustacionId) ||
     Boolean(c.vendedor) ||
     Boolean(c.salesRep)
@@ -1234,9 +1241,9 @@ export function matchesAssignedRegionsForExternalFdvRow(
     return allowedNorm.has('OCCIDENTE');
   }
 
-  // Fail-closed estricto para filas externas de Render sin etiqueta regional verificable:
+  // Fail-closed estricto para filas externas sin etiqueta regional verificable:
   // jamás volcar filas ambiguas en Occidente ni en Centro.
-  if (row.id && isVirtualFdvRenderSurveyId(String(row.id))) {
+  if (row.id && (isVirtualFdvRenderSurveyId(String(row.id)) || isVirtualImpulsoSurveyId(String(row.id)))) {
     return false;
   }
 
@@ -1277,6 +1284,7 @@ export async function fetchAllModule1FromSupabase(
     rawDegustacionRowsFromDb,
     rawOtherSurveyRowsFromDb,
     rawRenderDegustacionRowsFast,
+    rawImpulsosVendedoresRows,
     rawCronogramaRows,
     asistenciaRelationalBundle,
   ] = await Promise.all([
@@ -1322,6 +1330,7 @@ export async function fetchAllModule1FromSupabase(
       renderReconciliationPromise,
       waitMs(3200).then(() => null),
     ]),
+    fetchImpulsosVendedoresDegustaciones({ timeoutMs: 6500 }).catch(() => [] as RawSupabaseSurvey[]),
     fetchCronogramaDegustacionesSafe(),
     fetchAsistenciaEvidenciasSafe(),
   ]);
@@ -1494,19 +1503,24 @@ export async function fetchAllModule1FromSupabase(
     });
   }
 
-  // Filtrar defensivamente el padrón de personal a la sucursal activa de la sesión
-  if (effectiveAssignedRegions && effectiveAssignedRegions.length > 0) {
-    const allowedStaffBranches = new Set(
-      effectiveAssignedRegions
-        .map((r) => normalizeCanonicalSucursal(r))
-        .filter((v): v is 'CENTRO' | 'OCCIDENTE' => v !== null)
-    );
-    if (allowedStaffBranches.size > 0) {
-      for (let i = staffMembers.length - 1; i >= 0; i -= 1) {
-        const memberBranch = normalizeCanonicalSucursal(staffMembers[i]!.region);
-        if (memberBranch && !allowedStaffBranches.has(memberBranch)) {
-          staffMembers.splice(i, 1);
-        }
+  // Filtrar defensivamente el padrón de personal y todos los informes a la sucursal activa de la sesión
+  const allowedStaffBranches: Set<'CENTRO' | 'OCCIDENTE'> | null =
+    effectiveAssignedRegions && effectiveAssignedRegions.length > 0
+      ? (() => {
+          const s = new Set(
+            effectiveAssignedRegions
+              .map((r) => normalizeCanonicalSucursal(r))
+              .filter((v): v is 'CENTRO' | 'OCCIDENTE' => v !== null)
+          );
+          return s.size > 0 ? s : null;
+        })()
+      : null;
+
+  if (allowedStaffBranches) {
+    for (let i = staffMembers.length - 1; i >= 0; i -= 1) {
+      const memberBranch = normalizeCanonicalSucursal(staffMembers[i]!.region);
+      if (memberBranch && !allowedStaffBranches.has(memberBranch)) {
+        staffMembers.splice(i, 1);
       }
     }
   }
@@ -1581,14 +1595,15 @@ export async function fetchAllModule1FromSupabase(
   }
 
   // --------------------------------------------------------------------------
-  // 1. DEGUSTACIONES (surveys where type = 'Degustacion' + reconciliación Render FDV) + VISITS PARA MÓDULO 2
+  // 1. DEGUSTACIONES (surveys + App de Vendedores Impulsos_Actividades + reconciliación Render FDV) + VISITS PARA MÓDULO 2
   // --------------------------------------------------------------------------
-  const scopedRenderDegustacionRows = (rawRenderDegustacionRowsFast ?? []).filter((r) =>
-    matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions)
-  );
+  const scopedExternalSellerRows = [
+    ...(rawImpulsosVendedoresRows ?? []),
+    ...(rawRenderDegustacionRowsFast ?? []),
+  ].filter((r) => matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions));
   const { mergedRows: degustacionSurveys } = mergeSupabaseAndRenderDegustacionRows(
     cleanDegustacionSurveys,
-    scopedRenderDegustacionRows
+    scopedExternalSellerRows
   );
   const tastingItems: TastingScheduleItem[] = [];
   const visitsForSchedule: ScheduledVisit[] = [];
@@ -1912,6 +1927,15 @@ export async function fetchAllModule1FromSupabase(
 
   rawCronogramaRows.forEach((cd, idx) => {
     if (!cd || !cd.id) return;
+    if (allowedStaffBranches) {
+      const cronBranch =
+        normalizeCanonicalSucursal((cd as unknown as { sucursal?: unknown; region?: unknown }).sucursal) ??
+        normalizeCanonicalSucursal((cd as unknown as { region?: unknown }).region) ??
+        inferCanonicalSucursalFromText(`${cd.cliente_nombre || ''} ${cd.zona_direccion || ''}`);
+      if (!cronBranch || !allowedStaffBranches.has(cronBranch)) {
+        return;
+      }
+    }
 
     const ymd = formatDateYmd(cd.fecha);
     const dayLabel = formatDayLabelEs(ymd);
@@ -2436,11 +2460,27 @@ export async function fetchAllModule1FromSupabase(
     if (sm.authUserId) priceStaffByIdMap.set(String(sm.authUserId), sm);
   });
 
+  const matchesAllowedBranch = (rawSucursal?: unknown, rawRegion?: unknown, fallbackStaffBranch?: string | null): boolean => {
+    if (!allowedStaffBranches) return true;
+    const explicit =
+      normalizeCanonicalSucursal(rawSucursal) ??
+      normalizeCanonicalSucursal(rawRegion) ??
+      normalizeCanonicalSucursal(fallbackStaffBranch);
+    if (!explicit) return false;
+    return allowedStaffBranches.has(explicit);
+  };
+
   const cleanRawPrices = [...rawPrices]
     .filter((row) => {
       if (isSyntheticPriceOrInventoryRow(row)) return false;
-      if (resolveActiveMember(row.promoter, row.creatorId) !== null) return true;
-      if (row.promotora_id && priceStaffByIdMap.has(String(row.promotora_id))) return true;
+      const matched =
+        resolveActiveMember(row.promoter, row.creatorId) ||
+        (row.promotora_id ? priceStaffByIdMap.get(String(row.promotora_id)) ?? null : null) ||
+        (row.auth_user_id ? priceStaffByIdMap.get(String(row.auth_user_id)) ?? null : null);
+      if (!matchesAllowedBranch((row as unknown as { sucursal?: unknown }).sucursal, row.region, matched?.region)) {
+        return false;
+      }
+      if (matched) return true;
       if (row.auth_user_id && String(row.promoter || '').trim().length > 0) return true;
       return false;
     })
@@ -2702,8 +2742,14 @@ export async function fetchAllModule1FromSupabase(
   const cleanRawInventory = [...rawInventory]
     .filter((row) => {
       if (isSyntheticPriceOrInventoryRow(row)) return false;
-      if (resolveActiveMember(row.promoter, row.creatorId) !== null) return true;
-      if (row.promotora_id && staffByIdMap.has(String(row.promotora_id))) return true;
+      const matched =
+        resolveActiveMember(row.promoter, row.creatorId) ||
+        (row.promotora_id ? staffByIdMap.get(String(row.promotora_id)) ?? null : null) ||
+        (row.auth_user_id ? staffByIdMap.get(String(row.auth_user_id)) ?? null : null);
+      if (!matchesAllowedBranch((row as unknown as { sucursal?: unknown }).sucursal, row.region, matched?.region)) {
+        return false;
+      }
+      if (matched) return true;
       if (row.auth_user_id && String(row.promoter || '').trim().length > 0) return true;
       return false;
     })
@@ -3283,6 +3329,25 @@ export async function fetchAllModule1FromSupabase(
       ? Math.min(100, Math.max(0, Math.round((highAcceptanceCount / consumerSurveys.length) * 100)))
       : 0;
 
+  // Aislamiento estricto por sucursal/región en Asistencias y Evidencias Fotográficas (cero fotos cruzadas Occidente <-> Centro)
+  const scopedAsistenciaJornadas = asistenciaRelationalBundle.jornadas.filter((j) => {
+    if (!allowedStaffBranches) return true;
+    const matchedStaff =
+      staffByIdMap.get(String(j.promotora_id || '')) ||
+      (j.promotora_ref_id != null ? staffByIdMap.get(String(j.promotora_ref_id)) : undefined) ||
+      (j.auth_user_id ? staffByIdMap.get(String(j.auth_user_id)) : undefined) ||
+      resolveActiveMember(j.promotora_nombre);
+    return matchesAllowedBranch(j.sucursal, j.region, matchedStaff?.region);
+  });
+  const scopedJornadaIds = new Set(scopedAsistenciaJornadas.map((j) => j.id));
+  const scopedAsistenciaEvidencias = asistenciaRelationalBundle.evidencias.filter((e) => {
+    if (!allowedStaffBranches) return true;
+    if (!scopedJornadaIds.has(e.asistencia_id)) return false;
+    const evBranch = normalizeCanonicalSucursal(e.sucursal ?? e.region);
+    if (evBranch && !allowedStaffBranches.has(evBranch)) return false;
+    return true;
+  });
+
   return {
     tastingItems,
     visitsForSchedule,
@@ -3290,8 +3355,8 @@ export async function fetchAllModule1FromSupabase(
     priceComparisons,
     inventorySampling,
     attendanceRecords,
-    asistenciaJornadas: asistenciaRelationalBundle.jornadas,
-    asistenciaEvidencias: asistenciaRelationalBundle.evidencias,
+    asistenciaJornadas: scopedAsistenciaJornadas,
+    asistenciaEvidencias: scopedAsistenciaEvidencias,
     merchandisingRecords,
     staffMembers,
     consumerSurveys,
@@ -3564,9 +3629,12 @@ export async function fetchUnreadDegustacionNotifications(options?: {
       });
   });
 
-  const [allDegustacionRows, renderRows] = await Promise.all([
+  const [allDegustacionRows, renderRows, impulsosRows] = await Promise.all([
     fetchDegustacionSurveysViaSdk(client, { signal }),
     renderFallbackRace,
+    fetchImpulsosVendedoresDegustaciones({ timeoutMs: 3500, signal }).catch(
+      () => [] as RawSupabaseSurvey[]
+    ),
   ]);
   if (signal?.aborted) {
     const abortErr = new Error('Consulta de notificaciones cancelada.');
@@ -3576,10 +3644,10 @@ export async function fetchUnreadDegustacionNotifications(options?: {
   const scopedDbRows = allDegustacionRows.filter((r) =>
     matchesAssignedRegionsForExternalFdvRow(r, assignedRegions)
   );
-  const scopedRenderRows = renderRows.filter((r) =>
+  const scopedExternalRows = [...impulsosRows, ...renderRows].filter((r) =>
     matchesAssignedRegionsForExternalFdvRow(r, assignedRegions)
   );
-  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(scopedDbRows, scopedRenderRows);
+  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(scopedDbRows, scopedExternalRows);
 
   // Si alguna fila gemela por el mismo `degustacionId` ya fue marcada como leída, excluir duplicados
   const readCanonicalIdsInBatch = new Set<string>();
@@ -3617,7 +3685,7 @@ async function resolveOrMaterializeDegustacionSurveyRow(
   const client = getSupabaseRealtimeClient();
   if (!client) return { targetId: null };
 
-  if (!isVirtualFdvRenderSurveyId(surveyId)) {
+  if (!isVirtualFdvRenderSurveyId(surveyId) && !isVirtualImpulsoSurveyId(surveyId)) {
     return { targetId: surveyId };
   }
 
@@ -3646,13 +3714,18 @@ async function resolveOrMaterializeDegustacionSurveyRow(
     sanitizeFdvText(fallbackComments.product, 220) || 'Portafolio Codizulca';
   const createdAt = sanitizeFdvText(fallbackComments.created_at, 60) || new Date().toISOString();
 
+  const canonicalSucursal = normalizeCanonicalSucursal(
+    fallbackComments.sucursal ?? fallbackComments.region
+  );
   const insertBody: Record<string, unknown> = {
     type: 'Degustacion',
     date: dateYmd,
     store: storeName,
     promoter: promoterName,
     product: productSummary,
-    region: sanitizeFdvText(fallbackComments.region, 40) || 'Occidente',
+    region: sanitizeFdvText(fallbackComments.region, 40) || (canonicalSucursal === 'CENTRO' ? 'Centro' : 'Occidente'),
+    ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
+    ...(canonicalDegId ? { degustacion_key: canonicalDegId } : {}),
     comments: JSON.stringify(fallbackComments),
     creatorId: sanitizeFdvText(fallbackComments.vendedorId || fallbackComments.vendedor, 140) || promoterName,
     created_at: createdAt,
@@ -3921,6 +3994,21 @@ export async function updateSupabaseDegustacionStatus(
       comments: JSON.stringify(updatedComments),
     }
   );
+
+  // Sincronización bidireccional no bloqueante hacia App de Vendedores (`Impulsos_Actividades`)
+  const impulsoIdEnvio = extractImpulsoIdEnvio(surveyId, updatedComments);
+  if (impulsoIdEnvio) {
+    void syncDecisionToImpulsosVendedores(impulsoIdEnvio, {
+      estado: updates.estado,
+      promotoraAsignada: cleanPromotora,
+      notasTradeMarketing:
+        updates.estado === 'APROBADA' && cleanPromotora
+          ? `Aprobada en Trade Marketing. Promotora asignada: ${cleanPromotora}.`
+          : updates.estado === 'NO_AUTORIZADA' || updates.estado === 'CANCELADA'
+            ? 'No autorizada por Coordinación de Trade Marketing.'
+            : undefined,
+    });
+  }
 
   // Sincronización bidireccional no bloqueante hacia FDV Planificador (Render)
   const fdvEstado =

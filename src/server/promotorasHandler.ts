@@ -423,6 +423,7 @@ export function createPromotorasHandlers(options?: {
     }
 
     try {
+      const headerRegionForGlobal = actorScope.isGlobal ? extractRequestedHeaderRegion(req) : null;
       const effectiveRegion =
         !actorScope.isGlobal
           ? parsed.data.region !== 'TODAS'
@@ -432,7 +433,7 @@ export function createPromotorasHandlers(options?: {
               : undefined
           : parsed.data.region !== 'TODAS'
             ? parsed.data.region
-            : undefined;
+            : (headerRegionForGlobal ?? undefined);
 
       let effectiveRegionId = parsed.data.regionId;
       let allowedRegionIds: Set<string> | null = null;

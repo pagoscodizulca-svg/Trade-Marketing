@@ -40,6 +40,7 @@ export interface PriceComparisonReportSubTabProps {
   assignedRegionCodes: AllowedRegionCode[];
   assignedRegions: string[];
   canSwitchAmongAssignedRegions: boolean;
+  activeRegionScope?: AllowedRegionCode | 'ALL' | 'ASSIGNED' | null;
   onNotify?: (message: string) => void;
   /** Override determinista opcional para pruebas SSR / unitarias */
   qaInitialState?: {
@@ -94,6 +95,7 @@ export const PriceComparisonReportSubTab: React.FC<PriceComparisonReportSubTabPr
   assignedRegionCodes,
   assignedRegions,
   canSwitchAmongAssignedRegions,
+  activeRegionScope,
   onNotify,
   qaInitialState,
 }) => {
@@ -110,6 +112,14 @@ export const PriceComparisonReportSubTab: React.FC<PriceComparisonReportSubTabPr
 
   const singleLockedBucket: PriceRegionBucket | null =
     isRegionalRestricted && allowedBuckets && allowedBuckets.length === 1 ? allowedBuckets[0] : null;
+  const globalScopedBucket: PriceRegionBucket | null =
+    !isRegionalRestricted && activeRegionScope && activeRegionScope !== 'ALL' && activeRegionScope !== 'ASSIGNED'
+      ? activeRegionScope === 'ANDES'
+        ? 'Andes'
+        : activeRegionScope === 'CENTRO'
+          ? 'Centro'
+          : 'Occidente'
+      : null;
   const isMultiRegionScope = Boolean(
     isRegionalRestricted && canSwitchAmongAssignedRegions && allowedBuckets && allowedBuckets.length >= 2
   );
@@ -121,7 +131,7 @@ export const PriceComparisonReportSubTab: React.FC<PriceComparisonReportSubTabPr
         : 'Mis Regiones';
 
   const defaultRegionFilter: PriceRegionFilter =
-    singleLockedBucket ?? (isMultiRegionScope ? 'ASSIGNED' : 'TODAS');
+    singleLockedBucket ?? globalScopedBucket ?? (isMultiRegionScope ? 'ASSIGNED' : 'TODAS');
 
   const [regionFilter, setRegionFilter] = useState<PriceRegionFilter>(() => defaultRegionFilter);
   const [cadenaFilter, setCadenaFilter] = useState<string>('TODAS');

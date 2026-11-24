@@ -1195,11 +1195,14 @@ export const AppProvider: React.FC<{
   const [focusedTastingSnapshot, setFocusedTastingSnapshot] =
     useState<DegustacionNotificationItem | null>(null);
 
+  const refreshSupabaseSeqRef = useRef<number>(0);
+
   const refreshSupabaseData = useCallback(async () => {
     if (requiresSucursalSelectionRef.current) {
       setIsLoadingSupabase(false);
       return;
     }
+    const seq = ++refreshSupabaseSeqRef.current;
     setIsLoadingSupabase(true);
     setSupabaseError(null);
     try {
@@ -1207,6 +1210,9 @@ export const AppProvider: React.FC<{
         assignedRegion: assignedRegionRef.current,
         assignedRegions: effectiveScopedRegionsRef.current,
       });
+      if (seq !== refreshSupabaseSeqRef.current) {
+        return;
+      }
       setModule1Bundle(bundle);
 
       // Sincronizar exclusivamente promotoras activas reales (Plantilla Fija + Eventual) desde Supabase
@@ -1331,10 +1337,14 @@ export const AppProvider: React.FC<{
         }
         return merged;
       });
-    } catch {
+      if (seq !== refreshSupabaseSeqRef.current) {
+        return;
+      }
       setSupabaseError('Error de conexión con Supabase');
     } finally {
-      setIsLoadingSupabase(false);
+      if (seq === refreshSupabaseSeqRef.current) {
+        setIsLoadingSupabase(false);
+      }
     }
   }, []);
 
@@ -1817,6 +1827,12 @@ export const AppProvider: React.FC<{
           nextRegion === 'CENTRO' ? 'CENTRO' : nextRegion === 'OCCIDENTE' ? 'ZULIA' : null;
         setActiveClientSucursalHeader(compatSucursal);
         activeSucursalRef.current = compatSucursal;
+        effectiveScopedRegionsRef.current =
+          nextRegion === 'ASSIGNED'
+            ? assignedRegionCodes.length > 0
+              ? assignedRegionCodes
+              : null
+            : [nextRegion];
         const isSameChoice = selectedAssignedRegionScope === nextRegion;
         setSelectedAssignedRegionScope(nextRegion);
 
@@ -1846,6 +1862,8 @@ export const AppProvider: React.FC<{
 
       setActiveClientSucursalHeader(compatSucursal);
       activeSucursalRef.current = compatSucursal;
+      effectiveScopedRegionsRef.current = effectiveNext === 'ALL' ? null : [effectiveNext];
+      assignedRegionRef.current = null;
       requiresSucursalSelectionRef.current = false;
       const isSameRegion = selectedNationalRegionScope === effectiveNext;
       setSelectedNationalSucursal(compatSucursal);
@@ -1898,6 +1916,8 @@ export const AppProvider: React.FC<{
       // 1. Inyectar cabecera activa `x-sucursal-activa` en el cliente Supabase
       setActiveClientSucursalHeader(normalized);
       activeSucursalRef.current = normalized;
+      effectiveScopedRegionsRef.current = officialRegion === 'ALL' ? null : [officialRegion];
+      assignedRegionRef.current = null;
       requiresSucursalSelectionRef.current = false;
       setSelectedNationalSucursal(normalized);
       setSelectedNationalRegionScope(officialRegion);

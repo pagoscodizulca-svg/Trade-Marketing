@@ -591,6 +591,16 @@ function createSupabaseShiftLinksGateway(): ShiftLinksGateway {
         .limit(Math.max(1, Math.min(100, limit)));
 
       if (error) {
+        const code = String(error.code ?? '').toUpperCase();
+        const msg = String(error.message ?? '').toLowerCase();
+        if (
+          code === 'PGRST205' ||
+          code === '42P01' ||
+          msg.includes('could not find the table') ||
+          (msg.includes('relation') && msg.includes('does not exist'))
+        ) {
+          return [];
+        }
         throw new Error(error.message || 'Error consultando enlaces de jornada.');
       }
       return (data ?? []) as unknown as StoredShiftSessionSummary[];

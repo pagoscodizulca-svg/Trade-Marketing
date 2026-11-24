@@ -50,6 +50,7 @@ import {
   handleUploadCadenaLogo,
 } from './src/server/cadenaLogoHandler';
 import { handleCreateFdvSolicitudDegustacion } from './src/server/fdvSolicitudesHandler';
+import { defaultFdvImpulsosBridgeHandlers } from './src/server/fdvImpulsosBridgeHandler';
 import {
   handleWeeklyTastingCutoffCron,
   requireCronSecretAuth,
@@ -402,6 +403,33 @@ app.post(
   requireFdvOrTradeAuth,
   fdvSolicitudesRateLimiter,
   handleCreateFdvSolicitudDegustacion
+);
+
+// Puente bidireccional App de Vendedores (`Impulsos_Actividades`) <-> Módulo de Degustación (Occidente & Centro)
+const fdvImpulsosReadRateLimiter = createRateLimiter({
+  name: 'fdv-impulsos-read',
+  windowMs: 60 * 1000,
+  maxRequests: 60,
+});
+
+const fdvImpulsosWriteRateLimiter = createRateLimiter({
+  name: 'fdv-impulsos-write',
+  windowMs: 60 * 1000,
+  maxRequests: 40,
+});
+
+app.get(
+  '/api/fdv/impulsos-degustaciones',
+  fdvImpulsosReadRateLimiter,
+  requireTorreControlAuth,
+  defaultFdvImpulsosBridgeHandlers.handleListImpulsosDegustaciones
+);
+
+app.post(
+  '/api/fdv/impulsos-degustaciones/:idEnvio/sync-estado',
+  fdvImpulsosWriteRateLimiter,
+  requireCoordinatorOrAdminAuth,
+  defaultFdvImpulsosBridgeHandlers.handleSyncImpulsoEstado
 );
 
 // ============================================================================
