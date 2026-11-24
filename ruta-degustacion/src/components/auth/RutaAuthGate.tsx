@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { AlertTriangle, Lock, LogIn, ShieldCheck, Truck } from 'lucide-react';
+import { AlertTriangle, Eye, EyeOff, Lock, LogIn, ShieldCheck, Truck } from 'lucide-react';
 import type { RutaAuthUser } from '../../types';
 import { signInRutaUser } from '../../services/supabaseAuth';
 
@@ -18,6 +18,7 @@ export function RutaAuthGate({
 }: RutaAuthGateProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -106,7 +107,11 @@ export function RutaAuthGate({
                     <input
                       id="ruta-email"
                       type="email"
+                      inputMode="email"
+                      autoCapitalize="none"
+                      autoCorrect="off"
                       autoComplete="email"
+                      spellCheck={false}
                       required
                       disabled={Boolean(configError) || submitting}
                       value={email}
@@ -127,15 +132,25 @@ export function RutaAuthGate({
                       <Lock className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
                         id="ruta-password"
-                        type="password"
+                        type={showPassword ? 'text' : 'password'}
                         autoComplete="current-password"
                         required
                         disabled={Boolean(configError) || submitting}
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="••••••••"
-                        className="w-full rounded-xl bg-zinc-950 border border-white/15 pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-brand disabled:opacity-50"
+                        className="w-full rounded-xl bg-zinc-950 border border-white/15 pl-10 pr-11 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-brand disabled:opacity-50"
                       />
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        disabled={Boolean(configError) || submitting}
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                        className="absolute inset-y-0 right-0 px-3 flex items-center justify-center text-zinc-400 hover:text-white disabled:opacity-50"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
                     </div>
                   </div>
 

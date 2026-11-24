@@ -865,6 +865,22 @@ function serveSpa(mountPath: string, distPath: string, label: string): void {
     return;
   }
 
+  // En sub-SPAs con prefijo (ej. `/logistica`), redirigir `/logistica` -> `/logistica/`
+  // preservando la query string para que el Service Worker (`scope: /logistica/`) y el manifest PWA
+  // operen siempre dentro de su alcance oficial.
+  if (mountPath !== '/') {
+    app.get(mountPath, (req: Request, res: Response, next: NextFunction) => {
+      const qIdx = req.originalUrl.indexOf('?');
+      const rawPath = qIdx >= 0 ? req.originalUrl.slice(0, qIdx) : req.originalUrl;
+      if (rawPath === mountPath) {
+        const qs = qIdx >= 0 ? req.originalUrl.slice(qIdx) : '';
+        res.redirect(302, `${mountPath}/${qs}`);
+        return;
+      }
+      next();
+    });
+  }
+
   const staticMw = express.static(distPath, {
     index: false,
     setHeaders(res, filePath) {

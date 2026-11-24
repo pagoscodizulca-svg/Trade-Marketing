@@ -139,11 +139,18 @@ export function resolveRutaSupabaseConfig(
 
 export function normalizeRutaRole(raw: unknown): RutaAppRole | null {
   const role = String(raw || '').trim().toLowerCase();
-  if (role === 'super_admin' || role === 'superadmin' || role === 'admin' || role === 'gerente_admin') {
+  if (
+    role === 'super_admin' ||
+    role === 'superadmin' ||
+    role === 'admin' ||
+    role === 'admin_nacional' ||
+    role === 'gerente_admin'
+  ) {
     return 'super_admin';
   }
   if (
     role === 'coordinacion' ||
+    role === 'coordinador' ||
     role === 'coordinadora' ||
     role === 'coordinadora_trade' ||
     role === 'coordinador_trade' ||
@@ -153,7 +160,12 @@ export function normalizeRutaRole(raw: unknown): RutaAppRole | null {
   ) {
     return 'coordinacion';
   }
-  if (role === 'chofer') {
+  if (
+    role === 'chofer' ||
+    role === 'chofer_logistica' ||
+    role === 'logistica' ||
+    role === 'despacho'
+  ) {
     return 'chofer';
   }
   return null;
@@ -432,6 +444,32 @@ export async function verifyRutaProfileAccess(
   }
 
   if (!profile) {
+    // Respaldo canónico multisede en `public.perfiles_usuarios` (admin_nacional / coordinador)
+    try {
+      const puQuery = client
+        .from('perfiles_usuarios')
+        .select('id, email, nombre_completo, rol, sucursal, activo');
+      if (typeof (puQuery as { eq?: unknown }).eq === 'function') {
+        const { data: puRow, error: puErr } = await puQuery
+          .eq('id', session.user.id)
+          .maybeSingle();
+        if (!puErr && puRow) {
+          profile = {
+            id: puRow.id,
+            email: puRow.email,
+            full_name: puRow.nombre_completo,
+            role: puRow.rol,
+            sucursal: puRow.sucursal,
+            is_active: puRow.activo,
+          };
+        }
+      }
+    } catch {
+      // Tabla perfiles_usuarios opcional en mocks mínimos
+    }
+  }
+
+  if (!profile) {
     // Respaldo verificado exclusivamente sobre app_metadata firmado en servidor (jamás user_metadata)
     // para la cuenta maestra `admin@codizulca.com`.
     const appMeta = (session.user.app_metadata ?? {}) as Record<string, unknown>;
@@ -646,11 +684,18 @@ export function subscribeRutaAuthEvents(handlers: {
   const client = getRutaSupabaseClient();
   if (!client) return () => {};
   const { data } = client.auth.onAuthStateChange((event, session) => {
-    if (event === 'SIGNED_OUT' || !session?.access_token) {
+    if (event === 'SIGNED_OUT') {
       writeCachedProfile(null);
       void syncTokenToOutbox(null);
       void purgeRutaBrowserCaches();
       handlers.onSignedOut?.();
+      return;
+    }
+    if (!session?.access_token) {
+      // `INITIAL_SESSION` sin sesión: no purgar sessionStorage ni IndexedDB para no romper
+      // enlaces temporales (`?t=...`) ni reiniciar la base offline antes de autenticarse.
+      writeCachedProfile(null);
+      void syncTokenToOutbox(null);
       return;
     }
     if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') {

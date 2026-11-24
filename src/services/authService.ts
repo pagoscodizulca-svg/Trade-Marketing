@@ -1051,6 +1051,10 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
       appRole: 'promotora',
       iamRole: 'promotora',
       sucursal: activeStaff.sucursal ?? base.sucursal,
+      canonicalSucursal:
+        normalizeCanonicalSucursal(activeStaff.sucursal ?? activeStaff.regionLabel) ??
+        base.canonicalSucursal ??
+        null,
       regionId: activeStaff.regionId ?? base.regionId ?? null,
       regionLabel: activeStaff.regionLabel ?? base.regionLabel ?? null,
       rawAppRole: 'promotora',

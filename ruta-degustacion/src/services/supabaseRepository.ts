@@ -41,12 +41,23 @@ const esErrorDeRed = (msg: string): boolean =>
   (typeof navigator !== 'undefined' && navigator.onLine === false) ||
   /failed to fetch|networkerror|load failed|network request failed|fetch failed|aborted|timeout|timed out/i.test(msg);
 
+function canonicalizeDbSucursal(raw: unknown): 'OCCIDENTE' | 'CENTRO' | undefined {
+  const code = String(raw ?? '').trim().toUpperCase();
+  if (!code) return undefined;
+  if (code === 'ZULIA' || code === 'OCCIDENTE') return 'OCCIDENTE';
+  if (code === 'VALENCIA' || code === 'CENTRO' || code === 'ORIENTE' || code === 'CAPITAL') {
+    return 'CENTRO';
+  }
+  return undefined;
+}
+
 /** Normaliza una fila remota para que la UI nunca reciba null/undefined en campos de texto. */
 function normalizarFila(r: Record<string, unknown>): Entrega {
   const txt = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v));
   const rawSuc = txt(r.sucursal).trim().toUpperCase();
-  const sucursal = (OPERATIVE_SUCURSALES as readonly string[]).includes(rawSuc)
-    ? (rawSuc as OperativeSucursal)
+  const mappedSuc = rawSuc === 'OCCIDENTE' ? 'ZULIA' : rawSuc;
+  const sucursal = (OPERATIVE_SUCURSALES as readonly string[]).includes(mappedSuc)
+    ? (mappedSuc as OperativeSucursal)
     : undefined;
   const rawRegion = txt(r.region).trim();
   const rawSede = txt(r.chofer_sede).trim().toUpperCase();
@@ -673,7 +684,14 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
       await aplicarAccion(id, { notas_chofer: nota }, new Date().toISOString());
     },
     async add(entrega) {
-      await run((c) => c.from(TABLE).insert({ ...entrega, id: newId() }));
+      const canonicalSucursal = canonicalizeDbSucursal(entrega.sucursal);
+      await run((c) =>
+        c.from(TABLE).insert({
+          ...entrega,
+          ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
+          id: newId(),
+        })
+      );
     },
     async importMany(entregas, modo) {
       await run(async (c) => {
@@ -688,7 +706,16 @@ export function createSupabaseRepository(url: string, anonKey: string): Entregas
           }
         }
         for (let i = 0; i < entregas.length; i += INSERT_CHUNK) {
-          const ins = await c.from(TABLE).insert(entregas.slice(i, i + INSERT_CHUNK).map((e) => ({ ...e, id: newId() })));
+          const ins = await c.from(TABLE).insert(
+            entregas.slice(i, i + INSERT_CHUNK).map((e) => {
+              const canonicalSucursal = canonicalizeDbSucursal(e.sucursal);
+              return {
+                ...e,
+                ...(canonicalSucursal ? { sucursal: canonicalSucursal } : {}),
+                id: newId(),
+              };
+            })
+          );
           if (ins.error) return ins;
         }
         for (let i = 0; i < idsAnteriores.length; i += DELETE_CHUNK) {

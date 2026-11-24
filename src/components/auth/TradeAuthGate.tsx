@@ -55,6 +55,10 @@ function isClienteProfile(p: VerifiedAuthProfile | null | undefined): boolean {
   return Boolean(p && (p.iamRole === 'cliente' || p.appRole === 'cliente'));
 }
 
+function isChoferProfile(p: VerifiedAuthProfile | null | undefined): boolean {
+  return Boolean(p && (p.iamRole === 'chofer' || p.appRole === 'chofer'));
+}
+
 function isOnClienteRoute(): boolean {
   if (typeof window === 'undefined') return false;
   const path = window.location.pathname.replace(/\/+$/, '').toLowerCase();
@@ -145,6 +149,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
         window.location.replace('/cliente');
         return;
       }
+      if (isChoferProfile(resolved)) {
+        window.location.replace('/logistica/');
+        return;
+      }
       if (
         resolved?.appRole === 'promotora' ||
         Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
@@ -184,6 +192,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
         window.location.replace('/cliente');
         return;
       }
+      if (isChoferProfile(resolved)) {
+        window.location.replace('/logistica/');
+        return;
+      }
       if (
         resolved?.appRole === 'promotora' ||
         Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
@@ -221,6 +233,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
       setPassword('');
       if (isClienteProfile(authenticated) && !isOnClienteRoute()) {
         window.location.replace('/cliente');
+        return;
+      }
+      if (isChoferProfile(authenticated)) {
+        window.location.replace('/logistica/');
         return;
       }
       if (authenticated.appRole === 'promotora') {

@@ -61,8 +61,12 @@ export default function App() {
     if (!isSuperAdmin || superAdminSucursalFilter === 'TODAS') return entregas;
     return entregas.filter((e) => {
       if (!e.sucursal && !e.chofer_sede) return true;
-      if (superAdminSucursalFilter === 'VALENCIA') {
-        return e.sucursal === 'VALENCIA' || e.chofer_sede === 'VALENCIA';
+      if (superAdminSucursalFilter === 'VALENCIA' || superAdminSucursalFilter === 'CENTRO') {
+        return (
+          e.sucursal === 'VALENCIA' ||
+          e.sucursal === 'CENTRO' ||
+          e.chofer_sede === 'VALENCIA'
+        );
       }
       if (superAdminSucursalFilter === 'ZULIA') {
         return e.sucursal === 'ZULIA' || e.chofer_sede === 'OCCIDENTE';
