@@ -27,6 +27,192 @@ import {
 } from '../utils/bimonetaryPriceMath';
 
 export const PORTAL_ACTIVE_STORE_STORAGE_KEY = 'codizulca_portal_active_store_v2';
+export const PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY = 'codizulca_asistencia_draft_v1';
+const PORTAL_ASISTENCIA_DRAFT_TTL_MS = 30 * 60 * 1000; // 30 min para sobrevivir recargas de cámara nativa Android
+
+export type AttendanceSubmitErrorCategory =
+  | 'NETWORK_OFFLINE'
+  | 'SESSION_EXPIRED'
+  | 'SQL_MIGRATION_PENDING'
+  | 'RLS_DENIED'
+  | 'VALIDATION_ERROR'
+  | 'UNKNOWN';
+
+export interface SupabaseErrorDetails {
+  code?: string;
+  message?: string;
+  details?: string;
+  hint?: string;
+}
+
+export class PortalAttendanceSubmitError extends Error {
+  public readonly category: AttendanceSubmitErrorCategory;
+  public readonly technicalDetails?: SupabaseErrorDetails;
+
+  constructor(
+    category: AttendanceSubmitErrorCategory,
+    message: string,
+    technicalDetails?: SupabaseErrorDetails
+  ) {
+    super(message);
+    this.name = 'PortalAttendanceSubmitError';
+    this.category = category;
+    this.technicalDetails = technicalDetails;
+  }
+}
+
+export interface PortalAsistenciaDraftState {
+  activeStore: string;
+  selectedZona: string;
+  selectedSlot: SlotFotoAsistencia;
+  activeTab: 'asistencia';
+  promotoraId?: string;
+  savedAtMs: number;
+}
+
+export interface AsistenciaHealthcheckResult {
+  ok: boolean;
+  rpcAvailable: boolean;
+  tablesOk: boolean;
+  storageBucketOk: boolean;
+  rpcsOk: boolean;
+  hasAuthSession: boolean;
+  miSucursal: string | null;
+  promotoraId: string | null;
+  timestamp: string | null;
+  errorCode?: string;
+}
+
+function isMissingRpcFunctionError(
+  err: { code?: string; message?: string } | null | undefined
+): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    msg.includes('could not find the function') ||
+    msg.includes('does not exist')
+  );
+}
+
+function isNetworkFailureError(err: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  const msg = err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? err ?? '');
+  return /failed to fetch|networkerror|network request failed|load failed|err_internet_disconnected|timeout|abort/i.test(
+    msg
+  );
+}
+
+function isSessionExpiredError(err: { code?: string; message?: string; status?: number } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.status === 401) return true;
+  const msg = String(err.message || '');
+  return /AUTH_SESSION_EXPIRED|jwt expired|invalid jwt|session.*expired|not authenticated|no active session/i.test(
+    msg
+  );
+}
+
+export function toCanonicalMultisedeSucursal(
+  rawSucursal?: string | null,
+  rawRegion?: string | null
+): 'CENTRO' | 'OCCIDENTE' {
+  const s = String(rawSucursal || '').trim().toUpperCase();
+  if (s === 'CENTRO' || s === 'VALENCIA' || s === 'CAPITAL') return 'CENTRO';
+  if (s === 'OCCIDENTE' || s === 'ZULIA') return 'OCCIDENTE';
+  const r = String(rawRegion || '').trim().toLowerCase();
+  if (r === 'valencia' || r === 'centro' || r === 'andes') return 'CENTRO';
+  return 'OCCIDENTE';
+}
+
+export function savePortalAsistenciaDraft(draft: Omit<PortalAsistenciaDraftState, 'activeTab' | 'savedAtMs'>): void {
+  if (typeof window === 'undefined') return;
+  const payload: PortalAsistenciaDraftState = {
+    activeStore: String(draft.activeStore || '').trim().slice(0, 180),
+    selectedZona: String(draft.selectedZona || '').trim().slice(0, 180),
+    selectedSlot: draft.selectedSlot,
+    activeTab: 'asistencia',
+    ...(draft.promotoraId ? { promotoraId: String(draft.promotoraId).slice(0, 64) } : {}),
+    savedAtMs: Date.now(),
+  };
+  const serialized = JSON.stringify(payload);
+  try {
+    window.sessionStorage.setItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY, serialized);
+  } catch {
+    // Ignorar error de cuota sessionStorage
+  }
+  try {
+    window.localStorage.setItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY, serialized);
+  } catch {
+    // Ignorar error de cuota localStorage
+  }
+}
+
+export function loadPortalAsistenciaDraft(
+  maxAgeMs: number = PORTAL_ASISTENCIA_DRAFT_TTL_MS,
+  nowMs: number = Date.now()
+): PortalAsistenciaDraftState | null {
+  if (typeof window === 'undefined') return null;
+  const readRaw = (): string | null => {
+    try {
+      const fromSession = window.sessionStorage.getItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY);
+      if (fromSession) return fromSession;
+    } catch {
+      // Ignorar
+    }
+    try {
+      return window.localStorage.getItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  };
+
+  const raw = readRaw();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PortalAsistenciaDraftState>;
+    if (!parsed || typeof parsed !== 'object' || parsed.activeTab !== 'asistencia') return null;
+    const savedAt = Number(parsed.savedAtMs);
+    if (!Number.isFinite(savedAt) || nowMs - savedAt > maxAgeMs || savedAt - nowMs > 60_000) {
+      clearPortalAsistenciaDraft();
+      return null;
+    }
+    const validSlots: readonly string[] = [
+      'JORNADA_INGRESO',
+      'JORNADA_SALIDA',
+      'MANANA_INGRESO',
+      'MANANA_SALIDA',
+      'TARDE_INGRESO',
+      'TARDE_SALIDA',
+    ];
+    if (!parsed.selectedSlot || !validSlots.includes(parsed.selectedSlot)) return null;
+    return {
+      activeStore: String(parsed.activeStore || '').trim().slice(0, 180),
+      selectedZona: String(parsed.selectedZona || '').trim().slice(0, 180),
+      selectedSlot: parsed.selectedSlot,
+      activeTab: 'asistencia',
+      ...(parsed.promotoraId ? { promotoraId: String(parsed.promotoraId).slice(0, 64) } : {}),
+      savedAtMs: savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearPortalAsistenciaDraft(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY);
+  } catch {
+    // Ignorar
+  }
+  try {
+    window.localStorage.removeItem(PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY);
+  } catch {
+    // Ignorar
+  }
+}
 
 const CLIENT_SUBMISSION_UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -633,6 +819,7 @@ export async function updatePortalRutaProgress(params: {
  */
 export async function fetchPortalTodayAttendance(params: {
   promotoraId: string;
+  authUserId?: string;
   fechaJornada?: string;
 }): Promise<PortalTodayAttendanceState> {
   if (!isSupabaseConfigured) {
@@ -641,12 +828,24 @@ export async function fetchPortalTodayAttendance(params: {
   const fecha = params.fechaJornada || getCaracasTodayYmd();
   const client = getSupabaseClient();
 
-  const { data: jornadaData, error: jornadaErr } = await client
+  let { data: jornadaData, error: jornadaErr } = await client
     .from('asistencias_jornada')
     .select('*')
     .eq('fecha_jornada', fecha)
     .eq('promotora_id', params.promotoraId)
     .maybeSingle();
+
+  if (!jornadaErr && !jornadaData && params.authUserId && params.authUserId !== params.promotoraId) {
+    const byAuth = await client
+      .from('asistencias_jornada')
+      .select('*')
+      .eq('fecha_jornada', fecha)
+      .eq('auth_user_id', params.authUserId)
+      .maybeSingle();
+    if (!byAuth.error && byAuth.data) {
+      jornadaData = byAuth.data;
+    }
+  }
 
   if (jornadaErr || !jornadaData) {
     return { jornada: null, evidencias: [], signedUrlsByEvidenceId: {} };
@@ -685,12 +884,287 @@ export async function fetchPortalTodayAttendance(params: {
   return { jornada, evidencias, signedUrlsByEvidenceId };
 }
 
+function extractSupabaseErrorDetails(err: unknown): SupabaseErrorDetails {
+  if (!err || typeof err !== 'object') {
+    return { message: typeof err === 'string' ? err : String(err ?? '') };
+  }
+  const obj = err as Record<string, unknown>;
+  return {
+    code: typeof obj.code === 'string' ? obj.code : undefined,
+    message: typeof obj.message === 'string' ? obj.message : undefined,
+    details: typeof obj.details === 'string' ? obj.details : undefined,
+    hint: typeof obj.hint === 'string' ? obj.hint : undefined,
+  };
+}
+
+function logAttendanceSubmitError(stage: string, err: unknown): SupabaseErrorDetails {
+  const details = extractSupabaseErrorDetails(err);
+  // Log estructurado para diagnóstico móvil sin exponer tokens JWT ni credenciales
+  console.error(`[PortalAsistencia] ${stage}`, {
+    code: details.code ?? null,
+    message: details.message ?? null,
+    details: details.details ?? null,
+    hint: details.hint ?? null,
+  });
+  return details;
+}
+
+/**
+ * Autodiagnóstico de solo lectura contra `public.rpc_healthcheck_asistencia()`.
+ * Permite diferenciar si un fallo 42501/PGRST202 proviene de migración SQL pendiente,
+ * sesión expirada o permisos de ficha.
+ */
+export async function checkAsistenciaHealth(
+  clientOverride?: ReturnType<typeof getSupabaseClient>
+): Promise<AsistenciaHealthcheckResult> {
+  const client = clientOverride ?? getSupabaseClient();
+  try {
+    const { data, error } = await client.rpc('rpc_healthcheck_asistencia');
+    if (error) {
+      return {
+        ok: false,
+        rpcAvailable: !isMissingRpcFunctionError(error),
+        tablesOk: false,
+        storageBucketOk: false,
+        rpcsOk: false,
+        hasAuthSession: false,
+        miSucursal: null,
+        promotoraId: null,
+        timestamp: null,
+        errorCode: error.code,
+      };
+    }
+
+    const row = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+    return {
+      ok: Boolean(row.ok),
+      rpcAvailable: true,
+      tablesOk: Boolean(row.tables_ok),
+      storageBucketOk: Boolean(row.storage_bucket_ok),
+      rpcsOk: Boolean(row.rpcs_ok),
+      hasAuthSession: Boolean(row.has_auth_session),
+      miSucursal: typeof row.mi_sucursal === 'string' ? row.mi_sucursal : null,
+      promotoraId: typeof row.promotora_id === 'string' ? row.promotora_id : null,
+      timestamp: typeof row.timestamp === 'string' ? row.timestamp : null,
+    };
+  } catch (err) {
+    const details = extractSupabaseErrorDetails(err);
+    return {
+      ok: false,
+      rpcAvailable: false,
+      tablesOk: false,
+      storageBucketOk: false,
+      rpcsOk: false,
+      hasAuthSession: false,
+      miSucursal: null,
+      promotoraId: null,
+      timestamp: null,
+      errorCode: details.code,
+    };
+  }
+}
+
+/**
+ * Re-sincroniza y renueva la sesión activa de Supabase Auth sin cerrar la vista ni perder
+ * el borrador/fotografía que la promotora ya capturó en pantalla.
+ */
+export async function resyncPromotoraSession(
+  clientOverride?: ReturnType<typeof getSupabaseClient>
+): Promise<{ ok: boolean; userId: string | null; email: string | null; error?: string }> {
+  const client = clientOverride ?? getSupabaseClient();
+  try {
+    const refreshed = await client.auth.refreshSession();
+    const refreshedSession = refreshed.data?.session ?? null;
+    if (!refreshed.error && refreshedSession?.access_token && refreshedSession.user?.id) {
+      return {
+        ok: true,
+        userId: refreshedSession.user.id,
+        email: refreshedSession.user.email ?? null,
+      };
+    }
+
+    const current = await client.auth.getSession();
+    const session = current.data?.session ?? null;
+    if (!current.error && session?.access_token && session.user?.id) {
+      return {
+        ok: true,
+        userId: session.user.id,
+        email: session.user.email ?? null,
+      };
+    }
+
+    return {
+      ok: false,
+      userId: null,
+      email: null,
+      error:
+        refreshed.error?.message ||
+        current.error?.message ||
+        'No se encontró una sesión activa. Cierra sesión e ingresa nuevamente con tu correo y contraseña.',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      userId: null,
+      email: null,
+      error: err instanceof Error ? err.message : 'Error al intentar renovar la sesión.',
+    };
+  }
+}
+
+async function ensureActiveAttendanceSession(
+  client: ReturnType<typeof getSupabaseClient>
+): Promise<{ userId: string; email: string | null }> {
+  const current = await client.auth.getSession();
+  let session = current.data?.session ?? null;
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isExpiringSoon =
+    typeof session?.expires_at === 'number' && session.expires_at - nowSec <= 60;
+
+  if (!session?.access_token || isExpiringSoon) {
+    const refreshed = await client.auth.refreshSession();
+    if (!refreshed.error && refreshed.data?.session?.access_token) {
+      session = refreshed.data.session;
+    }
+  }
+
+  if (!session?.access_token || !session.user?.id) {
+    throw new PortalAttendanceSubmitError(
+      'SESSION_EXPIRED',
+      'Tu sesión de promotora expiró o no está sincronizada. Toca "Re-sincronizar sesión" o inicia sesión nuevamente.'
+    );
+  }
+
+  return {
+    userId: session.user.id,
+    email: session.user.email ?? null,
+  };
+}
+
+function extractDomainMessageAfterCode(rawMessage: string, prefix: string): string {
+  const idx = rawMessage.indexOf(`${prefix}:`);
+  if (idx === -1) return rawMessage;
+  const clean = rawMessage.slice(idx + prefix.length + 1).trim();
+  return clean || rawMessage;
+}
+
+async function classifyAttendanceSubmitError(params: {
+  stage: string;
+  err: unknown;
+  client: ReturnType<typeof getSupabaseClient>;
+  fallbackMessage: string;
+}): Promise<PortalAttendanceSubmitError> {
+  if (params.err instanceof PortalAttendanceSubmitError) {
+    return params.err;
+  }
+
+  const details = logAttendanceSubmitError(params.stage, params.err);
+  const rawMessage = String(details.message || '');
+  const rawCode = String(details.code || '').toUpperCase();
+
+  if (isNetworkFailureError(params.err)) {
+    return new PortalAttendanceSubmitError(
+      'NETWORK_OFFLINE',
+      'Sin conexión a internet o señal inestable al guardar la asistencia. Verifica tu red y vuelve a intentar sin perder la foto.',
+      details
+    );
+  }
+
+  if (
+    isSessionExpiredError({
+      code: details.code,
+      message: details.message,
+      status: (params.err as { status?: number } | null)?.status,
+    })
+  ) {
+    return new PortalAttendanceSubmitError(
+      'SESSION_EXPIRED',
+      'Tu sesión expiró o perdió autorización. Toca "Re-sincronizar sesión" para continuar sin perder tu fotografía.',
+      details
+    );
+  }
+
+  const domainAccessPrefixes = [
+    'PROMOTORA_INACTIVA',
+    'PROMOTORA_NO_ENCONTRADA',
+    'FORBIDDEN_BRANCH',
+  ];
+  for (const prefix of domainAccessPrefixes) {
+    if (rawMessage.includes(`${prefix}:`)) {
+      return new PortalAttendanceSubmitError(
+        'RLS_DENIED',
+        extractDomainMessageAfterCode(rawMessage, prefix),
+        details
+      );
+    }
+  }
+
+  const domainValidationPrefixes = [
+    'PDV_REQUERIDO',
+    'FECHA_FUTURA_NO_PERMITIDA',
+    'FECHA_INVALIDA',
+    'SLOT_NO_PERMITIDO',
+    'MIME_NO_PERMITIDO',
+    'TAMANO_INVALIDO',
+    'COORDENADAS_INVALIDAS',
+    'STORAGE_PATH_INVALIDO',
+    'BUCKET_INVALIDO',
+    'PAYLOAD_INVALIDO',
+  ];
+  for (const prefix of domainValidationPrefixes) {
+    if (rawMessage.includes(`${prefix}:`)) {
+      return new PortalAttendanceSubmitError(
+        'VALIDATION_ERROR',
+        extractDomainMessageAfterCode(rawMessage, prefix),
+        details
+      );
+    }
+  }
+
+  if (
+    rawCode === '42501' ||
+    isMissingRpcFunctionError(details) ||
+    /row-level security|permission denied|violates check constraint/i.test(rawMessage)
+  ) {
+    const health = await checkAsistenciaHealth(params.client);
+    if (!health.rpcAvailable || !health.rpcsOk || !health.storageBucketOk) {
+      return new PortalAttendanceSubmitError(
+        'SQL_MIGRATION_PENDING',
+        'Falta aplicar el parche SQL definitivo en Supabase (sql/FIX_DEFINITIVO_RLS_ASISTENCIA.sql). Avisa a Soporte/Coordinación.',
+        details
+      );
+    }
+    if (!health.hasAuthSession) {
+      return new PortalAttendanceSubmitError(
+        'SESSION_EXPIRED',
+        'Tu sesión expiró en el servidor. Toca "Re-sincronizar sesión" para volver a intentar.',
+        details
+      );
+    }
+    return new PortalAttendanceSubmitError(
+      'RLS_DENIED',
+      'Permiso denegado por RLS al registrar asistencia. Verifica que tu perfil de promotora esté activo y asignado a tu sucursal.',
+      details
+    );
+  }
+
+  return new PortalAttendanceSubmitError(
+    'UNKNOWN',
+    params.fallbackMessage || rawMessage || 'No se pudo certificar la asistencia en Supabase.',
+    details
+  );
+}
+
 /**
  * Registra una evidencia de asistencia en el Supabase Principal:
- * 1) Valida MIME/tamaño (`<= 5 MB`), estampa marca de agua VE y sube al bucket privado `asistencia-evidencias`.
- * 2) Crea/obtiene la cabecera `public.asistencias_jornada` con perfil inmutable (`FIJA` / `EVENTUAL`) y `region`.
- * 3) Inserta/actualiza `public.asistencia_evidencias` validando con `.select('*')`.
- * 4) Si falla cualquier paso en BD, ejecuta rollback inmediato del archivo en Storage.
+ * 1) Verifica/refresca sesión Supabase Auth antes de operar.
+ * 2) Valida MIME/tamaño (`<= 5 MB`), estampa marca de agua VE y sube al bucket privado `asistencia-evidencias`.
+ * 3) Invoca la RPC transaccional `SECURITY DEFINER` `public.rpc_registrar_turno_asistencia(p_payload)`
+ *    (idempotente con `ON CONFLICT`), eliminando fallos RLS 42501 y duplicados.
+ * 4) Solo si la RPC aún no existe (`PGRST202`/`42883`), intenta fallback canónico (`OCCIDENTE`/`CENTRO`)
+ *    y diagnostica vía `rpc_healthcheck_asistencia()`.
+ * 5) Si falla cualquier paso en BD, ejecuta rollback inmediato del archivo subido en Storage.
  */
 export async function submitPortalAttendanceEvidence(params: {
   context: PortalPromotoraContext;
@@ -704,31 +1178,52 @@ export async function submitPortalAttendanceEvidence(params: {
   imageFile: File | Blob;
   fechaJornada?: string;
   customFilePrefix?: string;
+  signal?: AbortSignal;
+  clientOverride?: ReturnType<typeof getSupabaseClient>;
 }): Promise<{
   jornada: AsistenciaJornadaDbRow;
   evidencia: AsistenciaEvidenciaDbRow;
   signedUrl: string | null;
 }> {
-  const { context, slotFoto } = params;
+  const { context, slotFoto, signal } = params;
   const cleanPdv = String(params.pdvNombre || '').trim();
   if (!cleanPdv) {
-    throw new Error('Selecciona el Punto de Venta (PDV) antes de certificar asistencia.');
+    throw new PortalAttendanceSubmitError(
+      'VALIDATION_ERROR',
+      'Selecciona el Punto de Venta (PDV) antes de certificar asistencia.'
+    );
   }
   if (!isSlotAllowedForProfile(context.perfilAsistencia, slotFoto)) {
-    throw new Error(
+    throw new PortalAttendanceSubmitError(
+      'VALIDATION_ERROR',
       `El hito ${slotFoto} no corresponde al perfil ${context.perfilAsistencia} asignado.`
     );
   }
   if (!isValidCoordinatePair(params.lat, params.lng)) {
-    throw new Error('Las coordenadas de ubicación están fuera del rango WGS84 permitido.');
+    throw new PortalAttendanceSubmitError(
+      'VALIDATION_ERROR',
+      'Las coordenadas de ubicación están fuera del rango WGS84 permitido.'
+    );
   }
   if (
     params.gpsAccuracy !== undefined &&
     params.gpsAccuracy !== null &&
     (!Number.isFinite(params.gpsAccuracy) || params.gpsAccuracy < 0)
   ) {
-    throw new Error('La precisión GPS debe ser un valor numérico mayor o igual a 0.');
+    throw new PortalAttendanceSubmitError(
+      'VALIDATION_ERROR',
+      'La precisión GPS debe ser un valor numérico mayor o igual a 0.'
+    );
   }
+
+  if (signal?.aborted) {
+    throw new PortalAttendanceSubmitError('NETWORK_OFFLINE', 'Envío cancelado por navegación.');
+  }
+
+  const client = params.clientOverride ?? getSupabaseClient();
+
+  // 1. Verificar / refrescar sesión activa ANTES de comprimir y subir a Storage
+  const verifiedSession = await ensureActiveAttendanceSession(client);
 
   const locationSource: AttendanceLocationSource =
     params.locationSource === 'wifi_cell' || params.locationSource === 'ip_fallback'
@@ -753,14 +1248,17 @@ export async function submitPortalAttendanceEvidence(params: {
     maxDimension: 960,
   });
 
+  if (signal?.aborted) {
+    throw new PortalAttendanceSubmitError('NETWORK_OFFLINE', 'Envío cancelado por navegación.');
+  }
+
   const storagePath = buildSanitizedPortalStoragePath({
-    promotoraId: context.promotoraId,
+    promotoraId: context.promotoraId || verifiedSession.userId,
     modulo: 'asistencia',
     ext: processed.ext,
     prefix: params.customFilePrefix || slotFoto.toLowerCase(),
   });
 
-  const client = getSupabaseClient();
   const uploadRes = await client.storage
     .from(ASISTENCIA_PRIVATE_BUCKET_ID)
     .upload(storagePath, processed.blob, {
@@ -770,9 +1268,12 @@ export async function submitPortalAttendanceEvidence(params: {
     });
 
   if (uploadRes.error) {
-    throw new Error(
-      `No se pudo subir la evidencia fotográfica al Storage seguro (${uploadRes.error.message}).`
-    );
+    throw await classifyAttendanceSubmitError({
+      stage: 'storage.upload',
+      err: uploadRes.error,
+      client,
+      fallbackMessage: `No se pudo subir la evidencia fotográfica al Storage seguro (${uploadRes.error.message}).`,
+    });
   }
 
   const rollbackUploadedPhoto = async () => {
@@ -783,175 +1284,269 @@ export async function submitPortalAttendanceEvidence(params: {
   };
 
   try {
-    const nowIso = new Date().toISOString();
     const zonaFinal = String(params.zona || context.direccion || context.region).trim();
+    const canonicalSucursal = toCanonicalMultisedeSucursal(context.sucursal, context.region);
 
-    // 1. Buscar o abrir la jornada del día
     let jornada: AsistenciaJornadaDbRow | null = null;
-    const findRes = await client
-      .from('asistencias_jornada')
-      .select('*')
-      .eq('fecha_jornada', fechaJornada)
-      .eq('promotora_id', context.promotoraId)
-      .maybeSingle();
-
-    if (findRes.error) {
-      throw new Error(`No se pudo consultar la jornada de asistencia (${findRes.error.message}).`);
-    }
-
-    if (findRes.data) {
-      jornada = findRes.data as AsistenciaJornadaDbRow;
-      await client
-        .from('asistencias_jornada')
-        .update({
-          pdv_nombre: cleanPdv,
-          zona: zonaFinal,
-          updated_at_server: nowIso,
-        })
-        .eq('id', jornada.id)
-        .select('id');
-    } else {
-      const insertJornada = await client
-        .from('asistencias_jornada')
-        .insert({
-          fecha_jornada: fechaJornada,
-          promotora_id: context.promotoraId,
-          promotora_ref_id: context.promotoraRefId,
-          auth_user_id: context.authUserId,
-          promotora_nombre: context.nombre,
-          perfil_aplicado: context.perfilAsistencia,
-          pdv_nombre: cleanPdv,
-          zona: zonaFinal,
-          region: context.region,
-          sucursal: context.sucursal,
-          opened_at_server: nowIso,
-          updated_at_server: nowIso,
-          opened_by_uid: context.authUserId,
-        })
-        .select('*');
-
-      if (insertJornada.error) {
-        throw new Error(
-          insertJornada.error.code === '42501'
-            ? 'Permiso denegado por RLS al abrir la jornada de asistencia. Verifica que el SQL esté aplicado.'
-            : `No se pudo abrir la jornada de asistencia (${insertJornada.error.message}).`
-        );
-      }
-
-      const jRows = Array.isArray(insertJornada.data)
-        ? insertJornada.data
-        : insertJornada.data
-          ? [insertJornada.data]
-          : [];
-      if (jRows.length === 0) {
-        throw new Error('Supabase devolvió 0 filas al abrir la jornada de asistencia.');
-      }
-      jornada = jRows[0] as AsistenciaJornadaDbRow;
-    }
-
-    // 2. Insertar o reemplazar la evidencia en el slot solicitado
-    const existingSlot = await client
-      .from('asistencia_evidencias')
-      .select('id, storage_path, version')
-      .eq('asistencia_id', jornada.id)
-      .eq('slot_foto', slotFoto)
-      .maybeSingle();
-
-    const actorRol: 'promotora' | 'coordinadora' | 'admin' = context.isManagerOrAdmin
-      ? 'admin'
-      : 'promotora';
-
     let evidenciaRow: AsistenciaEvidenciaDbRow | null = null;
     let previousStoragePath: string | null = null;
 
-    if (existingSlot.data) {
-      const prev = existingSlot.data as { id: string; storage_path?: string; version?: number };
-      previousStoragePath = prev.storage_path || null;
-      const updateBase = {
-        storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
-        storage_path: storagePath,
-        mime_type: processed.mimeType,
-        tamano_bytes: processed.blob.size,
-        sha256_hex: processed.sha256Hex,
-        ancho_px: processed.width,
-        alto_px: processed.height,
-        pdv_nombre: cleanPdv,
-        lat: safeLat,
-        lng: safeLng,
-        gps_accuracy: safeAccuracy,
-        region: context.region,
-        sucursal: context.sucursal,
-        capturado_en_servidor: nowIso,
-        cargado_por_uid: context.authUserId,
-        cargado_por_rol: actorRol,
-        version: (prev.version || 1) + 1,
-        updated_at: nowIso,
-      };
-      let updEv = await client
-        .from('asistencia_evidencias')
-        .update({ ...updateBase, location_source: locationSource })
-        .eq('id', prev.id)
-        .select('*');
+    // 2. Ruta Principal (Obligatoria): RPC transaccional SECURITY DEFINER idempotente
+    const rpcPayload = {
+      pdv_nombre: cleanPdv,
+      zona: zonaFinal,
+      fecha_jornada: fechaJornada,
+      promotora_id: context.promotoraId,
+      slot_foto: slotFoto,
+      storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
+      storage_path: storagePath,
+      mime_type: processed.mimeType,
+      tamano_bytes: processed.blob.size,
+      sha256_hex: processed.sha256Hex,
+      ancho_px: processed.width,
+      alto_px: processed.height,
+      lat: safeLat,
+      lng: safeLng,
+      gps_accuracy: safeAccuracy,
+      location_source: locationSource,
+    };
 
-      if (updEv.error && isMissingColumnError(updEv.error)) {
-        updEv = await client
+    const rpcRes = await client.rpc('rpc_registrar_turno_asistencia', {
+      p_payload: rpcPayload,
+    });
+
+    if (!rpcRes.error && rpcRes.data && typeof rpcRes.data === 'object') {
+      const dataObj = rpcRes.data as {
+        jornada?: AsistenciaJornadaDbRow;
+        evidencia?: AsistenciaEvidenciaDbRow;
+        previous_storage_path?: string | null;
+      };
+      if (dataObj.jornada && dataObj.evidencia) {
+        jornada = dataObj.jornada;
+        evidenciaRow = dataObj.evidencia;
+        previousStoragePath = dataObj.previous_storage_path || null;
+      }
+    }
+
+    if (!jornada || !evidenciaRow) {
+      if (rpcRes.error && !isMissingRpcFunctionError(rpcRes.error)) {
+        throw await classifyAttendanceSubmitError({
+          stage: 'rpc_registrar_turno_asistencia',
+          err: rpcRes.error,
+          client,
+          fallbackMessage: `No se pudo certificar el turno de asistencia (${rpcRes.error.message}).`,
+        });
+      }
+
+      // 3. Fallback controlado SOLO si la migración SQL de la RPC compuesta aún no fue aplicada
+      const nowIso = new Date().toISOString();
+      const openRpcRes = await client.rpc('rpc_abrir_jornada_asistencia', {
+        p_pdv_nombre: cleanPdv,
+        p_zona: zonaFinal,
+        p_fecha_jornada: fechaJornada,
+        p_promotora_id: context.promotoraId,
+      });
+
+      if (!openRpcRes.error && openRpcRes.data) {
+        jornada = openRpcRes.data as AsistenciaJornadaDbRow;
+      } else {
+        if (openRpcRes.error && !isMissingRpcFunctionError(openRpcRes.error)) {
+          throw await classifyAttendanceSubmitError({
+            stage: 'rpc_abrir_jornada_asistencia',
+            err: openRpcRes.error,
+            client,
+            fallbackMessage: `No se pudo abrir la jornada de asistencia (${openRpcRes.error.message}).`,
+          });
+        }
+
+        const findRes = await client
+          .from('asistencias_jornada')
+          .select('*')
+          .eq('fecha_jornada', fechaJornada)
+          .eq('promotora_id', context.promotoraId)
+          .maybeSingle();
+
+        if (findRes.error) {
+          throw await classifyAttendanceSubmitError({
+            stage: 'fallback.select_jornada',
+            err: findRes.error,
+            client,
+            fallbackMessage: `No se pudo consultar la jornada de asistencia (${findRes.error.message}).`,
+          });
+        }
+
+        if (findRes.data) {
+          jornada = findRes.data as AsistenciaJornadaDbRow;
+          await client
+            .from('asistencias_jornada')
+            .update({
+              pdv_nombre: cleanPdv,
+              zona: zonaFinal,
+              sucursal: canonicalSucursal,
+              updated_at_server: nowIso,
+            })
+            .eq('id', jornada.id)
+            .select('id');
+        } else {
+          const insertJornada = await client
+            .from('asistencias_jornada')
+            .insert({
+              fecha_jornada: fechaJornada,
+              promotora_id: context.promotoraId,
+              promotora_ref_id: context.promotoraRefId,
+              auth_user_id: verifiedSession.userId,
+              promotora_nombre: context.nombre,
+              perfil_aplicado: context.perfilAsistencia,
+              pdv_nombre: cleanPdv,
+              zona: zonaFinal,
+              region: context.region,
+              sucursal: canonicalSucursal,
+              opened_at_server: nowIso,
+              updated_at_server: nowIso,
+              opened_by_uid: verifiedSession.userId,
+            })
+            .select('*');
+
+          if (insertJornada.error) {
+            throw await classifyAttendanceSubmitError({
+              stage: 'fallback.insert_jornada',
+              err: insertJornada.error,
+              client,
+              fallbackMessage: `No se pudo abrir la jornada de asistencia (${insertJornada.error.message}).`,
+            });
+          }
+
+          const jRows = Array.isArray(insertJornada.data)
+            ? insertJornada.data
+            : insertJornada.data
+              ? [insertJornada.data]
+              : [];
+          if (jRows.length === 0) {
+            throw new PortalAttendanceSubmitError(
+              'RLS_DENIED',
+              'Supabase devolvió 0 filas al abrir la jornada de asistencia.'
+            );
+          }
+          jornada = jRows[0] as AsistenciaJornadaDbRow;
+        }
+      }
+
+      const existingSlot = await client
+        .from('asistencia_evidencias')
+        .select('id, storage_path, version')
+        .eq('asistencia_id', jornada.id)
+        .eq('slot_foto', slotFoto)
+        .maybeSingle();
+
+      const actorRol: 'promotora' | 'coordinadora' | 'admin' = context.isManagerOrAdmin
+        ? 'admin'
+        : 'promotora';
+
+      if (existingSlot.data) {
+        const prev = existingSlot.data as { id: string; storage_path?: string; version?: number };
+        previousStoragePath = prev.storage_path || null;
+        const updateBase = {
+          storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
+          storage_path: storagePath,
+          mime_type: processed.mimeType,
+          tamano_bytes: processed.blob.size,
+          sha256_hex: processed.sha256Hex,
+          ancho_px: processed.width,
+          alto_px: processed.height,
+          pdv_nombre: cleanPdv,
+          lat: safeLat,
+          lng: safeLng,
+          gps_accuracy: safeAccuracy,
+          region: context.region,
+          sucursal: canonicalSucursal,
+          capturado_en_servidor: nowIso,
+          cargado_por_uid: verifiedSession.userId,
+          cargado_por_rol: actorRol,
+          version: (prev.version || 1) + 1,
+          updated_at: nowIso,
+        };
+        let updEv = await client
           .from('asistencia_evidencias')
-          .update(updateBase)
+          .update({ ...updateBase, location_source: locationSource })
           .eq('id', prev.id)
           .select('*');
-      }
 
-      if (updEv.error) {
-        throw new Error(`No se pudo reemplazar la evidencia (${updEv.error.message}).`);
-      }
-      const rows = Array.isArray(updEv.data) ? updEv.data : updEv.data ? [updEv.data] : [];
-      if (rows.length === 0) {
-        throw new Error('Supabase devolvió 0 filas al actualizar la evidencia de asistencia.');
-      }
-      evidenciaRow = rows[0] as AsistenciaEvidenciaDbRow;
-    } else {
-      const insertBase = {
-        asistencia_id: jornada.id,
-        slot_foto: slotFoto,
-        storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
-        storage_path: storagePath,
-        mime_type: processed.mimeType,
-        tamano_bytes: processed.blob.size,
-        sha256_hex: processed.sha256Hex,
-        ancho_px: processed.width,
-        alto_px: processed.height,
-        pdv_nombre: cleanPdv,
-        lat: safeLat,
-        lng: safeLng,
-        gps_accuracy: safeAccuracy,
-        region: context.region,
-        sucursal: context.sucursal,
-        capturado_en_servidor: nowIso,
-        cargado_por_uid: context.authUserId,
-        cargado_por_rol: actorRol,
-        version: 1,
-        updated_at: nowIso,
-      };
-      let insEv = await client
-        .from('asistencia_evidencias')
-        .insert({ ...insertBase, location_source: locationSource })
-        .select('*');
+        if (updEv.error && isMissingColumnError(updEv.error)) {
+          updEv = await client
+            .from('asistencia_evidencias')
+            .update(updateBase)
+            .eq('id', prev.id)
+            .select('*');
+        }
 
-      if (insEv.error && isMissingColumnError(insEv.error)) {
-        insEv = await client
+        if (updEv.error) {
+          throw await classifyAttendanceSubmitError({
+            stage: 'fallback.update_evidencia',
+            err: updEv.error,
+            client,
+            fallbackMessage: `No se pudo reemplazar la evidencia (${updEv.error.message}).`,
+          });
+        }
+        const rows = Array.isArray(updEv.data) ? updEv.data : updEv.data ? [updEv.data] : [];
+        if (rows.length === 0) {
+          throw new PortalAttendanceSubmitError(
+            'RLS_DENIED',
+            'Supabase devolvió 0 filas al actualizar la evidencia de asistencia.'
+          );
+        }
+        evidenciaRow = rows[0] as AsistenciaEvidenciaDbRow;
+      } else {
+        const insertBase = {
+          asistencia_id: jornada.id,
+          slot_foto: slotFoto,
+          storage_bucket: ASISTENCIA_PRIVATE_BUCKET_ID,
+          storage_path: storagePath,
+          mime_type: processed.mimeType,
+          tamano_bytes: processed.blob.size,
+          sha256_hex: processed.sha256Hex,
+          ancho_px: processed.width,
+          alto_px: processed.height,
+          pdv_nombre: cleanPdv,
+          lat: safeLat,
+          lng: safeLng,
+          gps_accuracy: safeAccuracy,
+          region: context.region,
+          sucursal: canonicalSucursal,
+          capturado_en_servidor: nowIso,
+          cargado_por_uid: verifiedSession.userId,
+          cargado_por_rol: actorRol,
+          version: 1,
+          updated_at: nowIso,
+        };
+        let insEv = await client
           .from('asistencia_evidencias')
-          .insert(insertBase)
+          .insert({ ...insertBase, location_source: locationSource })
           .select('*');
-      }
 
-      if (insEv.error) {
-        throw new Error(`No se pudo registrar la evidencia (${insEv.error.message}).`);
+        if (insEv.error && isMissingColumnError(insEv.error)) {
+          insEv = await client
+            .from('asistencia_evidencias')
+            .insert(insertBase)
+            .select('*');
+        }
+
+        if (insEv.error) {
+          throw await classifyAttendanceSubmitError({
+            stage: 'fallback.insert_evidencia',
+            err: insEv.error,
+            client,
+            fallbackMessage: `No se pudo registrar la evidencia (${insEv.error.message}).`,
+          });
+        }
+        const rows = Array.isArray(insEv.data) ? insEv.data : insEv.data ? [insEv.data] : [];
+        if (rows.length === 0) {
+          throw new PortalAttendanceSubmitError(
+            'RLS_DENIED',
+            'Supabase devolvió 0 filas al insertar la evidencia de asistencia.'
+          );
+        }
+        evidenciaRow = rows[0] as AsistenciaEvidenciaDbRow;
       }
-      const rows = Array.isArray(insEv.data) ? insEv.data : insEv.data ? [insEv.data] : [];
-      if (rows.length === 0) {
-        throw new Error('Supabase devolvió 0 filas al insertar la evidencia de asistencia.');
-      }
-      evidenciaRow = rows[0] as AsistenciaEvidenciaDbRow;
     }
 
     // Limpiar foto anterior si fue reemplazo exitoso
@@ -961,6 +1556,9 @@ export async function submitPortalAttendanceEvidence(params: {
         .remove([previousStoragePath])
         .catch(() => undefined);
     }
+
+    // Borrar borrador de recuperación al completar certificación
+    clearPortalAsistenciaDraft();
 
     const { data: signedData } = await client.storage
       .from(ASISTENCIA_PRIVATE_BUCKET_ID)
@@ -973,7 +1571,16 @@ export async function submitPortalAttendanceEvidence(params: {
     };
   } catch (err) {
     await rollbackUploadedPhoto();
-    throw err;
+    if (err instanceof PortalAttendanceSubmitError) {
+      throw err;
+    }
+    throw await classifyAttendanceSubmitError({
+      stage: 'submitPortalAttendanceEvidence.catch',
+      err,
+      client,
+      fallbackMessage:
+        err instanceof Error ? err.message : 'No se pudo certificar la asistencia en Supabase.',
+    });
   }
 }
 

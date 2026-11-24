@@ -97,9 +97,11 @@ import {
 } from '../../utils/appRouter';
 import {
   buildFallbackPromotoraContext,
+  clearPortalAsistenciaDraft,
   fetchPortalClientsCatalog,
   fetchPortalProductsCatalog,
   getSavedPortalActiveStore,
+  loadPortalAsistenciaDraft,
   resolvePortalPromotoraContext,
   savePortalActiveStore,
   type PortalClientOption,
@@ -184,16 +186,26 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   const [actionError, setActionError] = useState<string | null>(null);
   const [processingRutaId, setProcessingRutaId] = useState<string | null>(null);
 
-  // Estado de navegación multi-módulo `/portal/*` (paridad total con `codizulca-dashboard-4`)
-  const [activePortalTab, setActivePortalTab] = useState<PortalSubTab>(() =>
-    typeof window !== 'undefined' ? resolvePortalSubTab(window.location.pathname) : 'ruta'
-  );
+  // Estado de navegación multi-módulo `/portal/*` (paridad total con `codizulca-dashboard-4` + recuperación de cámara nativa Android)
+  const [activePortalTab, setActivePortalTab] = useState<PortalSubTab>(() => {
+    if (typeof window === 'undefined') return 'ruta';
+    const path = window.location.pathname;
+    const resolved = resolvePortalSubTab(path);
+    if (path === '/portal' || path === '/portal/' || path === '/portal/ruta') {
+      const draft = loadPortalAsistenciaDraft();
+      if (draft?.activeTab === 'asistencia') return 'asistencia';
+    }
+    return resolved;
+  });
   const [portalContext, setPortalContext] = useState<PortalPromotoraContext | null>(() =>
     initialProfile ? buildFallbackPromotoraContext(initialProfile) : null
   );
   const [portalClients, setPortalClients] = useState<PortalClientOption[]>([]);
   const [portalProducts, setPortalProducts] = useState<PortalProductOption[]>([]);
-  const [activeStore, setActiveStore] = useState<string>(() => getSavedPortalActiveStore());
+  const [activeStore, setActiveStore] = useState<string>(() => {
+    const draft = loadPortalAsistenciaDraft();
+    return draft?.activeStore || getSavedPortalActiveStore();
+  });
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -206,6 +218,9 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     // Disparo directo dentro del gesto de usuario (iOS Safari Safe) al abrir Asistencia o Ruta
     if (tab === 'asistencia' || tab === 'ruta') {
       prewarmBrowserGeolocationOnGesture();
+    }
+    if (tab !== 'asistencia') {
+      clearPortalAsistenciaDraft();
     }
     setActivePortalTab(tab);
     navigateTo(pathForPortalSubTab(tab));
@@ -617,6 +632,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
 
   const handleSignOut = async () => {
     clearDirectLocationCache();
+    clearPortalAsistenciaDraft();
     if (shiftSessionState) {
       await purgePortalOfflineSensitiveData();
       setShiftSessionState(null);

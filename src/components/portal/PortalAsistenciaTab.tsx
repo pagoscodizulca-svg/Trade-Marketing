@@ -24,11 +24,16 @@ import {
   getCaracasTodayYmd,
 } from '../../types/attendanceEvidences';
 import {
+  PortalAttendanceSubmitError,
   fetchPortalTodayAttendance,
   getCaracasClockAndPunctuality,
+  loadPortalAsistenciaDraft,
+  resyncPromotoraSession,
   savePortalActiveStore,
+  savePortalAsistenciaDraft,
   submitPortalAttendanceEvidence,
   validatePortalImageFile,
+  type AttendanceSubmitErrorCategory,
   type PortalClientOption,
   type PortalPromotoraContext,
   type PortalTodayAttendanceState,
@@ -63,7 +68,11 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
   onNotify,
 }) => {
   const todayYmd = getCaracasTodayYmd();
-  const [selectedZona, setSelectedZona] = useState<string>(context.direccion || context.region);
+  const [initialDraft] = useState(() => loadPortalAsistenciaDraft());
+  const hasPreservedDraftSlotRef = useRef(Boolean(initialDraft?.selectedSlot));
+  const [selectedZona, setSelectedZona] = useState<string>(
+    initialDraft?.selectedZona || context.direccion || context.region
+  );
   const [todayState, setTodayState] = useState<PortalTodayAttendanceState>({
     jornada: null,
     evidencias: [],
@@ -77,8 +86,39 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     [effectiveProfile]
   );
 
-  const [selectedSlot, setSelectedSlot] = useState<SlotFotoAsistencia>(
-    effectiveProfile === 'EVENTUAL' ? 'MANANA_INGRESO' : 'JORNADA_INGRESO'
+  const [selectedSlot, setSelectedSlot] = useState<SlotFotoAsistencia>(() => {
+    const defaultSlots: readonly SlotFotoAsistencia[] =
+      context.perfilAsistencia === 'EVENTUAL' ? SLOTS_FOTO_EVENTUAL : SLOTS_FOTO_FIJA;
+    if (initialDraft?.selectedSlot && defaultSlots.includes(initialDraft.selectedSlot)) {
+      return initialDraft.selectedSlot;
+    }
+    return defaultSlots[0];
+  });
+
+  // Rehidratar tienda desde borrador si Android Chrome recargó al volver de Cámara Nativa
+  useEffect(() => {
+    if (initialDraft?.activeStore && !activeStore.trim()) {
+      savePortalActiveStore(initialDraft.activeStore);
+      onActiveStoreChange(initialDraft.activeStore);
+    }
+  }, [activeStore, initialDraft, onActiveStoreChange]);
+
+  const persistDraftSnapshot = useCallback(
+    (
+      overrides?: Partial<{
+        activeStore: string;
+        selectedZona: string;
+        selectedSlot: SlotFotoAsistencia;
+      }>
+    ) => {
+      savePortalAsistenciaDraft({
+        activeStore: overrides?.activeStore ?? activeStore,
+        selectedZona: overrides?.selectedZona ?? selectedZona,
+        selectedSlot: overrides?.selectedSlot ?? selectedSlot,
+        promotoraId: context.promotoraId,
+      });
+    },
+    [activeStore, context.promotoraId, selectedSlot, selectedZona]
   );
 
   // Reloj VE en vivo
@@ -129,10 +169,14 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
   const [selectedFile, setSelectedFile] = useState<File | Blob | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
-  // Envío
+  // Envío (doble candado contra doble clic + AbortController en desmontaje)
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+  const submitAbortRef = useRef<AbortController | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitErrorCategory, setSubmitErrorCategory] =
+    useState<AttendanceSubmitErrorCategory | null>(null);
+  const [isResyncingSession, setIsResyncingSession] = useState(false);
   const [savedSummary, setSavedSummary] = useState<{
     slot: SlotFotoAsistencia;
     store: string;
@@ -155,6 +199,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
 
   useEffect(() => {
     return () => {
+      submitAbortRef.current?.abort();
       stopCamera();
       if (previewUrl && previewUrl.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrl);
@@ -167,19 +212,27 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     try {
       const data = await fetchPortalTodayAttendance({
         promotoraId: context.promotoraId,
+        authUserId: context.authUserId,
         fechaJornada: todayYmd,
       });
       setTodayState(data);
 
       const profileNow = data.jornada?.perfil_aplicado || context.perfilAsistencia;
-      const slotsNow = profileNow === 'EVENTUAL' ? SLOTS_FOTO_EVENTUAL : SLOTS_FOTO_FIJA;
-      const uploadedSet = new Set(data.evidencias.map((e) => e.slot_foto));
-      const nextMissing = slotsNow.find((s) => !uploadedSet.has(s)) || slotsNow[slotsNow.length - 1];
-      setSelectedSlot(nextMissing);
+      const slotsNow: readonly SlotFotoAsistencia[] =
+        profileNow === 'EVENTUAL' ? SLOTS_FOTO_EVENTUAL : SLOTS_FOTO_FIJA;
+      if (hasPreservedDraftSlotRef.current) {
+        hasPreservedDraftSlotRef.current = false;
+        setSelectedSlot((curr) => (slotsNow.includes(curr) ? curr : slotsNow[0]));
+      } else {
+        const uploadedSet = new Set(data.evidencias.map((e) => e.slot_foto));
+        const nextMissing =
+          slotsNow.find((s) => !uploadedSet.has(s)) || slotsNow[slotsNow.length - 1];
+        setSelectedSlot(nextMissing);
+      }
     } finally {
       setIsSyncing(false);
     }
-  }, [context.perfilAsistencia, context.promotoraId, todayYmd]);
+  }, [context.authUserId, context.perfilAsistencia, context.promotoraId, todayYmd]);
 
   useEffect(() => {
     void syncTodayAttendance();
@@ -189,6 +242,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     setFileError(null);
     triggerGpsOnNaturalGesture();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      persistDraftSnapshot();
       nativeCameraInputRef.current?.click();
       return;
     }
@@ -207,6 +261,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
         }
       });
     } catch {
+      persistDraftSnapshot();
       nativeCameraInputRef.current?.click();
     }
   };
@@ -253,24 +308,52 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     }
   };
 
+  const handleResyncSession = async () => {
+    if (isResyncingSession) return;
+    setIsResyncingSession(true);
+    try {
+      const res = await resyncPromotoraSession();
+      if (res.ok) {
+        setSubmitError(null);
+        setSubmitErrorCategory(null);
+        onNotify('Sesión re-sincronizada. Ya puedes presionar "Certificar & Guardar Asistencia".');
+        await syncTodayAttendance();
+      } else {
+        setSubmitErrorCategory('SESSION_EXPIRED');
+        setSubmitError(
+          res.error ||
+            'No se pudo renovar la sesión automáticamente. Cierra sesión e ingresa nuevamente.'
+        );
+      }
+    } finally {
+      setIsResyncingSession(false);
+    }
+  };
+
   const handleSubmitAttendance = async () => {
     if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
+    setSubmitErrorCategory(null);
 
     if (!activeStore.trim()) {
+      setSubmitErrorCategory('VALIDATION_ERROR');
       setSubmitError('Selecciona el Punto de Venta (PDV) antes de certificar asistencia.');
       return;
     }
     if (!selectedFile) {
+      setSubmitErrorCategory('VALIDATION_ERROR');
       setSubmitError('Toma una fotografía o selecciona una evidencia válida (JPEG/PNG/WebP).');
       return;
     }
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
+    const controller = new AbortController();
+    submitAbortRef.current = controller;
     try {
       const resolvedLoc = gpsLocation ?? (await triggerDirectCapture({ forceFresh: true }));
       if (!resolvedLoc) {
+        setSubmitErrorCategory('NETWORK_OFFLINE');
         setSubmitError(
           'No se pudo obtener ubicación (ni GPS ni respaldo de red). Verifica tu conexión y reintenta.'
         );
@@ -288,6 +371,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
         locationSource: resolvedLoc.locationSource,
         imageFile: selectedFile,
         fechaJornada: todayYmd,
+        signal: controller.signal,
       });
 
       const timeVe = formatServerTimestampCaracas(result.evidencia.capturado_en_servidor);
@@ -307,10 +391,17 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
       );
       await syncTodayAttendance();
     } catch (err) {
-      setSubmitError(
-        err instanceof Error ? err.message : 'No se pudo certificar la asistencia en Supabase.'
-      );
+      if (err instanceof PortalAttendanceSubmitError) {
+        setSubmitErrorCategory(err.category);
+        setSubmitError(err.message);
+      } else {
+        setSubmitErrorCategory('UNKNOWN');
+        setSubmitError(
+          err instanceof Error ? err.message : 'No se pudo certificar la asistencia en Supabase.'
+        );
+      }
     } finally {
+      submitAbortRef.current = null;
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
@@ -773,6 +864,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    persistDraftSnapshot();
                     triggerGpsOnNaturalGesture();
                     nativeCameraInputRef.current?.click();
                   }}
@@ -785,6 +877,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                   type="button"
                   data-testid="portal-asistencia-gallery-btn"
                   onClick={() => {
+                    persistDraftSnapshot();
                     triggerGpsOnNaturalGesture();
                     galleryInputRef.current?.click();
                   }}
@@ -809,10 +902,28 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
           {submitError && (
             <div
               role="alert"
-              className="p-3 rounded-xl bg-red-950/70 border border-red-500/50 text-red-200 text-xs flex items-start gap-2"
+              data-testid="portal-asistencia-error"
+              data-error-category={submitErrorCategory || 'UNKNOWN'}
+              className="p-3 rounded-xl bg-red-950/70 border border-red-500/50 text-red-200 text-xs space-y-2"
             >
-              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-              <span>{submitError}</span>
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{submitError}</span>
+              </div>
+              {submitErrorCategory === 'SESSION_EXPIRED' && (
+                <button
+                  type="button"
+                  data-testid="portal-asistencia-resync-session-btn"
+                  disabled={isResyncingSession}
+                  onClick={() => void handleResyncSession()}
+                  className="w-full py-2 px-3 rounded-lg bg-red-600/90 hover:bg-red-500 text-white font-bold text-[11px] uppercase tracking-wider flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isResyncingSession ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isResyncingSession ? 'Re-sincronizando sesión...' : 'Re-sincronizar sesión'}
+                  </span>
+                </button>
+              )}
             </div>
           )}
 
