@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Camera,
@@ -16,6 +16,7 @@ import type { BcvRateSnapshot, PriceOcrDetectionResult } from '../../types';
 import {
   PORTAL_COMPETITOR_BRANDS,
   createPortalPriceSurvey,
+  generateClientSubmissionId,
   savePortalActiveStore,
   validatePortalImageFile,
   type PortalClientOption,
@@ -74,6 +75,8 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [observations, setObservations] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const clientSubmissionIdRef = useRef<string>(generateClientSubmissionId());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -231,7 +234,7 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
   };
 
   const handleSave = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
     if (!activeStore.trim()) {
       setSubmitError('Selecciona el Punto de Venta (PDV).');
@@ -252,6 +255,7 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       await createPortalPriceSurvey({
@@ -274,12 +278,14 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
         observations,
         ocrAsistido: ocrAppliedMeta.assisted,
         ocrConfianza: ocrAppliedMeta.confidence,
+        clientSubmissionId: clientSubmissionIdRef.current,
       });
       setSaveSuccess(true);
       onNotify(`Monitoreo bimonetario guardado (${selectedProduct.trim()})`);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'No se pudo guardar el monitoreo.');
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -364,6 +370,7 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
               setPendingOcrResult(null);
               setOcrAppliedMeta({ assisted: false, confidence: null });
               setObservations('');
+              clientSubmissionIdRef.current = generateClientSubmissionId();
               setSaveSuccess(false);
             }}
             className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs uppercase tracking-wider cursor-pointer"

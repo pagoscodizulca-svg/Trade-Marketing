@@ -15,6 +15,7 @@ import {
   PORTAL_MERCHANDISING_ACTIVITIES,
   PORTAL_STORE_MANAGER_ROLES,
   createPortalMerchandisingReport,
+  generateClientSubmissionId,
   savePortalActiveStore,
   validatePortalImageFile,
   type PortalClientOption,
@@ -72,6 +73,8 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
   const [hasSignature, setHasSignature] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const clientSubmissionIdRef = useRef<string>(generateClientSubmissionId());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
@@ -157,7 +160,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
   const shareOfShelfPercent = totalFacings > 0 ? Math.round((ourFacings / totalFacings) * 100) : 0;
 
   const handleSubmit = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
     if (!activeStore.trim()) {
       setSubmitError('Selecciona el Punto de Venta (PDV).');
@@ -168,6 +171,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       let signatureBlob: Blob | null = null;
@@ -202,6 +206,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
         storeManagerPhone,
         photoFiles,
         signatureBlob,
+        clientSubmissionId: clientSubmissionIdRef.current,
         shelfMetrics:
           subTab === 'escaneo_gondola'
             ? {
@@ -221,6 +226,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'No se pudo guardar el informe.');
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -274,6 +280,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
               setObservations('');
               setStoreManagerName('');
               setHasSignature(false);
+              clientSubmissionIdRef.current = generateClientSubmissionId();
               setSavedSuccess(false);
             }}
             className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs uppercase tracking-wider cursor-pointer"

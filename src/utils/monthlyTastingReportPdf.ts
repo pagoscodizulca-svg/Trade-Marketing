@@ -1,6 +1,12 @@
 import type jsPDF from 'jspdf';
 import type { TastingScheduleItem } from '../components/field/FieldPromotoraView';
 import { getTodayVeYmd } from '../services/supabaseModule1';
+import {
+  formatCanonicalSucursalBadge,
+  inferCanonicalSucursalFromText,
+  normalizeCanonicalSucursal,
+  type CanonicalSucursal,
+} from './regionalSyncClassifier';
 import { getDynamicWeekNumberInMonth, getMonthCalendarWeeks } from './weekCalendar';
 
 // Carga diferida de jsPDF y jsPDF-AutoTable para mantener ligero el bundle inicial
@@ -21,6 +27,8 @@ export interface GlobalTastingReportOptions {
   filterSummaryLabel?: string;
   /** Sufijo limpio para el nombre del archivo PDF */
   fileSuffix?: string;
+  /** Sucursal activa de la sesión ('CENTRO' | 'OCCIDENTE') para aislamiento estricto del Informe Global */
+  activeSucursal?: CanonicalSucursal | string | null;
   scope?: MonthlyReportScope;
 }
 
@@ -472,13 +480,21 @@ export function buildMonthlyTastingReportData(
   options: GlobalTastingReportOptions = {}
 ): MonthlyTastingReportData {
   const { scope = 'all', targetYearMonth } = options;
+  const activeBranch = normalizeCanonicalSucursal(options.activeSucursal);
+  const activeBranchBadge = formatCanonicalSucursalBadge(activeBranch);
   const todayYmd = getTodayVeYmd();
 
-  // Deduplicar registros por ID
+  // Deduplicar registros por ID y aislar estrictamente a la sucursal activa
   const uniqueItems: TastingScheduleItem[] = [];
   const seenIds = new Set<string>();
   (items || []).forEach((it) => {
     if (!it || !it.id || seenIds.has(it.id)) return;
+    if (activeBranch) {
+      const itemBranch = inferCanonicalSucursalFromText(
+        `${it.storeName ?? ''} ${it.zone ?? ''} ${it.rawComments?.sucursal ?? ''} ${it.rawComments?.region ?? ''}`
+      );
+      if (itemBranch && itemBranch !== activeBranch) return;
+    }
     seenIds.add(it.id);
     uniqueItems.push(it);
   });
@@ -746,14 +762,21 @@ export function buildMonthlyTastingReportData(
         ).padStart(2, '0')}`
       : `${sortedMonths[0].year}-${String(sortedMonths[0].monthIndex + 1).padStart(2, '0')}`;
 
+  const baseSuffix = options.fileSuffix || defaultSuffix;
+  const effectiveSuffix = activeBranch ? `${activeBranch}_${baseSuffix}` : baseSuffix;
+  const baseFilterSummary =
+    options.filterSummaryLabel || `Periodo: ${periodLabel} (Todos los registros)`;
+
   return {
     generatedAt: new Date().toLocaleString('es-VE', {
       dateStyle: 'short',
       timeStyle: 'short',
     }),
-    periodLabel,
-    filterSummaryLabel: options.filterSummaryLabel || `Periodo: ${periodLabel} (Todos los registros)`,
-    fileSuffix: options.fileSuffix || defaultSuffix,
+    periodLabel: activeBranchBadge ? `${activeBranchBadge} — ${periodLabel}` : periodLabel,
+    filterSummaryLabel: activeBranchBadge
+      ? `${activeBranchBadge} · ${baseFilterSummary}`
+      : baseFilterSummary,
+    fileSuffix: effectiveSuffix,
     isMultiMonth,
     scope,
     planningWeeks,

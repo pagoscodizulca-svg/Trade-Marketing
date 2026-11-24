@@ -28,6 +28,10 @@ import {
 } from '../utils/excelDateParser';
 import { calculateProductionSupplies } from '../utils/productionSuppliesCalculator';
 import {
+  inferCanonicalSucursalFromText,
+  normalizeCanonicalSucursal,
+} from '../utils/regionalSyncClassifier';
+import {
   getCachedAccessToken,
   getSupabaseCoordinatorClient,
   isSupabaseConfigured,
@@ -1100,6 +1104,7 @@ export async function syncApprovedOccidenteDegustacionToModule2(params: {
   promotoraEmail: string;
   observaciones?: string;
   insumosCalculados?: Record<string, unknown>;
+  sucursal?: string | null;
 }): Promise<{ cronograma_id: string; syncedByTrigger: boolean }> {
   if (!isSupabaseConfigured) {
     throw new Error('Supabase no está configurado.');
@@ -1137,6 +1142,11 @@ export async function syncApprovedOccidenteDegustacionToModule2(params: {
         ? { ini: '09:00', fin: '17:00' }
         : { ini: '09:00', fin: '13:00' };
 
+  const resolvedBranch =
+    normalizeCanonicalSucursal(params.sucursal) ??
+    inferCanonicalSucursalFromText(`${params.clienteNombre ?? ''} ${params.zonaDireccion ?? ''}`) ??
+    'OCCIDENTE';
+
   const basePayload: Record<string, unknown> = {
     fecha: /^\d{4}-\d{2}-\d{2}$/.test(params.fecha) ? params.fecha : new Date().toISOString().slice(0, 10),
     turno: params.turno,
@@ -1144,7 +1154,7 @@ export async function syncApprovedOccidenteDegustacionToModule2(params: {
     hora_fin: shiftHours.fin,
     cliente_nombre: sanitizeCellText(params.clienteNombre, 180) || 'PDV SIN NOMBRE',
     cliente_codigo: sanitizeCellText(params.clienteCodigo, 80).toUpperCase(),
-    zona_direccion: sanitizeCellText(params.zonaDireccion, 220) || 'OCCIDENTE',
+    zona_direccion: sanitizeCellText(params.zonaDireccion, 220) || resolvedBranch,
     producto_resumen: sanitizeCellText(params.productoResumen, 160).toUpperCase() || 'MORTADELA',
     productos: [sanitizeCellText(params.productoResumen, 160).toUpperCase() || 'MORTADELA'],
     cantidad_kilos: Math.max(0.1, Number(params.cantidadKilos) || 1),
@@ -1155,9 +1165,9 @@ export async function syncApprovedOccidenteDegustacionToModule2(params: {
     observaciones: sanitizeCellText(params.observaciones, 600),
     insumos_calculados: params.insumosCalculados ?? {},
     estado: 'APROBADA',
-    region: 'Occidente',
-    sucursal: 'ZULIA',
-    chofer_sede: 'OCCIDENTE',
+    region: resolvedBranch,
+    sucursal: resolvedBranch,
+    chofer_sede: resolvedBranch,
     ...(cleanSurveyId ? { survey_origen_id: cleanSurveyId, degustacion_origen_id: cleanSurveyId } : {}),
   };
 

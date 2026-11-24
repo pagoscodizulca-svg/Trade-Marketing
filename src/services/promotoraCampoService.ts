@@ -26,6 +26,60 @@ import {
 
 export const PORTAL_ACTIVE_STORE_STORAGE_KEY = 'codizulca_portal_active_store_v2';
 
+const CLIENT_SUBMISSION_UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Genera un UUID v4 por borrador de captura para garantizar idempotencia estricta
+ * (`client_submission_id`) ante doble clic o reintentos por microcortes de red.
+ */
+export function generateClientSubmissionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function normalizeOptionalClientSubmissionId(raw?: string | null): string | null {
+  const clean = String(raw || '').trim();
+  return CLIENT_SUBMISSION_UUID_REGEX.test(clean) ? clean : null;
+}
+
+/**
+ * Devuelve el timestamp ISO exacto en huso horario de Venezuela (`America/Caracas`, `UTC-4`),
+ * p. ej. `2026-11-23T20:41:47.758-04:00`.
+ * Evita que los reportes enviados entre 8:00 p. m. y 11:59 p. m. hora Venezuela
+ * cambien al día siguiente (`D+1`) al normalizar fechas en el Módulo de Informes.
+ */
+export function getCaracasIsoTimestamp(date: Date = new Date()): string {
+  const utcMs = date.getTime();
+  if (!Number.isFinite(utcMs)) return new Date().toISOString();
+  // Venezuela es permanentemente UTC-4 (sin horario de verano desde 2016)
+  const caracasMs = utcMs - 4 * 60 * 60 * 1000;
+  const shifted = new Date(caracasMs);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const pad3 = (n: number) => String(n).padStart(3, '0');
+  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}T${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}:${pad2(shifted.getUTCSeconds())}.${pad3(shifted.getUTCMilliseconds())}-04:00`;
+}
+
+function isMissingColumnError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  return (
+    err.code === 'PGRST204' ||
+    err.code === '42703' ||
+    /column .* does not exist|could not find the .* column/i.test(String(err.message || ''))
+  );
+}
+
+function isUniqueViolationError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  return err.code === '23505' || /duplicate key value violates unique constraint/i.test(String(err.message || ''));
+}
+
 export interface PortalPromotoraContext {
   promotoraId: string;
   promotoraRefId: number | null;
@@ -935,6 +989,7 @@ export async function createPortalInventoryLog(params: {
   degustations: number;
   comments?: string;
   cronogramaId?: string | null;
+  clientSubmissionId?: string | null;
 }): Promise<PortalInventoryRecord> {
   const cleanStore = String(params.store || '').trim();
   const cleanProduct = String(params.product || '').trim();
@@ -958,27 +1013,45 @@ export async function createPortalInventoryLog(params: {
   }
 
   const client = getSupabaseClient();
-  const nowIso = new Date().toISOString();
-  const { data, error } = await client
-    .from('inventory')
-    .insert({
-      date: nowIso,
-      store: cleanStore,
-      product: cleanProduct,
-      initialQuantity: Number(init.toFixed(2)),
-      finalQuantity,
-      degustations: Number(samples.toFixed(2)),
-      sales_generated: Number(sales.toFixed(2)),
-      comments: String(params.comments || '').trim().slice(0, 600),
-      creatorId: params.context.correo || params.context.nombre,
-      promoter: params.context.nombre,
-      promotora_id: params.context.promotoraId,
-      auth_user_id: params.context.authUserId,
-      region: params.context.region,
-      zona: String(params.zona || params.context.direccion || params.context.region).trim(),
-      cronograma_id: params.cronogramaId || null,
-    })
-    .select('*');
+  const nowCaracasIso = getCaracasIsoTimestamp();
+  const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+
+  const baseRow = {
+    date: nowCaracasIso,
+    store: cleanStore,
+    product: cleanProduct,
+    initialQuantity: Number(init.toFixed(2)),
+    finalQuantity,
+    degustations: Number(samples.toFixed(2)),
+    sales_generated: Number(sales.toFixed(2)),
+    comments: String(params.comments || '').trim().slice(0, 600),
+    creatorId: params.context.correo || params.context.nombre,
+    promoter: params.context.nombre,
+    promotora_id: params.context.promotoraId,
+    auth_user_id: params.context.authUserId,
+    region: params.context.region,
+    zona: String(params.zona || params.context.direccion || params.context.region).trim(),
+    cronograma_id: params.cronogramaId || null,
+  };
+
+  const payload = submissionId ? { ...baseRow, client_submission_id: submissionId } : baseRow;
+  let { data, error } = await client.from('inventory').insert(payload).select('*');
+
+  if (error && submissionId && isMissingColumnError(error)) {
+    const retry = await client.from('inventory').insert(baseRow).select('*');
+    data = retry.data;
+    error = retry.error;
+  } else if (error && submissionId && isUniqueViolationError(error)) {
+    const existing = await client
+      .from('inventory')
+      .select('*')
+      .eq('client_submission_id', submissionId)
+      .limit(1);
+    if (!existing.error && Array.isArray(existing.data) && existing.data.length > 0) {
+      data = existing.data;
+      error = null;
+    }
+  }
 
   if (error) {
     throw new Error(
@@ -996,7 +1069,7 @@ export async function createPortalInventoryLog(params: {
   const saved = rows[0] as Record<string, unknown>;
   return {
     id: String(saved.id),
-    date: String(saved.date || nowIso),
+    date: String(saved.date || nowCaracasIso),
     store: String(saved.store || cleanStore),
     product: String(saved.product || cleanProduct),
     initialQuantity: Number(saved.initialQuantity ?? init),
@@ -1008,7 +1081,7 @@ export async function createPortalInventoryLog(params: {
     promotora_id: saved.promotora_id ? String(saved.promotora_id) : params.context.promotoraId,
     region: saved.region ? String(saved.region) : params.context.region,
     zona: saved.zona ? String(saved.zona) : params.zona || '',
-    created_at: saved.created_at ? String(saved.created_at) : nowIso,
+    created_at: saved.created_at ? String(saved.created_at) : nowCaracasIso,
   };
 }
 
@@ -1026,6 +1099,7 @@ export async function createPortalConsumerSurvey(params: {
   relacionCalidadPrecio: 'Excelente' | 'Buena' | 'Regular' | 'Mala';
   recomendacion: number;
   comments?: string;
+  clientSubmissionId?: string | null;
 }): Promise<{ id: string }> {
   const cleanStore = String(params.store || '').trim();
   const cleanProduct = String(params.product || '').trim();
@@ -1033,32 +1107,50 @@ export async function createPortalConsumerSurvey(params: {
   if (!cleanProduct) throw new Error('Selecciona el producto degustado.');
 
   const client = getSupabaseClient();
-  const nowIso = new Date().toISOString();
-  const { data, error } = await client
-    .from('surveys')
-    .insert({
-      type: 'Profunda',
-      date: nowIso,
-      store: cleanStore,
-      promoter: params.context.nombre,
-      product: cleanProduct,
-      rating: params.recomendacion,
-      intent: params.intencionCompra,
-      comments: JSON.stringify({
-        isTasting: true,
-        acceptance: params.recomendacion >= 4 ? 'Alta' : params.recomendacion === 3 ? 'Media' : 'Baja',
-        sensoryRatings: { sabor: params.sabor, textura: params.textura },
-        percepcionCalidad: params.percepcionCalidad,
-        relacionCalidadPrecio: params.relacionCalidadPrecio,
-        intencionCompra: params.intencionCompra,
-        originalComments: String(params.comments || '').trim().slice(0, 500),
-      }),
-      creatorId: params.context.correo || params.context.nombre,
-      promotora_id: params.context.promotoraId,
-      auth_user_id: params.context.authUserId,
-      region: params.context.region,
-    })
-    .select('id');
+  const nowCaracasIso = getCaracasIsoTimestamp();
+  const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+
+  const baseRow = {
+    type: 'Profunda',
+    date: nowCaracasIso,
+    store: cleanStore,
+    promoter: params.context.nombre,
+    product: cleanProduct,
+    rating: params.recomendacion,
+    intent: params.intencionCompra,
+    comments: JSON.stringify({
+      isTasting: true,
+      acceptance: params.recomendacion >= 4 ? 'Alta' : params.recomendacion === 3 ? 'Media' : 'Baja',
+      sensoryRatings: { sabor: params.sabor, textura: params.textura },
+      percepcionCalidad: params.percepcionCalidad,
+      relacionCalidadPrecio: params.relacionCalidadPrecio,
+      intencionCompra: params.intencionCompra,
+      originalComments: String(params.comments || '').trim().slice(0, 500),
+    }),
+    creatorId: params.context.correo || params.context.nombre,
+    promotora_id: params.context.promotoraId,
+    auth_user_id: params.context.authUserId,
+    region: params.context.region,
+  };
+
+  const payload = submissionId ? { ...baseRow, client_submission_id: submissionId } : baseRow;
+  let { data, error } = await client.from('surveys').insert(payload).select('id');
+
+  if (error && submissionId && isMissingColumnError(error)) {
+    const retry = await client.from('surveys').insert(baseRow).select('id');
+    data = retry.data;
+    error = retry.error;
+  } else if (error && submissionId && isUniqueViolationError(error)) {
+    const existing = await client
+      .from('surveys')
+      .select('id')
+      .eq('client_submission_id', submissionId)
+      .limit(1);
+    if (!existing.error && Array.isArray(existing.data) && existing.data.length > 0) {
+      data = existing.data;
+      error = null;
+    }
+  }
 
   if (error) {
     throw new Error(`No se pudo registrar la encuesta (${error.message}).`);
@@ -1097,6 +1189,7 @@ export async function createPortalPriceSurvey(params: {
   observations?: string;
   ocrAsistido?: boolean;
   ocrConfianza?: 'alta' | 'media' | 'baja' | null;
+  clientSubmissionId?: string | null;
 }): Promise<{ id: string }> {
   const cleanStore = String(params.store || '').trim();
   const cleanProduct = String(params.ourProduct || '').trim();
@@ -1122,6 +1215,7 @@ export async function createPortalPriceSurvey(params: {
   });
 
   const client = getSupabaseClient();
+  const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
   let uploadedPhotoPath: string | null = null;
 
   if (params.photoFile) {
@@ -1149,7 +1243,7 @@ export async function createPortalPriceSurvey(params: {
     const validComps = normalized.competitorsMeta;
     const todayYmd = params.bcvRateDate || getCaracasTodayYmd();
     const basePayload = {
-      date: new Date().toISOString(),
+      date: getCaracasIsoTimestamp(),
       store: cleanStore,
       ourProduct: cleanProduct,
       // Conservamos monto original exacto en ourPrice / competitor*Price para trazabilidad contable
@@ -1174,6 +1268,7 @@ export async function createPortalPriceSurvey(params: {
 
     const extendedPayload = {
       ...basePayload,
+      ...(submissionId ? { client_submission_id: submissionId } : {}),
       cadena: params.cadena ? String(params.cadena).trim().slice(0, 120) : null,
       zona: params.zona ? String(params.zona).trim().slice(0, 120) : params.context.direccion || null,
       moneda_propia: normalized.ownCurrency,
@@ -1193,8 +1288,8 @@ export async function createPortalPriceSurvey(params: {
     let { data, error } = await client.from('prices').insert(extendedPayload).select('id');
 
     // Retrocompatibilidad segura si el entorno aún no ejecutó la migración aditiva de columnas bimonetarias
-    if (error && (error.code === 'PGRST204' || error.code === '42703' || /column .* does not exist/i.test(error.message))) {
-      const legacyPayload = {
+    if (error && isMissingColumnError(error)) {
+      const legacyPayloadBase = {
         ...basePayload,
         ourPrice: Number(normalized.ownPriceUsd.toFixed(2)),
         competitor1Price: validComps[0] ? Number(validComps[0].priceUsd.toFixed(2)) : null,
@@ -1202,9 +1297,37 @@ export async function createPortalPriceSurvey(params: {
         competitor3Price: validComps[2] ? Number(validComps[2].priceUsd.toFixed(2)) : null,
         competitorPrice: validComps[0] ? Number(validComps[0].priceUsd.toFixed(2)) : null,
       };
-      const retry = await client.from('prices').insert(legacyPayload).select('id');
+      const legacyWithSub = submissionId
+        ? { ...legacyPayloadBase, client_submission_id: submissionId }
+        : legacyPayloadBase;
+      const retry = await client.from('prices').insert(legacyWithSub).select('id');
       data = retry.data;
       error = retry.error;
+
+      if (error && submissionId && isMissingColumnError(error)) {
+        const retryPlain = await client.from('prices').insert(legacyPayloadBase).select('id');
+        data = retryPlain.data;
+        error = retryPlain.error;
+      }
+    }
+
+    if (error && submissionId && isUniqueViolationError(error)) {
+      const existing = await client
+        .from('prices')
+        .select('id')
+        .eq('client_submission_id', submissionId)
+        .limit(1);
+      if (!existing.error && Array.isArray(existing.data) && existing.data.length > 0) {
+        data = existing.data;
+        error = null;
+        if (uploadedPhotoPath) {
+          await client.storage
+            .from(ASISTENCIA_PRIVATE_BUCKET_ID)
+            .remove([uploadedPhotoPath])
+            .catch(() => undefined);
+          uploadedPhotoPath = null;
+        }
+      }
     }
 
     if (error) {
@@ -1254,6 +1377,7 @@ export async function createPortalMerchandisingReport(params: {
     outOfStockDetected: boolean;
     popDetected: boolean;
   };
+  clientSubmissionId?: string | null;
 }): Promise<{ id: string }> {
   const cleanStore = String(params.store || '').trim();
   if (!cleanStore) throw new Error('Selecciona el Punto de Venta (PDV).');
@@ -1262,6 +1386,7 @@ export async function createPortalMerchandisingReport(params: {
   }
 
   const client = getSupabaseClient();
+  const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
   const uploadedPaths: string[] = [];
 
   try {
@@ -1304,36 +1429,61 @@ export async function createPortalMerchandisingReport(params: {
       uploadedPaths.push(sigPath);
     }
 
-    const { data, error } = await client
-      .from('surveys')
-      .insert({
-        type: 'Merchandising',
+    const baseMerchRow = {
+      type: 'Merchandising',
+      date: params.date,
+      store: cleanStore,
+      promoter: params.context.nombre,
+      product: params.productDetail || 'Línea General Codizulca',
+      comments: JSON.stringify({
+        mode: params.mode,
         date: params.date,
-        store: cleanStore,
-        promoter: params.context.nombre,
-        product: params.productDetail || 'Línea General Codizulca',
-        comments: JSON.stringify({
-          mode: params.mode,
-          date: params.date,
-          time: params.time,
-          address: params.address || '',
-          activities: params.activities,
-          observations: String(params.observations || '').trim(),
-          storeManagerName: params.storeManagerName || '',
-          storeManagerRole: params.storeManagerRole || 'Encargado de Tienda',
-          storeManagerPhone: params.storeManagerPhone || '',
-          certified: Boolean(signaturePath),
-          signedAt: new Date().toISOString(),
-          photoStoragePaths: uploadedPaths.filter((p) => p !== signaturePath),
-          signatureStoragePath: signaturePath,
-          ...(params.shelfMetrics ? { category: params.shelfMetrics.category, metrics: params.shelfMetrics } : {}),
-        }),
-        creatorId: params.context.correo || params.context.nombre,
-        promotora_id: params.context.promotoraId,
-        auth_user_id: params.context.authUserId,
-        region: params.context.region,
-      })
-      .select('id');
+        time: params.time,
+        address: params.address || '',
+        activities: params.activities,
+        observations: String(params.observations || '').trim(),
+        storeManagerName: params.storeManagerName || '',
+        storeManagerRole: params.storeManagerRole || 'Encargado de Tienda',
+        storeManagerPhone: params.storeManagerPhone || '',
+        certified: Boolean(signaturePath),
+        signedAt: getCaracasIsoTimestamp(),
+        photoStoragePaths: uploadedPaths.filter((p) => p !== signaturePath),
+        signatureStoragePath: signaturePath,
+        ...(params.shelfMetrics ? { category: params.shelfMetrics.category, metrics: params.shelfMetrics } : {}),
+      }),
+      creatorId: params.context.correo || params.context.nombre,
+      promotora_id: params.context.promotoraId,
+      auth_user_id: params.context.authUserId,
+      region: params.context.region,
+    };
+
+    const merchPayload = submissionId
+      ? { ...baseMerchRow, client_submission_id: submissionId }
+      : baseMerchRow;
+    let { data, error } = await client.from('surveys').insert(merchPayload).select('id');
+
+    if (error && submissionId && isMissingColumnError(error)) {
+      const retry = await client.from('surveys').insert(baseMerchRow).select('id');
+      data = retry.data;
+      error = retry.error;
+    } else if (error && submissionId && isUniqueViolationError(error)) {
+      const existing = await client
+        .from('surveys')
+        .select('id')
+        .eq('client_submission_id', submissionId)
+        .limit(1);
+      if (!existing.error && Array.isArray(existing.data) && existing.data.length > 0) {
+        data = existing.data;
+        error = null;
+        if (uploadedPaths.length > 0) {
+          await client.storage
+            .from(ASISTENCIA_PRIVATE_BUCKET_ID)
+            .remove(uploadedPaths)
+            .catch(() => undefined);
+          uploadedPaths.length = 0;
+        }
+      }
+    }
 
     if (error) {
       throw new Error(`No se pudo guardar el informe de merchandising (${error.message}).`);

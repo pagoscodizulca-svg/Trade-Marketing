@@ -40,6 +40,21 @@ export function getPromotorasPortalUrl(explicitOrigin?: string): string {
   }
 }
 
+const SAFE_TOKEN_PARAM_REGEX = /^[A-Za-z0-9_-]{24,256}$/;
+
+/**
+ * Construye de forma segura la URL del Enlace Público PDV sin login para una sucursal:
+ * `${origin}/portal?token=${encodeURIComponent(token)}`.
+ */
+export function buildRegionalPdvPortalUrl(rawToken: string, explicitOrigin?: string): string {
+  const cleanToken = String(rawToken ?? '').trim();
+  if (!SAFE_TOKEN_PARAM_REGEX.test(cleanToken)) {
+    throw new Error('Token regional PDV con formato inválido.');
+  }
+  const baseUrl = getPromotorasPortalUrl(explicitOrigin);
+  return `${baseUrl}?token=${encodeURIComponent(cleanToken)}`;
+}
+
 /**
  * Sanitiza un número telefónico para `https://wa.me/<digitos>`:
  * - Elimina todo carácter no numérico (`+`, espacios, guiones, paréntesis, scripts).
@@ -80,6 +95,8 @@ export interface PromotoraWhatsAppLinkOptions {
   storeName?: string | null;
   dateYmd?: string | null;
   explicitOrigin?: string;
+  regionalToken?: string | null;
+  sucursalLabel?: string | null;
 }
 
 /**
@@ -88,17 +105,21 @@ export interface PromotoraWhatsAppLinkOptions {
  * cuando no hay teléfono válido registrado).
  */
 export function buildPromotoraWhatsAppLink(options: PromotoraWhatsAppLinkOptions = {}): string {
-  const portalUrl = getPromotorasPortalUrl(options.explicitOrigin);
+  const cleanToken = String(options.regionalToken ?? '').trim();
+  const portalUrl = SAFE_TOKEN_PARAM_REGEX.test(cleanToken)
+    ? buildRegionalPdvPortalUrl(cleanToken, options.explicitOrigin)
+    : getPromotorasPortalUrl(options.explicitOrigin);
   const cleanName = sanitizePortalShareText(options.promotoraName, 80);
   const cleanEmail = sanitizePortalShareText(options.promotoraEmail, 120).toLowerCase();
   const cleanStore = sanitizePortalShareText(options.storeName, 100);
   const cleanDate = sanitizePortalShareText(options.dateYmd, 20);
+  const cleanSucursal = sanitizePortalShareText(options.sucursalLabel, 40);
   const cleanPhone = sanitizePhoneForWhatsApp(options.phone);
 
   const lines: string[] = [
     cleanName
-      ? `Hola ${cleanName}, te escribimos desde Coordinación de Trade Marketing (CODIZULCA C.A.).`
-      : 'Hola, te compartimos el acceso al Portal de Ruta de Promotoras (CODIZULCA C.A.).',
+      ? `Hola ${cleanName}, te escribimos desde Coordinación de Trade Marketing${cleanSucursal ? ` (${cleanSucursal})` : ''} (CODIZULCA C.A.).`
+      : `Hola, te compartimos el Enlace Público PDV${cleanSucursal ? ` — ${cleanSucursal}` : ''} (CODIZULCA C.A.).`,
   ];
 
   if (cleanStore) {
@@ -109,9 +130,9 @@ export function buildPromotoraWhatsAppLink(options: PromotoraWhatsAppLinkOptions
     );
   }
 
-  lines.push(`Ingresa a tu Módulo de Ruta aquí: ${portalUrl}`);
+  lines.push(`Reporta muestras, ventas y ejecución aquí: ${portalUrl}`);
 
-  if (cleanEmail && cleanEmail.includes('@')) {
+  if (!SAFE_TOKEN_PARAM_REGEX.test(cleanToken) && cleanEmail && cleanEmail.includes('@')) {
     lines.push(`Inicia sesión con tu correo registrado: ${cleanEmail}`);
   }
 

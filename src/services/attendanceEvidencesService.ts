@@ -134,8 +134,12 @@ export async function uploadCompressedAttendanceEvidence(params: {
 
   const encodedHeader = encodeUtf8ToBase64Url(JSON.stringify(fullMeta));
 
-  const responsePayload = await new Promise<UploadAttendanceEvidenceResponse>(
-    (resolve, reject) => {
+  const executeSingleUpload = (): Promise<{
+    payload?: UploadAttendanceEvidenceResponse;
+    retryable?: boolean;
+    error?: Error;
+  }> =>
+    new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/asistencia/evidencias', true);
       xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -151,17 +155,21 @@ export async function uploadCompressedAttendanceEvidence(params: {
       };
 
       xhr.onerror = () => {
-        reject(
-          new Error(
+        resolve({
+          retryable: true,
+          error: new Error(
             'Error de red al subir la fotografía. Verifique su conexión móvil e intente nuevamente.'
-          )
-        );
+          ),
+        });
       };
 
       xhr.ontimeout = () => {
-        reject(new Error('Tiempo de espera agotado durante la carga de la fotografía.'));
+        resolve({
+          retryable: true,
+          error: new Error('Tiempo de espera agotado durante la carga de la fotografía.'),
+        });
       };
-      xhr.timeout = 45_000;
+      xhr.timeout = 65_000;
 
       xhr.onload = () => {
         let parsed: Record<string, unknown> = {};
@@ -173,7 +181,7 @@ export async function uploadCompressedAttendanceEvidence(params: {
 
         if (xhr.status >= 200 && xhr.status < 300 && parsed.ok) {
           params.onProgress?.(100);
-          resolve(parsed as unknown as UploadAttendanceEvidenceResponse);
+          resolve({ payload: parsed as unknown as UploadAttendanceEvidenceResponse });
           return;
         }
 
@@ -181,12 +189,23 @@ export async function uploadCompressedAttendanceEvidence(params: {
           typeof parsed.error === 'string' && parsed.error.trim()
             ? parsed.error.trim()
             : `No se pudo registrar la evidencia fotográfica (HTTP ${xhr.status}).`;
-        reject(new Error(serverError));
+        const isTransient =
+          xhr.status === 408 || xhr.status === 502 || xhr.status === 503 || xhr.status === 504;
+        resolve({ retryable: isTransient, error: new Error(serverError) });
       };
 
       xhr.send(compressed.blob);
-    }
-  );
+    });
+
+  let attemptResult = await executeSingleUpload();
+  if (!attemptResult.payload && attemptResult.retryable) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    attemptResult = await executeSingleUpload();
+  }
+  if (!attemptResult.payload) {
+    throw attemptResult.error ?? new Error('No se pudo registrar la evidencia fotográfica.');
+  }
+  const responsePayload = attemptResult.payload;
 
   if (
     responsePayload.evidencia?.id &&

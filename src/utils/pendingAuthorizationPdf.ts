@@ -11,6 +11,12 @@ import {
   resolveTastingEventCaracasYmd,
 } from './caracasWeekCycle';
 import { formatToDdMmYyyy } from './excelDateNormalizer';
+import {
+  formatCanonicalSucursalBadge,
+  inferCanonicalSucursalFromText,
+  normalizeCanonicalSucursal,
+  type CanonicalSucursal,
+} from './regionalSyncClassifier';
 
 export const AUTHORIZATION_TIMEZONE = OFFICIAL_CARACAS_TIMEZONE; // 'America/Caracas' (UTC-4)
 export const MAX_AUTHORIZATION_PDF_ROWS = 500;
@@ -90,6 +96,8 @@ export interface BuildPendingAuthorizationModelInput {
   filterSummaryLabel?: string | null;
   issuerName?: string | null;
   issuerRole?: string | null;
+  /** Sucursal activa de la sesión ('CENTRO' | 'OCCIDENTE') para aislamiento estricto del PDF */
+  activeSucursal?: CanonicalSucursal | string | null;
   now?: Date;
   maxRows?: number;
 }
@@ -380,6 +388,8 @@ export function buildPendingAuthorizationReportModel(
     ? `Cronograma Actual (Semana ISO: Lun ${mondayDdMmYyyy} al Dom ${sundayDdMmYyyy} · America/Caracas)`
     : `Bandeja de Entrada Vigente y Próxima · Desde ${formatToDdMmYyyy(emission.caracasYmd, emission.caracasYmd)} (America/Caracas, UTC-4)`;
 
+  const activeBranch = normalizeCanonicalSucursal(input.activeSucursal);
+  const activeBranchBadge = formatCanonicalSucursalBadge(activeBranch);
   const hasActiveFilters = Boolean(input.hasActiveFilters);
   const scopeType: AuthorizationReportScope = hasActiveFilters ? 'FILTRADO' : 'GENERAL';
   const cleanFilterDetail = sanitizeAuthorizationText(
@@ -387,10 +397,16 @@ export function buildPendingAuthorizationReportModel(
     MAX_FILTER_SUMMARY_LENGTH,
     { fallback: 'Filtros activos en pantalla' }
   );
-  const scopeHeaderLabel =
-    scopeType === 'FILTRADO' ? 'Alcance: Filtrado' : 'Alcance: General de Pendientes';
-  const scopeDetailLabel =
-    scopeType === 'FILTRADO'
+  const scopeHeaderLabel = activeBranchBadge
+    ? `${activeBranchBadge} · ${scopeType === 'FILTRADO' ? 'Alcance: Filtrado' : 'Alcance: General de Pendientes'}`
+    : scopeType === 'FILTRADO'
+      ? 'Alcance: Filtrado'
+      : 'Alcance: General de Pendientes';
+  const scopeDetailLabel = activeBranchBadge
+    ? scopeType === 'FILTRADO'
+      ? `${activeBranchBadge} — Filtrado (${cleanFilterDetail})`
+      : `${activeBranchBadge} — General de Pendientes (Solicitudes por aprobar de la sucursal)`
+    : scopeType === 'FILTRADO'
       ? `Filtrado (${cleanFilterDetail})`
       : 'General de Pendientes (Todas las solicitudes por aprobar de la semana actual)';
 
@@ -440,7 +456,13 @@ export function buildPendingAuthorizationReportModel(
       : isTastingBeforeTodayCaracas(rawItem.date, now, rawFallbackCreated);
     if (isExpired) continue;
 
-    // 4. Respetar predicado de filtros activos en pantalla si se proporcionó
+    // 4. Aislar defensivamente por sucursal activa ('CENTRO' vs 'OCCIDENTE') y respetar predicado de filtros
+    if (activeBranch) {
+      const itemBranch = inferCanonicalSucursalFromText(
+        `${rawItem.storeName ?? ''} ${rawItem.zone ?? ''} ${rawItem.rawComments?.sucursal ?? ''} ${rawItem.rawComments?.region ?? ''}`
+      );
+      if (itemBranch && itemBranch !== activeBranch) continue;
+    }
     if (input.filterPredicate && !input.filterPredicate(rawItem)) continue;
 
     // 5. Deduplicar por clave canónica de solicitud
@@ -590,7 +612,9 @@ export function buildPendingAuthorizationReportModel(
     scopeDetailLabel,
     issuerDisplay,
     emission,
-    fileName: emission.fileName,
+    fileName: activeBranch
+      ? `Solicitud_Autorizacion_Degustaciones_${activeBranch}_${emission.fileTimestampToken}.pdf`
+      : emission.fileName,
     kpis: {
       totalSolicitadas: rows.length,
       uniqueSellersCount: uniqueSellerSet.size,

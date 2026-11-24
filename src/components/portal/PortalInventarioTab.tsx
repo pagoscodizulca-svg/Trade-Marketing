@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -11,6 +11,7 @@ import {
 import {
   createPortalInventoryLog,
   fetchPortalInventoryLogs,
+  generateClientSubmissionId,
   savePortalActiveStore,
   type PortalClientOption,
   type PortalInventoryRecord,
@@ -44,6 +45,8 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
   const [observations, setObservations] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const clientSubmissionIdRef = useRef<string>(generateClientSubmissionId());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [savedRecord, setSavedRecord] = useState<PortalInventoryRecord | null>(null);
 
@@ -82,7 +85,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
 
     if (!activeStore.trim()) {
@@ -102,6 +105,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       const created = await createPortalInventoryLog({
@@ -113,6 +117,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
         salesGenerated,
         degustations: tastingsGiven,
         comments: observations,
+        clientSubmissionId: clientSubmissionIdRef.current,
       });
 
       setSavedRecord(created);
@@ -125,11 +130,13 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
         err instanceof Error ? err.message : 'No se pudo guardar el balance de inventario.'
       );
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handleReset = () => {
+    clientSubmissionIdRef.current = generateClientSubmissionId();
     setSavedRecord(null);
     setInitialStockInput('');
     setSalesInput('0');

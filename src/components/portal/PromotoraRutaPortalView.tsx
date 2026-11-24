@@ -109,6 +109,8 @@ import { PortalEncuestasTab } from './PortalEncuestasTab';
 import { PortalPreciosTab } from './PortalPreciosTab';
 import { PortalMerchandisingTab } from './PortalMerchandisingTab';
 import { PortalPerfilTab } from './PortalPerfilTab';
+import { PublicTokenPdvView } from './PublicTokenPdvView';
+import { extractPublicPdvTokenFromSearch } from '../../services/publicPdvLinksService';
 
 type DateFilterMode = 'todas' | 'hoy' | 'proximas';
 
@@ -990,6 +992,12 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
         </div>
       </div>
     );
+  }
+
+  const publicPdvToken =
+    typeof window !== 'undefined' ? extractPublicPdvTokenFromSearch(window.location.search) : null;
+  if (publicPdvToken) {
+    return <PublicTokenPdvView token={publicPdvToken} />;
   }
 
   if (authChecking) {

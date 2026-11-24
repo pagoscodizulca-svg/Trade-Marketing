@@ -27,11 +27,14 @@ import {
 import { clearMasterCatalogCaches } from '../services/masterCatalogSyncService';
 import {
   purgeAllSessionCaches,
+  registerMemoryCachePurgeCallback,
   sanitizeLegacyRegionalStorage,
 } from '../services/sessionCacheHygiene';
 import {
+  normalizeCanonicalSucursal,
   normalizeRegionName,
   type AllowedRegionCode,
+  type CanonicalSucursal,
 } from '../utils/regionalSyncClassifier';
 import { FEATURE_FLAGS } from '../config/featureFlags';
 import {
@@ -218,6 +221,8 @@ export interface AppContextType {
   setActiveRegionScope: (region: AllowedRegionCode | 'ALL' | 'ASSIGNED') => void;
   /** Sucursal operativa compatible en sesión (traducida desde la región oficial) */
   activeSucursal: OperativeSucursal | null;
+  /** Sucursal canónica estricta ('CENTRO' | 'OCCIDENTE' | null) activa en la sesión */
+  activeCanonicalSucursal: CanonicalSucursal | null;
   /** Etiqueta corporativa legible de la región activa */
   activeSucursalLabel: string;
   /** Verdadero únicamente para `super_admin` y `contraloria` (`GLOBAL`) */
@@ -382,6 +387,11 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 // No se guarda nada en localStorage/sessionStorage (ver services/cleanSync.ts).
 const sessionDeletedVisitIds = new Set<string>();
 let sessionVisitsCleared = false;
+
+registerMemoryCachePurgeCallback(() => {
+  sessionDeletedVisitIds.clear();
+  sessionVisitsCleared = false;
+});
 
 function getDeletedVisitIds(): Set<string> {
   return sessionDeletedVisitIds;
@@ -723,6 +733,35 @@ export const AppProvider: React.FC<{
   assignedRegionCodesRef.current = assignedRegionCodes;
   const requiresSucursalSelectionRef = useRef<boolean>(requiresSucursalSelection);
   requiresSucursalSelectionRef.current = requiresSucursalSelection;
+
+  const activeCanonicalSucursal: CanonicalSucursal | null = useMemo(() => {
+    if (activeRegionScope === 'ALL') return null;
+    if (activeRegionScope && activeRegionScope !== 'ASSIGNED') {
+      return normalizeCanonicalSucursal(activeRegionScope);
+    }
+    if (assignedRegionCodes.length > 0) {
+      return normalizeCanonicalSucursal(assignedRegionCodes[0]);
+    }
+    return normalizeCanonicalSucursal(activeSucursal ?? verifiedSucursal);
+  }, [activeRegionScope, assignedRegionCodes, activeSucursal, verifiedSucursal]);
+
+  const effectiveScopedRegions: AllowedRegionCode[] | null = useMemo(() => {
+    if (activeRegionScope === 'ALL') return null;
+    if (activeRegionScope && activeRegionScope !== 'ASSIGNED') {
+      return [activeRegionScope];
+    }
+    if (isRegionalRestricted && assignedRegionCodes.length > 0) {
+      return assignedRegionCodes;
+    }
+    if (activeSucursal) {
+      const mapped = normalizeRegionName(activeSucursal);
+      if (mapped) return [mapped];
+    }
+    return null;
+  }, [activeRegionScope, isRegionalRestricted, assignedRegionCodes, activeSucursal]);
+
+  const effectiveScopedRegionsRef = useRef<AllowedRegionCode[] | null>(effectiveScopedRegions);
+  effectiveScopedRegionsRef.current = effectiveScopedRegions;
 
   // Sincronizar cabecera `x-sucursal-activa` antes de cualquier carga de datos hija
   useEffect(() => {
@@ -1166,8 +1205,7 @@ export const AppProvider: React.FC<{
     try {
       const bundle = await fetchAllModule1FromSupabase(undefined, {
         assignedRegion: assignedRegionRef.current,
-        assignedRegions:
-          assignedRegionCodesRef.current.length > 0 ? assignedRegionCodesRef.current : null,
+        assignedRegions: effectiveScopedRegionsRef.current,
       });
       setModule1Bundle(bundle);
 
@@ -1306,6 +1344,7 @@ export const AppProvider: React.FC<{
 
   // Hook reactivo de notificaciones en tiempo real de Degustaciones (Vendedores -> Trade Marketing)
   const degustacionNotifications = useDegustacionesNotifications({
+    assignedRegions: effectiveScopedRegions,
     onRealtimeChange: () => {
       void refreshSupabaseData();
     },
@@ -3132,6 +3171,7 @@ export const AppProvider: React.FC<{
         activeRegionScope,
         setActiveRegionScope,
         activeSucursal,
+        activeCanonicalSucursal,
         activeSucursalLabel,
         canSwitchSucursal,
         requiresSucursalSelection,

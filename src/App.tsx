@@ -4,7 +4,7 @@
  */
 
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { LogOut } from 'lucide-react';
+import { LogOut, ShieldCheck } from 'lucide-react';
 import { RoleGuard } from './components/auth/RoleGuard';
 import { TradeAuthGate } from './components/auth/TradeAuthGate';
 import { AppProvider, useApp } from './context/AppContext';
@@ -14,6 +14,7 @@ import type { VerifiedAuthProfile } from './services/authService';
 import { RegionGateSelector } from './components/region/RegionGateSelector';
 import { AnimatedTabContainer } from './components/ui/AnimatedTabContainer';
 import { pathForTab, resolveRoute } from './utils/appRouter';
+import { formatCanonicalSucursalBadge } from './utils/regionalSyncClassifier';
 
 const PopAndIncidenciasView = lazy(() =>
   import('./components/pop/PopAndIncidenciasView').then((m) => ({
@@ -100,7 +101,9 @@ const MainAppContent: React.FC<{
     requiresSucursalSelection,
     isContraloriaOrAdmin,
     activeSucursal,
+    activeCanonicalSucursal,
   } = useApp();
+  const sucursalHeaderBadge = formatCanonicalSucursalBadge(activeCanonicalSucursal);
 
   const [comparativoOpenTick, setComparativoOpenTick] = useState<number>(0);
 
@@ -182,6 +185,20 @@ const MainAppContent: React.FC<{
             </div>
 
             <div className="flex items-center gap-2.5 shrink-0">
+              {sucursalHeaderBadge && (
+                <span
+                  data-testid="active-sucursal-header-badge"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-extrabold tracking-wide border shadow-sm ${
+                    activeCanonicalSucursal === 'CENTRO'
+                      ? 'bg-amber-500/15 text-amber-200 border-amber-400/45'
+                      : 'bg-red-600/20 text-red-200 border-red-500/50'
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                  <span>{sucursalHeaderBadge}</span>
+                </span>
+              )}
+
               {isLocalDevWorkstation && (
                 <button
                   type="button"

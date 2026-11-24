@@ -99,7 +99,7 @@ export function normalizeRegionName(raw: unknown): AllowedRegionCode | null {
     stripped === 'VALENCIA' ||
     stripped === 'CENTRO' ||
     stripped === 'CAPITAL' ||
-    /\b(CENTRO|VALENCIA|CARABOBO|NAGUANAGUA|SAN DIEGO|GUACARA|TOCUYITO|LOS GUAYOS|PARAPARAL|PUERTO CABELLO|LIBERTADOR|ARAGUA|MARACAY|TURMERO|CAGUA|LA VICTORIA|LA BARRACA|DISTRITO CAPITAL|CARACAS|MIRANDA|LA GUAIRA|EL PARAISO|MONTALBAN|PLAZA VENEZUELA|COJEDES|GUARICO)\b/.test(
+    /\b(CENTRO|VALENCIA|CARABOBO|NAGUANAGUA|SAN DIEGO|GUACARA|TOCUYITO|LOS GUAYOS|PARAPARAL|PUERTO CABELLO|MARIARA|BEJUMA|MORON|LIBERTADOR|ARAGUA|MARACAY|EL SAMAN|SAMAN|TURMERO|CAGUA|LA VICTORIA|VILLA DE CURA|SANTA CRUZ|PALO NEGRO|EL LIMON|LA BARRACA|DISTRITO CAPITAL|CARACAS|MIRANDA|LA GUAIRA|VARGAS|EL PARAISO|MONTALBAN|PLAZA VENEZUELA|COJEDES|SAN CARLOS|TINAQUILLO|GUARICO)\b/.test(
       norm
     )
   ) {
@@ -636,3 +636,112 @@ export function filterRowsByActiveRegion<T extends RegionalRowLike>(
     matchesActiveRegionalProfile(row, activeSucursal, activeRegionId, regionesById)
   );
 }
+
+// =============================================================================
+// 4. DOMINIO MULTISEDE ESTRICTO ('CENTRO' vs 'OCCIDENTE')
+// =============================================================================
+
+export const CANONICAL_SUCURSALES = ['CENTRO', 'OCCIDENTE'] as const;
+export type CanonicalSucursal = (typeof CANONICAL_SUCURSALES)[number];
+
+export function isCanonicalSucursal(raw: unknown): raw is CanonicalSucursal {
+  return raw === 'CENTRO' || raw === 'OCCIDENTE';
+}
+
+/**
+ * Normaliza un código de sucursal o región directamente al espacio binario estricto
+ * `'CENTRO'` | `'OCCIDENTE'` (consolida Carabobo, Aragua, Capital y Andes en `'CENTRO'`,
+ * y Zulia / Falcón / eje occidental en `'OCCIDENTE'`).
+ */
+export function normalizeCanonicalSucursal(raw: unknown): CanonicalSucursal | null {
+  const clean = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  if (!clean) return null;
+  if (clean === 'GLOBAL' || clean === 'ALL' || clean === 'TODAS' || clean === 'NACIONAL') {
+    return null;
+  }
+  if (
+    clean === 'CENTRO' ||
+    clean === 'SUCURSAL CENTRO' ||
+    clean === 'VALENCIA' ||
+    clean === 'CAPITAL' ||
+    clean === 'ANDES' ||
+    clean === 'CARABOBO' ||
+    clean === 'ARAGUA' ||
+    clean === 'MARACAY' ||
+    clean === 'SAN DIEGO' ||
+    clean === 'NAGUANAGUA' ||
+    clean === 'EL SAMAN' ||
+    clean === 'TURMERO'
+  ) {
+    return 'CENTRO';
+  }
+  if (
+    clean === 'OCCIDENTE' ||
+    clean === 'SUCURSAL OCCIDENTE' ||
+    clean === 'ZULIA' ||
+    clean === 'FALCON' ||
+    clean === 'MARACAIBO'
+  ) {
+    return 'OCCIDENTE';
+  }
+
+  const fromRegion = normalizeRegionName(clean);
+  if (fromRegion === 'CENTRO' || fromRegion === 'ANDES') return 'CENTRO';
+  if (fromRegion === 'OCCIDENTE') return 'OCCIDENTE';
+  return null;
+}
+
+/**
+ * Infiere de forma determinista y fail-closed la sucursal canónica (`'CENTRO'` | `'OCCIDENTE'`)
+ * a partir de textos libres (nombre de tienda Makro/PDV, ruta, ciudad, municipio, dirección).
+ * Retorna `null` si el texto es ambiguo (jamás asume `'OCCIDENTE'` por omisión).
+ */
+export function inferCanonicalSucursalFromText(rawText: unknown): CanonicalSucursal | null {
+  const direct = normalizeCanonicalSucursal(rawText);
+  if (direct) return direct;
+
+  const norm = String(rawText ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!norm) return null;
+
+  // Prioridad explícita para tiendas Makro y municipios de Carabobo / Aragua / Centro
+  if (
+    /\bmakro\s+(san diego|naguanagua|el saman|saman|turmero|maracay|valencia|la urbina|la yaguara|guarenas|charallave)\b/.test(
+      norm
+    ) ||
+    /\b(san diego|naguanagua|el saman|saman maracay|turmero|maracay|aragua|carabobo|valencia|guacara|tocuyito|los guayos|paraparal|puerto cabello|mariara|bejuma|moron|cagua|la victoria|villa de cura|santa cruz|palo negro|el limon|cojedes|san carlos|tinaquillo|guarico|caracas|distrito capital|miranda|la guaira|vargas|tachira|san cristobal|merida|barinas|el vigia|andes)\b/.test(
+      norm
+    )
+  ) {
+    return 'CENTRO';
+  }
+
+  if (
+    /\bmakro\s+(maracaibo|limpia|punto fijo|barquisimeto|cabimas)\b/.test(norm) ||
+    /\b(occidente|zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|la villa|mara|mojan|santa rita|costa oriental|cuatricentenario|varillal|la limpia|falcon|coro|punto fijo|paraguana|trujillo|valera|bocono|lara|barquisimeto|cabudare|carora)\b/.test(
+      norm
+    )
+  ) {
+    return 'OCCIDENTE';
+  }
+
+  return null;
+}
+
+export function formatCanonicalSucursalBadge(
+  sucursal: CanonicalSucursal | string | null | undefined
+): 'SUCURSAL CENTRO' | 'SUCURSAL OCCIDENTE' | null {
+  const norm = normalizeCanonicalSucursal(sucursal);
+  if (norm === 'CENTRO') return 'SUCURSAL CENTRO';
+  if (norm === 'OCCIDENTE') return 'SUCURSAL OCCIDENTE';
+  return null;
+}
+

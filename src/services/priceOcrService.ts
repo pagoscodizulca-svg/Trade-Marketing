@@ -36,14 +36,42 @@ export async function scanShelfPriceTagWithAi(file: File | Blob): Promise<PriceO
     throw new Error('Debes iniciar sesión para usar la lectura asistida con IA.');
   }
 
-  const resp = await fetch('/api/precios/ocr-hablador', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': mime,
-    },
-    body: file,
-  });
+  const OCR_TIMEOUT_MS = 60_000;
+  let resp: Response | null = null;
+  let lastNetworkErr: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OCR_TIMEOUT_MS);
+    try {
+      resp = await fetch('/api/precios/ocr-hablador', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': mime,
+        },
+        body: file,
+        signal: controller.signal,
+      });
+      if (resp.status !== 502 && resp.status !== 503 && resp.status !== 504 && resp.status !== 408) {
+        break;
+      }
+    } catch (err) {
+      lastNetworkErr = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  if (!resp) {
+    throw new Error(
+      lastNetworkErr instanceof Error && lastNetworkErr.name === 'AbortError'
+        ? 'Tiempo de espera agotado al analizar el hablador. Ingresa el precio manualmente o intenta nuevamente.'
+        : 'Error de red al analizar el hablador con IA. Verifica tu conexión e intenta nuevamente.'
+    );
+  }
 
   const payload = (await resp.json().catch(() => ({}))) as {
     ok?: boolean;

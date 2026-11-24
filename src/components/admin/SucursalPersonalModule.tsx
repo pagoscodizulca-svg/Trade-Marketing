@@ -412,13 +412,25 @@ export const SucursalPersonalModule: React.FC<SucursalPersonalModuleProps> = ({
           .join(' ');
       };
 
-      const resolveRegionPerfil = (p: (typeof allPromotoras)[number]): 'Occidente' | 'Valencia' =>
-        p.region === 'Valencia' ||
-        String(p.metadata?.region_perfil || '').toLowerCase() === 'valencia' ||
-        p.sucursal === 'VALENCIA' ||
-        p.sucursal === 'CENTRO'
-          ? 'Valencia'
-          : 'Occidente';
+      const resolveRegionPerfil = (p: (typeof allPromotoras)[number]): 'Occidente' | 'Valencia' => {
+        const regUpper = String(p.region || p.metadata?.region_codigo || p.metadata?.region_perfil || '')
+          .trim()
+          .toUpperCase();
+        const addrText = `${p.ciudad || ''} ${p.estado || ''} ${p.direccion || ''}`;
+        if (
+          regUpper === 'VALENCIA' ||
+          regUpper === 'CENTRO' ||
+          regUpper === 'ANDES' ||
+          p.sucursal === 'VALENCIA' ||
+          p.sucursal === 'CENTRO' ||
+          /san diego|naguanagua|el saman|el samán|guacara|cagua|mariara|tocuyito|los guayos|valencia|carabobo|maracay|turmero|aragua|caracas|miranda|andes|merida|mérida|tachira|táchira|centro/i.test(
+            addrText
+          )
+        ) {
+          return 'Valencia';
+        }
+        return 'Occidente';
+      };
 
       const occCount = allPromotoras.filter((p) => resolveRegionPerfil(p) === 'Occidente').length;
       const valCount = allPromotoras.filter((p) => resolveRegionPerfil(p) === 'Valencia').length;

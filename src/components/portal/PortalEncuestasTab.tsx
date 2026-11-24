@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ClipboardList, Loader2 } from 'lucide-react';
 import {
   createPortalConsumerSurvey,
+  generateClientSubmissionId,
   savePortalActiveStore,
   type PortalClientOption,
   type PortalProductOption,
@@ -40,6 +41,8 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
   const [comments, setComments] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const clientSubmissionIdRef = useRef<string>(generateClientSubmissionId());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
 
@@ -51,7 +54,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
 
     if (!activeStore.trim()) {
@@ -63,6 +66,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       await createPortalConsumerSurvey({
@@ -76,6 +80,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
         relacionCalidadPrecio,
         recomendacion,
         comments,
+        clientSubmissionId: clientSubmissionIdRef.current,
       });
       setSubmittedSuccess(true);
       onNotify(`Encuesta de degustación sincronizada (${selectedProduct.trim()})`);
@@ -84,6 +89,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
         err instanceof Error ? err.message : 'No se pudo enviar la encuesta al servidor.'
       );
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -115,6 +121,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
           <button
             type="button"
             onClick={() => {
+              clientSubmissionIdRef.current = generateClientSubmissionId();
               setComments('');
               setSubmittedSuccess(false);
             }}

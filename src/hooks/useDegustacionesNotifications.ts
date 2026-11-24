@@ -6,6 +6,7 @@ import {
   fetchUnreadDegustacionNotifications,
   markAllSupabaseDegustacionesAsRead,
   markSupabaseDegustacionAsRead,
+  matchesAssignedRegionsForExternalFdvRow,
   normalizeCanonicalDegustacionId,
   parseDegustacionNotificationRow,
   RawSupabaseSurvey,
@@ -17,6 +18,8 @@ export interface UseDegustacionesNotificationsOptions {
   pollIntervalMs?: number;
   /** Cooldown mínimo entre refrescos de foco/visibilidad para evitar tormentas de requests. */
   resyncCooldownMs?: number;
+  /** Sucursal(es) autorizadas de la sesión activa ('CENTRO' | 'OCCIDENTE') para aislamiento estricto */
+  assignedRegions?: readonly string[] | null;
 }
 
 export interface UseDegustacionesNotificationsResult {
@@ -256,6 +259,9 @@ export function useDegustacionesNotifications(
   onRealtimeChangeRef.current = options?.onRealtimeChange;
   const pollIntervalMs = options?.pollIntervalMs ?? NOTIFICATIONS_POLL_INTERVAL_MS;
   const resyncCooldownMs = options?.resyncCooldownMs ?? FOCUS_RESYNC_THROTTLE_MS;
+  const assignedRegionsRef = useRef<readonly string[] | null>(options?.assignedRegions ?? null);
+  assignedRegionsRef.current = options?.assignedRegions ?? null;
+  const assignedRegionsKey = options?.assignedRegions?.join('|') ?? '__ALL__';
 
   const [unreadItems, setUnreadItems] = useState<DegustacionNotificationItem[]>([]);
   const [isLoadingNotifications, setIsLoadingNotifications] = useState<boolean>(true);
@@ -335,6 +341,9 @@ export function useDegustacionesNotifications(
   const handleIncomingInsertRow = useCallback(
     (rawRow: Partial<RawSupabaseSurvey> | null | undefined, shouldNotifyToast: boolean) => {
       if (!isMountedRef.current) return;
+      if (!matchesAssignedRegionsForExternalFdvRow(rawRow, assignedRegionsRef.current)) {
+        return;
+      }
       const parsed = parseDegustacionNotificationRow(rawRow);
       if (!parsed) return;
       if (parsed.leidoTrade) {
@@ -391,6 +400,9 @@ export function useDegustacionesNotifications(
   const handleIncomingUpdateRow = useCallback(
     (rawRow: Partial<RawSupabaseSurvey> | null | undefined) => {
       if (!isMountedRef.current || !rawRow || !rawRow.id) return;
+      if (!matchesAssignedRegionsForExternalFdvRow(rawRow, assignedRegionsRef.current)) {
+        return;
+      }
       const parsed = parseDegustacionNotificationRow(rawRow);
       const canonicalDegKey = parsed
         ? normalizeCanonicalDegustacionId(parsed.degustacionId, parsed.id)
@@ -441,7 +453,10 @@ export function useDegustacionesNotifications(
         setIsLoadingNotifications(true);
       }
       try {
-        const freshUnread = await fetchUnreadDegustacionNotifications({ signal });
+        const freshUnread = await fetchUnreadDegustacionNotifications({
+          signal,
+          assignedRegions: assignedRegionsRef.current,
+        });
         if (!isMountedRef.current || signal?.aborted) return;
         setSyncError(null);
 
@@ -494,6 +509,21 @@ export function useDegustacionesNotifications(
     },
     [enqueueToastForItem, triggerArrivalPulse]
   );
+
+  // Limpiar estado en memoria al cambiar de cuenta o de sucursal activa
+  useEffect(() => {
+    hasCompletedInitialLoadRef.current = false;
+    baselineSeenIdsRef.current.clear();
+    emittedToastIdsRef.current.clear();
+    setUnreadItems([]);
+    setActiveToasts([]);
+    if (pollingControllerRef.current) {
+      void pollingControllerRef.current.triggerSync({
+        forceImmediate: true,
+        isBackgroundDelta: false,
+      });
+    }
+  }, [assignedRegionsKey]);
 
   // Suscripción Realtime (INSERT, UPDATE, DELETE) + polling inteligente con Page Visibility API + AbortController
   useEffect(() => {

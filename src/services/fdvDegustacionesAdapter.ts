@@ -3,6 +3,7 @@ import type { DegustacionResultadoReport, ShiftType } from '../types';
 import { normalizeExcelDate } from '../utils/excelDateNormalizer';
 import { isDangerousObjectKey } from '../utils/excelDateParser';
 import { assertSupabaseConfigured, getSupabaseRealtimeClient } from './supabaseClient';
+import { registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
 import type { RawSupabaseSurvey } from './supabaseModule1';
 
 /**
@@ -118,7 +119,7 @@ export function resetFdvSchemaCapabilitiesCache(): void {
 export function isMissingColumnPostgrestError(errorOrMessage: unknown): boolean {
   if (!errorOrMessage) return false;
   const pattern =
-    /leido_trade|visto_en_trade_at|en_historial|archivado_en|motivo_archivo|PGRST204|42703/i;
+    /leido_trade|visto_en_trade_at|en_historial|archivado_en|motivo_archivo|sucursal|region|PGRST204|42703/i;
   if (typeof errorOrMessage === 'string') {
     return pattern.test(errorOrMessage);
   }
@@ -738,7 +739,7 @@ export function mergeSupabaseAndRenderDegustacionRows(
 // ============================================================================
 
 const SURVEYS_COLUMNS_WITH_ARCHIVE =
-  'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at,en_historial,archivado_en,motivo_archivo';
+  'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at,en_historial,archivado_en,motivo_archivo,sucursal,region';
 const SURVEYS_COLUMNS_WITH_READ =
   'id,type,date,store,promoter,product,rating,intent,purchase,email,competitor,comments,creatorId,created_at,leido_trade,visto_en_trade_at';
 const SURVEYS_COLUMNS_BASE =
@@ -902,6 +903,15 @@ let inFlightRenderGetPromise: Promise<RawSupabaseSurvey[]> | null = null;
 let lastRenderCacheAt = 0;
 let lastRenderCachedRows: RawSupabaseSurvey[] = [];
 const RENDER_CACHE_TTL_MS = 12_000;
+
+export function clearFdvRenderAdapterCache(): void {
+  inFlightRenderGetPromise = null;
+  lastRenderCacheAt = 0;
+  lastRenderCachedRows = [];
+  resetFdvSchemaCapabilitiesCache();
+}
+
+registerMemoryCachePurgeCallback(clearFdvRenderAdapterCache);
 
 export async function fetchFdvPlanificadorRenderDegustaciones(options?: {
   endpointUrl?: string;

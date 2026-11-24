@@ -4,10 +4,41 @@ import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient';
 import { fetchLiveBcvRate } from './supabaseModule1';
 
 let cachedBcvSnapshot: { snapshot: BcvRateSnapshot; expiresAtMs: number } | null = null;
+let tasasBcvTableUnavailable = false;
 const CLIENT_BCV_CACHE_TTL_MS = 5 * 60 * 1000;
+const BCV_API_TIMEOUT_MS = 60_000;
 
 export function clearBcvRateCache(): void {
   cachedBcvSnapshot = null;
+}
+
+async function fetchBcvApiWithColdStartRetry(url: string, token: string): Promise<Response | null> {
+  const backoffMs = [0, 1500];
+  for (let attempt = 0; attempt < backoffMs.length; attempt++) {
+    if (backoffMs[attempt] > 0) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BCV_API_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+        signal: controller.signal,
+      });
+      if (resp.ok || (resp.status < 500 && resp.status !== 408)) {
+        return resp;
+      }
+    } catch {
+      // Reintenta una vez ante arranque en frío o microcorte de red
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
 }
 
 async function getAccessToken(): Promise<string | null> {
@@ -37,14 +68,8 @@ export async function fetchOfficialBcvRate(options?: {
   if (token) {
     try {
       const qs = forceRefresh ? '?refresh=true' : '';
-      const resp = await fetch(`/api/tasa-bcv${qs}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      });
-      if (resp.ok) {
+      const resp = await fetchBcvApiWithColdStartRetry(`/api/tasa-bcv${qs}`, token);
+      if (resp && resp.ok) {
         const body = (await resp.json()) as {
           ok?: boolean;
           fecha?: string;
@@ -76,14 +101,22 @@ export async function fetchOfficialBcvRate(options?: {
   }
 
   // Respaldo 1: leer última fila directamente desde `public.tasas_bcv` bajo RLS (solo lectura authenticated)
-  if (isSupabaseConfigured) {
+  if (isSupabaseConfigured && !tasasBcvTableUnavailable) {
     try {
       const { data, error } = await getSupabaseClient()
         .from('tasas_bcv')
         .select('fecha, tasa_usd_ves, fuente, fetched_at')
         .order('fecha', { ascending: false })
         .limit(1);
-      if (!error && Array.isArray(data) && data.length > 0) {
+      if (error) {
+        if (
+          error.code === 'PGRST205' ||
+          error.code === '42P01' ||
+          /could not find the table|does not exist/i.test(String(error.message || ''))
+        ) {
+          tasasBcvTableUnavailable = true;
+        }
+      } else if (Array.isArray(data) && data.length > 0) {
         const row = data[0] as Record<string, unknown>;
         if (isReasonableBcvRate(row.tasa_usd_ves)) {
           const today = getCaracasIsoDate();

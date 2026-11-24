@@ -67,18 +67,33 @@ export function buildApiOriginGuard(options: {
 }): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers.origin;
-    if (typeof origin === 'string' && !isOriginAllowed(origin, options.allowedOrigins, options.isProduction)) {
-      // mismo origen (el navegador envía Origin en POST same-origin): se acepta si coincide con Host
-      let sameHost = false;
+    let sameHost = false;
+    if (typeof origin === 'string') {
       try {
         sameHost = new URL(origin).host === req.headers.host;
       } catch {
         sameHost = false;
       }
-      if (!sameHost) {
+      if (!isOriginAllowed(origin, options.allowedOrigins, options.isProduction) && !sameHost) {
         res.status(403).json({ error: 'Origen no autorizado.', code: 'ORIGIN_NOT_ALLOWED' });
         return;
       }
+    }
+
+    // Responder 204 limpio a preflights OPTIONS same-host/autorizados para evitar caída a 404
+    if (req.method === 'OPTIONS') {
+      if (typeof origin === 'string' && (sameHost || isOriginAllowed(origin, options.allowedOrigins, options.isProduction))) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+        res.setHeader(
+          'Access-Control-Allow-Headers',
+          'Authorization,Content-Type,x-asistencia-meta,x-incidencia-meta,x-factura-meta,x-sucursal-activa,x-cron-secret,x-shift-token,x-webhook-token'
+        );
+        res.setHeader('Access-Control-Max-Age', '600');
+      }
+      res.status(204).end();
+      return;
     }
     next();
   };

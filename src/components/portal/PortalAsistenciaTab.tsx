@@ -95,6 +95,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
 
   // Envío
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [savedSummary, setSavedSummary] = useState<{
     slot: SlotFotoAsistencia;
@@ -260,7 +261,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
   };
 
   const handleSubmitAttendance = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setSubmitError(null);
 
     if (!activeStore.trim()) {
@@ -276,6 +277,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       const result = await submitPortalAttendanceEvidence({
@@ -306,6 +308,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
         err instanceof Error ? err.message : 'No se pudo certificar la asistencia en Supabase.'
       );
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };

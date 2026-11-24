@@ -18,6 +18,10 @@ import {
   SUCURSAL_LABELS,
   type OperativeSucursal,
 } from '../../services/userManagementService';
+import {
+  formatCanonicalSucursalBadge,
+  inferCanonicalSucursalFromText,
+} from '../../utils/regionalSyncClassifier';
 import type { TastingScheduleItem } from '../field/FieldPromotoraView';
 
 interface GlobalExportPdfModalProps {
@@ -66,54 +70,63 @@ export const GlobalExportPdfModal: React.FC<GlobalExportPdfModalProps> = ({
   const module1Bundle = app?.module1Bundle ?? null;
   const currentUserName = app?.currentUser?.name || 'Torre de Control CODIZULCA';
 
+  const activeCanonicalSucursal = app?.activeCanonicalSucursal ?? null;
   const effectiveSucursal =
     (app as unknown as { activeSucursal?: OperativeSucursal | null } | null)?.activeSucursal ??
     app?.verifiedSucursal ??
     'GLOBAL';
-  const regionLabel = SUCURSAL_LABELS[effectiveSucursal] ?? String(effectiveSucursal);
+  const regionLabel =
+    formatCanonicalSucursalBadge(activeCanonicalSucursal) ??
+    SUCURSAL_LABELS[effectiveSucursal] ??
+    String(effectiveSucursal);
   const todayIso = new Date().toISOString().slice(0, 10);
-  const sucursalSlug = String(effectiveSucursal).toLowerCase();
+  const sucursalSlug = String(activeCanonicalSucursal ?? effectiveSucursal).toLowerCase();
 
   const buildModule1TastingItems = (): TastingScheduleItem[] => {
-    if (module1Bundle?.tastingItems && module1Bundle.tastingItems.length > 0) {
-      return module1Bundle.tastingItems.map((t) => ({
-        id: t.id,
-        date: t.date,
-        timeRange: t.timeRange,
-        activityTitle: t.activityTitle,
-        productName: t.productName,
-        responsibleName: t.responsibleName,
-        storeName: t.storeName,
-        zone: t.zone,
-        status: t.status,
-        currentSamples: t.currentSamples,
-        targetSamples: t.targetSamples,
-        acceptancePercent: t.acceptancePercent,
-        sellerApplicant: t.sellerApplicant,
-        isArchived: t.isArchived,
-      }));
-    }
+    const rawItems: TastingScheduleItem[] =
+      module1Bundle?.tastingItems && module1Bundle.tastingItems.length > 0
+        ? module1Bundle.tastingItems.map((t) => ({
+            id: t.id,
+            date: t.date,
+            timeRange: t.timeRange,
+            activityTitle: t.activityTitle,
+            productName: t.productName,
+            responsibleName: t.responsibleName,
+            storeName: t.storeName,
+            zone: t.zone,
+            status: t.status,
+            currentSamples: t.currentSamples,
+            targetSamples: t.targetSamples,
+            acceptancePercent: t.acceptancePercent,
+            sellerApplicant: t.sellerApplicant,
+            isArchived: t.isArchived,
+          }))
+        : visits.map((v) => ({
+            id: v.id,
+            date: v.date,
+            timeRange: v.shift === 'MAÑANA' ? '08:00 - 13:00' : '13:00 - 18:00',
+            activityTitle: `Activación en ${v.storeName}`,
+            productName: v.fillProductSelection || v.productFocus || 'Degustación',
+            responsibleName: v.promotoraName,
+            storeName: v.storeName,
+            zone: v.zone || regionLabel,
+            status: (v.status === 'COMPLETADA'
+              ? 'COMPLETADO'
+              : v.status === 'EN_CURSO'
+                ? 'EN_CURSO'
+                : 'PROGRAMADO') as 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO',
+            currentSamples: 0,
+            targetSamples: 0,
+            acceptancePercent: undefined,
+            sellerApplicant: v.sellerName || 'SIN VENDEDOR',
+            isArchived: false,
+          }));
 
-    return visits.map((v) => ({
-      id: v.id,
-      date: v.date,
-      timeRange: v.shift === 'MAÑANA' ? '08:00 - 13:00' : '13:00 - 18:00',
-      activityTitle: `Activación en ${v.storeName}`,
-      productName: v.fillProductSelection || v.productFocus || 'Degustación',
-      responsibleName: v.promotoraName,
-      storeName: v.storeName,
-      zone: v.zone || regionLabel,
-      status: (v.status === 'COMPLETADA'
-        ? 'COMPLETADO'
-        : v.status === 'EN_CURSO'
-          ? 'EN_CURSO'
-          : 'PROGRAMADO') as 'PENDIENTE' | 'PROGRAMADO' | 'EN_CURSO' | 'COMPLETADO',
-      currentSamples: 0,
-      targetSamples: 0,
-      acceptancePercent: undefined,
-      sellerApplicant: v.sellerName || 'SIN VENDEDOR',
-      isArchived: false,
-    }));
+    if (!activeCanonicalSucursal) return rawItems;
+    return rawItems.filter((item) => {
+      const inferred = inferCanonicalSucursalFromText(`${item.storeName ?? ''} ${item.zone ?? ''}`);
+      return !inferred || inferred === activeCanonicalSucursal;
+    });
   };
 
   // Module 1: Promotoras y FDV

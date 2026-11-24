@@ -22,6 +22,10 @@ import {
 } from '../utils/caracasWeekCycle';
 import { assertCanMutateTastingByWeekCycle } from './degustacionesWeeklyCycleService';
 import {
+  inferCanonicalSucursalFromText,
+  normalizeCanonicalSucursal,
+} from '../utils/regionalSyncClassifier';
+import {
   SUPABASE_ANON_KEY as CLIENT_SUPABASE_ANON_KEY,
   SUPABASE_REST_URL as CLIENT_SUPABASE_REST_URL,
   assertSupabaseConfigured,
@@ -141,6 +145,29 @@ export async function fetchWithProgressiveRetry(
     : new Error('Fallo de conexión tras agotar los reintentos automáticos con Supabase.');
 }
 
+const missingLegacyModule1Tables = new Set<string>();
+
+async function supabaseGetOptionalLegacyTable<T>(
+  tableName: 'staff' | 'checkins',
+  pathAndQuery: string
+): Promise<T[]> {
+  if (missingLegacyModule1Tables.has(tableName)) {
+    return [];
+  }
+  try {
+    return await supabaseGet<T[]>(pathAndQuery);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? '');
+    if (
+      msg.includes('(404)') ||
+      isMissingTablePostgrestError('', msg)
+    ) {
+      missingLegacyModule1Tables.add(tableName);
+    }
+    return [];
+  }
+}
+
 async function supabaseGet<T>(pathAndQuery: string): Promise<T> {
   const res = await fetchWithProgressiveRetry(`${SUPABASE_REST_URL}/${pathAndQuery}`, {
     method: 'GET',
@@ -258,6 +285,8 @@ export interface RawSupabaseSurvey {
   en_historial?: boolean | null;
   archivado_en?: string | null;
   motivo_archivo?: string | null;
+  sucursal?: string | null;
+  region?: string | null;
 }
 
 // ============================================================================
@@ -496,7 +525,38 @@ export function getTodayVeYmd(): string {
   return extractCaracasWallClockParts().ymd;
 }
 
+/**
+ * Convierte un timestamp ISO con hora/zona (`YYYY-MM-DDTHH:mm...`) a su fecha calendario
+ * exacta en Venezuela (`America/Caracas`, `UTC-4`), evitando desfases a `D+1` tras las 8:00 p. m. VE.
+ */
+function extractCaracasYmdIfIsoTimestamp(dateStr: string | undefined | null): string | null {
+  const raw = String(dateStr ?? '').trim();
+  if (!raw || !/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/.test(raw)) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Caracas',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(parsed);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // Respaldo aritmético permanente UTC-4 para Venezuela
+    const shifted = new Date(parsed.getTime() - 4 * 60 * 60 * 1000);
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}`;
+  }
+  return null;
+}
+
 function formatDateYmd(dateStr: string | undefined | null): string {
+  const caracasYmd = extractCaracasYmdIfIsoTimestamp(dateStr);
+  if (caracasYmd) return caracasYmd;
   return normalizeFdvCalendarDateYmd(dateStr);
 }
 
@@ -870,7 +930,8 @@ export function toSortableTimestamp(dateVal?: string | null, createdAtVal?: stri
 
 function formatDateFromField(dateIso?: string | null): string {
   if (!dateIso) return formatToDdMmYyyy(getTodayVeYmd());
-  const normalized = formatToDdMmYyyy(dateIso);
+  const caracasYmd = extractCaracasYmdIfIsoTimestamp(dateIso);
+  const normalized = formatToDdMmYyyy(caracasYmd ?? dateIso);
   return normalized || '-- -- ----';
 }
 
@@ -1100,10 +1161,11 @@ async function fetchAsistenciaEvidenciasSafe(): Promise<{
   }
 }
 
-function matchesAssignedRegionsForExternalFdvRow(
-  row: RawSupabaseSurvey,
+export function matchesAssignedRegionsForExternalFdvRow(
+  row: Partial<RawSupabaseSurvey> | null | undefined,
   assignedRegions?: readonly string[] | null
 ): boolean {
+  if (!row) return false;
   if (!assignedRegions || assignedRegions.length === 0) return true;
   const allowedNorm = new Set(
     assignedRegions
@@ -1114,50 +1176,72 @@ function matchesAssignedRegionsForExternalFdvRow(
           .trim()
           .toUpperCase()
       )
-      .map((token) => (token === 'VALENCIA' || token === 'CAPITAL' ? 'CENTRO' : token === 'ZULIA' ? 'OCCIDENTE' : token))
+      .map((token) =>
+        token === 'VALENCIA' || token === 'CAPITAL' || token === 'SUCURSAL CENTRO'
+          ? 'CENTRO'
+          : token === 'ZULIA' || token === 'SUCURSAL OCCIDENTE'
+            ? 'OCCIDENTE'
+            : token
+      )
       .filter(Boolean)
   );
   if (allowedNorm.size === 0) return true;
 
   const parsed = safeParseJson<Record<string, unknown>>(row.comments);
-  const rawTokens = [
-    (row as unknown as Record<string, unknown>).region,
-    (row as unknown as Record<string, unknown>).sucursal,
-    parsed.region,
-    parsed.sucursal,
-    parsed.sede,
+
+  // 1) Si el texto de tienda/ruta/zona/comentarios identifica explícitamente Carabobo/Aragua/Centro
+  //    (ej. Makro San Diego, Naguanagua, El Samán Maracay, Turmero Maracay), prevalece sobre un legado 'ZULIA'
+  const geoRawText = [
+    row.store,
+    parsed.client,
+    parsed.store,
     parsed.estado,
     parsed.ciudad,
     parsed.zona,
     parsed.route,
     parsed.ruta,
-    row.store,
+    parsed.sede,
+    parsed.sucursal,
+    parsed.region,
+    row.region,
   ]
     .map((v) => String(v ?? '').trim())
     .filter(Boolean)
-    .join(' ')
+    .join(' ');
+
+  const normGeoTokens = geoRawText
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-  const isExplicitCentro =
-    /\b(valencia|carabobo|tocuyito|los guayos|naguanagua|san diego|guacara|maracay|turmero|aragua|caracas|distrito capital|miranda|centro)\b/.test(
-      rawTokens
-    );
   const isExplicitAndes =
-    /\b(andes|tachira|san cristobal|merida|barinas|el vigia)\b/.test(rawTokens);
-  const isExplicitOccidente =
-    /\b(occidente|zulia|maracaibo|san francisco|cabimas|coro|punto fijo|falcon|trujillo|valera|la villa|mara|ciudad ojeda|lagunillas)\b/.test(
-      rawTokens
-    );
+    /\b(andes|tachira|san cristobal|merida|barinas|el vigia)\b/.test(normGeoTokens);
+  const inferredFromGeo = inferCanonicalSucursalFromText(geoRawText);
+  const explicitRowSucursal = normalizeCanonicalSucursal(row.sucursal ?? row.region ?? parsed.sucursal ?? parsed.region);
 
-  if (isExplicitOccidente && !allowedNorm.has('OCCIDENTE')) return false;
-  if (isExplicitCentro && !allowedNorm.has('CENTRO')) return false;
-  if (isExplicitAndes && !allowedNorm.has('ANDES')) return false;
+  const effectiveBranch =
+    inferredFromGeo === 'CENTRO'
+      ? 'CENTRO'
+      : explicitRowSucursal ?? inferredFromGeo;
 
-  // Si el registro externo no tiene etiqueta regional explícita y el usuario NO tiene acceso a Occidente
-  // (ej. María: solo Centro y Andes), aplicar criterio fail-closed para no filtrar degustaciones legacy de Occidente.
-  if (!isExplicitCentro && !isExplicitAndes && !isExplicitOccidente && !allowedNorm.has('OCCIDENTE')) {
+  if (isExplicitAndes) {
+    return allowedNorm.has('ANDES') || allowedNorm.has('CENTRO');
+  }
+  if (effectiveBranch === 'CENTRO') {
+    return allowedNorm.has('CENTRO');
+  }
+  if (effectiveBranch === 'OCCIDENTE') {
+    return allowedNorm.has('OCCIDENTE');
+  }
+
+  // Fail-closed estricto para filas externas de Render sin etiqueta regional verificable:
+  // jamás volcar filas ambiguas en Occidente ni en Centro.
+  if (row.id && isVirtualFdvRenderSurveyId(String(row.id))) {
+    return false;
+  }
+
+  // Para filas de BD aún sin migrar etiqueta explícita, fail-closed si el usuario no es Occidente
+  if (!allowedNorm.has('OCCIDENTE')) {
     return false;
   }
 
@@ -1177,16 +1261,13 @@ export async function fetchAllModule1FromSupabase(
       : options?.assignedRegion
         ? [options.assignedRegion]
         : null;
-  // Sin tasa de respaldo: si no se puede obtener en vivo, es null y los importes en Bs no se calculan.
-  const liveBcvRate: number | null =
-    explicitExchangeRateBs && explicitExchangeRateBs > 50 ? explicitExchangeRateBs : await fetchLiveBcvRate();
-
   const renderReconciliationPromise = fetchFdvPlanificadorRenderDegustaciones({
     endpointUrl: FDV_PLANIFICADOR_RENDER_API_URL,
     timeoutMs: 14000,
   });
 
   const [
+    liveBcvRate,
     rawStaff,
     promotorasMaestrasCatalog,
     rawCheckinsPage1,
@@ -1199,16 +1280,22 @@ export async function fetchAllModule1FromSupabase(
     rawCronogramaRows,
     asistenciaRelationalBundle,
   ] = await Promise.all([
-    supabaseGet<RawSupabaseStaff[]>(
+    explicitExchangeRateBs && explicitExchangeRateBs > 50
+      ? Promise.resolve<number | null>(explicitExchangeRateBs)
+      : fetchLiveBcvRate({ timeoutMs: 3500 }).catch(() => null),
+    supabaseGetOptionalLegacyTable<RawSupabaseStaff>(
+      'staff',
       'staff?select=id,name,role,email,status,creatorId,uploaderEmail,created_at&order=created_at.desc&limit=1000'
-    ).catch(() => [] as RawSupabaseStaff[]),
+    ),
     obtenerPromotorasMaestras({ soloActivas: false }).catch(() => []),
-    supabaseGet<RawSupabaseCheckin[]>(
+    supabaseGetOptionalLegacyTable<RawSupabaseCheckin>(
+      'checkins',
       'checkins?select=id,date,store,type,location,creatorId,promoter,created_at&order=date.desc&limit=1000&offset=0'
-    ).catch(() => [] as RawSupabaseCheckin[]),
-    supabaseGet<RawSupabaseCheckin[]>(
+    ),
+    supabaseGetOptionalLegacyTable<RawSupabaseCheckin>(
+      'checkins',
       'checkins?select=id,date,store,type,location,creatorId,promoter,created_at&order=date.desc&limit=1000&offset=1000'
-    ).catch(() => [] as RawSupabaseCheckin[]),
+    ),
     supabaseGet<RawSupabasePrice[]>('prices?select=*&order=date.desc&limit=1000').catch(
       () => [] as RawSupabasePrice[]
     ),
@@ -1311,8 +1398,8 @@ export async function fetchAllModule1FromSupabase(
       region:
         String(statusObj.address || '').match(/merida|mérida|tachira|táchira|san cristobal|san cristóbal|trujillo|valera|barinas|el vigia|el vigía|andes/i)
           ? 'Andes'
-          : String(statusObj.address || '').match(/valencia|carabobo|maracay|turmero|caracas/i)
-            ? 'Valencia'
+          : String(statusObj.address || '').match(/san diego|naguanagua|el saman|el samán|guacara|cagua|mariara|tocuyito|los guayos|valencia|carabobo|maracay|turmero|aragua|caracas|miranda|centro/i)
+            ? 'Centro'
             : 'Occidente',
       assignedStore: assignedLoc,
       status: 'Activo',
@@ -1367,16 +1454,20 @@ export async function fetchAllModule1FromSupabase(
     const cleanPhone = p.telefono ? String(p.telefono).trim() : '';
     const rawMetaReg = String(p.metadata?.region_codigo || p.metadata?.region_perfil || '').trim().toUpperCase();
     const rawDirectReg = String(p.region || '').trim().toUpperCase();
+    const inferredAddrSucursal = inferCanonicalSucursalFromText(
+      `${p.ciudad || ''} ${p.estado || ''} ${cleanAddress}`
+    );
     const regionLabel: 'Occidente' | 'Valencia' | 'Centro' | 'Andes' =
       rawDirectReg === 'ANDES' || rawMetaReg === 'ANDES'
         ? 'Andes'
-        : rawDirectReg === 'CENTRO'
+        : rawDirectReg === 'CENTRO' ||
+            p.sucursal === 'CENTRO' ||
+            inferredAddrSucursal === 'CENTRO'
           ? 'Centro'
           : rawDirectReg === 'VALENCIA' ||
               rawMetaReg === 'VALENCIA' ||
               rawMetaReg === 'CENTRO' ||
-              p.sucursal === 'VALENCIA' ||
-              p.sucursal === 'CENTRO'
+              p.sucursal === 'VALENCIA'
             ? 'Valencia'
             : 'Occidente';
 
@@ -1401,6 +1492,23 @@ export async function fetchAllModule1FromSupabase(
       activationsCount: 0,
       totalUnits: 0,
     });
+  }
+
+  // Filtrar defensivamente el padrón de personal a la sucursal activa de la sesión
+  if (effectiveAssignedRegions && effectiveAssignedRegions.length > 0) {
+    const allowedStaffBranches = new Set(
+      effectiveAssignedRegions
+        .map((r) => normalizeCanonicalSucursal(r))
+        .filter((v): v is 'CENTRO' | 'OCCIDENTE' => v !== null)
+    );
+    if (allowedStaffBranches.size > 0) {
+      for (let i = staffMembers.length - 1; i >= 0; i -= 1) {
+        const memberBranch = normalizeCanonicalSucursal(staffMembers[i]!.region);
+        if (memberBranch && !allowedStaffBranches.has(memberBranch)) {
+          staffMembers.splice(i, 1);
+        }
+      }
+    }
   }
 
   // Orden: categoría (Plantilla Fija -> Eventual -> Merchandising) y luego nombre. Sin padrón de respaldo: si la tabla está vacía, la lista queda vacía.
@@ -1439,10 +1547,14 @@ export async function fetchAllModule1FromSupabase(
   });
 
   const cleanDegustacionSurveys: RawSupabaseSurvey[] = rawDegustacionRowsFromDb.filter(
-    (r) => !isSyntheticSurveyOrCheckinRow(r)
+    (r) =>
+      !isSyntheticSurveyOrCheckinRow(r) &&
+      matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions)
   );
   const cleanOtherSurveys: RawSupabaseSurvey[] = rawOtherSurveyRowsFromDb.filter(
-    (r) => !isSyntheticSurveyOrCheckinRow(r)
+    (r) =>
+      !isSyntheticSurveyOrCheckinRow(r) &&
+      matchesAssignedRegionsForExternalFdvRow(r, effectiveAssignedRegions)
   );
   const rawSurveys: RawSupabaseSurvey[] = [...cleanDegustacionSurveys, ...cleanOtherSurveys];
 
@@ -2316,10 +2428,22 @@ export async function fetchAllModule1FromSupabase(
     });
 
   // --------------------------------------------------------------------------
-  // 3. COMPARATIVA DE PRECIOS (desde tabla `prices` - SOLO PERSONAL ACTIVO)
+  // 3. COMPARATIVA DE PRECIOS (desde tabla `prices` - PERSONAL ACTIVO + PORTAL)
   // --------------------------------------------------------------------------
+  const priceStaffByIdMap = new Map<string, StaffMemberRecord>();
+  staffMembers.forEach((sm) => {
+    priceStaffByIdMap.set(String(sm.id), sm);
+    if (sm.authUserId) priceStaffByIdMap.set(String(sm.authUserId), sm);
+  });
+
   const cleanRawPrices = [...rawPrices]
-    .filter((row) => !isSyntheticPriceOrInventoryRow(row) && resolveActiveMember(row.promoter, row.creatorId) !== null)
+    .filter((row) => {
+      if (isSyntheticPriceOrInventoryRow(row)) return false;
+      if (resolveActiveMember(row.promoter, row.creatorId) !== null) return true;
+      if (row.promotora_id && priceStaffByIdMap.has(String(row.promotora_id))) return true;
+      if (row.auth_user_id && String(row.promoter || '').trim().length > 0) return true;
+      return false;
+    })
     .sort((a, b) => toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at));
 
   const priceComparisons: PriceComparisonThreeBrands[] = cleanRawPrices.map((p) => {
@@ -2841,8 +2965,11 @@ export async function fetchAllModule1FromSupabase(
       if (s.type !== 'Merchandising') return false;
       const c = safeParseJson<Record<string, any>>(s.comments);
       const member = resolveActiveMember(s.promoter || c.promoter, s.creatorId);
-      // Restringir estrictamente a Promotores de Merchandising activos (ej. JOSE BARROSO y ZIORELI GRANGGER)
-      return Boolean(member && activeMerchByKey.has(member.canonicalKey));
+      if (member && activeMerchByKey.has(member.canonicalKey)) return true;
+      // Aceptar informes autenticados enviados desde el módulo de Merchandising de /portal
+      const authUid = (s as unknown as { auth_user_id?: string | null }).auth_user_id;
+      if (authUid && String(s.promoter || '').trim().length > 0 && c?.mode) return true;
+      return false;
     })
     .sort((a, b) => toSortableTimestamp(b.date, b.created_at) - toSortableTimestamp(a.date, a.created_at))
     .map((m) => {
@@ -3385,8 +3512,10 @@ export function parseDegustacionNotificationRow(
  */
 export async function fetchUnreadDegustacionNotifications(options?: {
   signal?: AbortSignal;
+  assignedRegions?: readonly string[] | null;
 }): Promise<DegustacionNotificationItem[]> {
   const signal = options?.signal;
+  const assignedRegions = options?.assignedRegions ?? null;
   if (signal?.aborted) {
     const abortErr = new Error('Consulta de notificaciones cancelada.');
     abortErr.name = 'AbortError';
@@ -3444,7 +3573,13 @@ export async function fetchUnreadDegustacionNotifications(options?: {
     abortErr.name = 'AbortError';
     throw abortErr;
   }
-  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(allDegustacionRows, renderRows);
+  const scopedDbRows = allDegustacionRows.filter((r) =>
+    matchesAssignedRegionsForExternalFdvRow(r, assignedRegions)
+  );
+  const scopedRenderRows = renderRows.filter((r) =>
+    matchesAssignedRegionsForExternalFdvRow(r, assignedRegions)
+  );
+  const { mergedRows } = mergeSupabaseAndRenderDegustacionRows(scopedDbRows, scopedRenderRows);
 
   // Si alguna fila gemela por el mismo `degustacionId` ya fue marcada como leída, excluir duplicados
   const readCanonicalIdsInBatch = new Set<string>();

@@ -278,30 +278,29 @@ async function fetchAllTablePages<T>(
 
   for (let from = 0; ; from += ERP_PAGE_SIZE) {
     const runPage = async (sel: string, applyOrder: boolean) => {
-      let query = client.from(tableName).select(sel, { count: 'exact' });
+      // Evitamos `{ count: 'exact' }` en cada página para prevenir statement_timeout (57014) bajo RLS;
+      // el conteo exacto se obtiene del total paginado `rows.length`.
+      let query = client.from(tableName).select(sel);
       if (applyOrder && orderBy && typeof query.order === 'function') {
         query = query.order(orderBy, { ascending: true });
       }
       return query.range(from, from + ERP_PAGE_SIZE - 1);
     };
 
-    let { data, error, count } = await runPage(activeSelect, useOrder);
+    let { data, error } = await runPage(activeSelect, useOrder);
 
     if (error && fallbackSelectExpr && activeSelect !== fallbackSelectExpr && isMissingColumnError(error)) {
       activeSelect = fallbackSelectExpr;
-      ({ data, error, count } = await runPage(activeSelect, useOrder));
+      ({ data, error } = await runPage(activeSelect, useOrder));
     }
 
     if (error && useOrder && isMissingColumnError(error)) {
       useOrder = false;
-      ({ data, error, count } = await runPage(activeSelect, false));
+      ({ data, error } = await runPage(activeSelect, false));
     }
 
     if (error) {
       throw classifyServerErpError(error, tableName);
-    }
-    if (typeof count === 'number' && exactCount === null) {
-      exactCount = count;
     }
 
     const page = Array.isArray(data) ? (data as T[]) : [];

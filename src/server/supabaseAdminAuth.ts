@@ -1708,7 +1708,8 @@ export async function requireAttendanceActorAuth(
       return;
     }
 
-    // Resolver `staffId` verificado en `public.staff` para la promotora autenticada
+    // Resolver identidad verificada en `public.promotoras` (padrón oficial de producción)
+    // y respaldo legacy `public.staff` para la promotora autenticada.
     const lookupClient = getAdminSupabaseClient() || createUserScopedSupabaseClient(token);
     if (!lookupClient) {
       res.status(503).json({
@@ -1720,91 +1721,167 @@ export async function requireAttendanceActorAuth(
 
     let resolvedStaffId: string | null = null;
     let resolvedStaffSucursal: ServerSucursalCodigo | null = effective.sucursal;
-    const { data: linkedStaff } = await lookupClient
-      .from('staff')
-      .select('id, role, status, auth_user_id, sucursal')
-      .eq('auth_user_id', data.user.id)
-      .maybeSingle();
 
-    const candidateClaimId =
-      typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id.trim())
-        ? appMeta.staff_id.trim()
-        : effective.staffId && UUID_REGEX.test(effective.staffId)
-          ? effective.staffId
-          : null;
+    // 1. Padrón oficial de producción: `public.promotoras` (vínculo 1:1 por auth_user_id o correo canónico)
+    try {
+      let promRecord: Record<string, unknown> | null = null;
 
-    let staffRecord: Record<string, unknown> | null =
-      linkedStaff && typeof linkedStaff === 'object'
-        ? (linkedStaff as Record<string, unknown>)
-        : null;
-    if (!staffRecord && candidateClaimId) {
-      const { data: claimStaff } = await lookupClient
-        .from('staff')
-        .select('id, role, status, auth_user_id, sucursal')
-        .eq('id', candidateClaimId)
+      const { data: linkedProm, error: linkedPromErr } = await lookupClient
+        .from('promotoras')
+        .select('id, nombre_completo, correo, activo, categoria, region, auth_user_id')
+        .eq('auth_user_id', data.user.id)
         .maybeSingle();
-      if (claimStaff && (!claimStaff.auth_user_id || claimStaff.auth_user_id === data.user.id)) {
-        staffRecord = claimStaff as Record<string, unknown>;
+
+      if (!linkedPromErr && linkedProm && typeof linkedProm === 'object') {
+        promRecord = linkedProm as Record<string, unknown>;
       }
+
+      if (!promRecord && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+        const { data: emailPromRows, error: emailPromErr } = await lookupClient
+          .from('promotoras')
+          .select('id, nombre_completo, correo, activo, categoria, region, auth_user_id')
+          .ilike('correo', `%${canonicalEmail}%`)
+          .limit(10);
+
+        if (!emailPromErr && Array.isArray(emailPromRows)) {
+          const matchedProm = (emailPromRows as Record<string, unknown>[]).find(
+            (r) =>
+              normalizeCanonicalEmail(r.correo) === canonicalEmail &&
+              (!r.auth_user_id || r.auth_user_id === data.user.id)
+          );
+          if (matchedProm) {
+            promRecord = matchedProm;
+          }
+        }
+      }
+
+      if (promRecord && promRecord.id !== undefined && promRecord.id !== null) {
+        const isActive = promRecord.activo !== false;
+        const catLower = String(promRecord.categoria || '').trim().toLowerCase();
+        const isMerch = catLower.includes('merch');
+        if (isActive && !isMerch) {
+          resolvedStaffId = String(promRecord.id).trim();
+          const promRegionRaw = String(promRecord.region || '').trim().toLowerCase();
+          const promSuc: OperativeSucursal | null =
+            promRegionRaw === 'valencia'
+              ? 'VALENCIA'
+              : promRegionRaw === 'centro'
+                ? 'CENTRO'
+                : promRegionRaw === 'occidente' || promRegionRaw === 'zulia'
+                  ? 'ZULIA'
+                  : normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(promRecord));
+          if (promSuc) {
+            resolvedStaffSucursal = resolvedStaffSucursal ?? promSuc;
+          }
+        }
+      }
+    } catch {
+      // Continúa al respaldo legacy `public.staff`
     }
 
-    if (!staffRecord && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+    // 2. Respaldo legacy `public.staff` (tolerante a PGRST205 si la tabla no existe en producción)
+    if (!resolvedStaffId) {
+      let staffRecord: Record<string, unknown> | null = null;
       try {
-        const { data: emailRows } = await lookupClient
+        const { data: linkedStaff, error: linkedStaffErr } = await lookupClient
           .from('staff')
-          .select('*')
-          .ilike('email', `%${canonicalEmail}%`)
-          .limit(10);
-        const list = Array.isArray(emailRows)
-          ? (emailRows as Record<string, unknown>[])
-          : emailRows && typeof emailRows === 'object'
-            ? [emailRows as Record<string, unknown>]
-            : [];
-        const matched = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
-        if (matched && (!matched.auth_user_id || matched.auth_user_id === data.user.id)) {
-          staffRecord = matched;
+          .select('id, role, status, auth_user_id, sucursal')
+          .eq('auth_user_id', data.user.id)
+          .maybeSingle();
+
+        if (!linkedStaffErr && linkedStaff && typeof linkedStaff === 'object') {
+          staffRecord = linkedStaff as Record<string, unknown>;
         }
       } catch {
-        // Respaldo opcional por correo canónico
+        // Ignorar si public.staff no existe
       }
-    }
 
-    if (staffRecord && UUID_REGEX.test(String(staffRecord.id || ''))) {
-      const rowSuc = normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(staffRecord));
-      if (rowSuc) {
-        resolvedStaffSucursal = resolvedStaffSucursal ?? rowSuc;
-      }
-      let memberStatus = 'Activo';
-      let category = '';
-      if (typeof staffRecord.status === 'string' && staffRecord.status.trim().startsWith('{')) {
+      const candidateClaimId =
+        typeof appMeta.staff_id === 'string' && UUID_REGEX.test(appMeta.staff_id.trim())
+          ? appMeta.staff_id.trim()
+          : effective.staffId && UUID_REGEX.test(effective.staffId)
+            ? effective.staffId
+            : null;
+
+      if (!staffRecord && candidateClaimId) {
         try {
-          const parsed = JSON.parse(staffRecord.status) as Record<string, unknown>;
-          memberStatus = String(parsed.status || 'Activo').trim();
-          category = String(parsed.category || '').trim().toLowerCase();
-          if (!resolvedStaffSucursal) {
-            resolvedStaffSucursal =
-              normalizeOperativeServerSucursal(parsed.address) ??
-              normalizeOperativeServerSucursal(parsed.assignedLocation);
+          const { data: claimStaff, error: claimStaffErr } = await lookupClient
+            .from('staff')
+            .select('id, role, status, auth_user_id, sucursal')
+            .eq('id', candidateClaimId)
+            .maybeSingle();
+          if (
+            !claimStaffErr &&
+            claimStaff &&
+            (!claimStaff.auth_user_id || claimStaff.auth_user_id === data.user.id)
+          ) {
+            staffRecord = claimStaff as Record<string, unknown>;
           }
         } catch {
-          // Conservar valores por defecto seguros
+          // Ignorar si public.staff no existe
         }
-      } else if (typeof staffRecord.status === 'string') {
-        memberStatus = staffRecord.status.trim();
       }
-      const roleLower = String(staffRecord.role || '').toLowerCase();
-      if (
-        memberStatus.toLowerCase() !== 'inactivo' &&
-        category !== 'merchandising' &&
-        !roleLower.includes('merchandising')
-      ) {
-        resolvedStaffId = String(staffRecord.id);
+
+      if (!staffRecord && canonicalEmail && STRICT_EMAIL_REGEX.test(canonicalEmail)) {
+        try {
+          const { data: emailRows, error: emailStaffErr } = await lookupClient
+            .from('staff')
+            .select('*')
+            .ilike('email', `%${canonicalEmail}%`)
+            .limit(10);
+          if (!emailStaffErr) {
+            const list = Array.isArray(emailRows)
+              ? (emailRows as Record<string, unknown>[])
+              : emailRows && typeof emailRows === 'object'
+                ? [emailRows as Record<string, unknown>]
+                : [];
+            const matched = list.find((r) => normalizeCanonicalEmail(r.email) === canonicalEmail);
+            if (matched && (!matched.auth_user_id || matched.auth_user_id === data.user.id)) {
+              staffRecord = matched;
+            }
+          }
+        } catch {
+          // Respaldo opcional por correo canónico
+        }
+      }
+
+      if (staffRecord && UUID_REGEX.test(String(staffRecord.id || ''))) {
+        const rowSuc = normalizeOperativeServerSucursal(extractSucursalCandidateFromRecord(staffRecord));
+        if (rowSuc) {
+          resolvedStaffSucursal = resolvedStaffSucursal ?? rowSuc;
+        }
+        let memberStatus = 'Activo';
+        let category = '';
+        if (typeof staffRecord.status === 'string' && staffRecord.status.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(staffRecord.status) as Record<string, unknown>;
+            memberStatus = String(parsed.status || 'Activo').trim();
+            category = String(parsed.category || '').trim().toLowerCase();
+            if (!resolvedStaffSucursal) {
+              resolvedStaffSucursal =
+                normalizeOperativeServerSucursal(parsed.address) ??
+                normalizeOperativeServerSucursal(parsed.assignedLocation);
+            }
+          } catch {
+            // Conservar valores por defecto seguros
+          }
+        } else if (typeof staffRecord.status === 'string') {
+          memberStatus = staffRecord.status.trim();
+        }
+        const roleLower = String(staffRecord.role || '').toLowerCase();
+        if (
+          memberStatus.toLowerCase() !== 'inactivo' &&
+          category !== 'merchandising' &&
+          !roleLower.includes('merchandising')
+        ) {
+          resolvedStaffId = String(staffRecord.id);
+        }
       }
     }
 
     if (!resolvedStaffId) {
       res.status(403).json({
-        error: 'Su cuenta de promotora no posee un registro activo válido en public.staff.',
+        error: 'Su cuenta de promotora no posee un registro activo válido en el padrón oficial.',
         code: 'PROMOTORA_STAFF_UNLINKED',
       });
       return;

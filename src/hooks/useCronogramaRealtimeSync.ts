@@ -71,6 +71,61 @@ export function useCronogramaRealtimeSync({
           scheduleSync();
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'inventory',
+        },
+        () => {
+          scheduleSync();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'prices',
+        },
+        () => {
+          scheduleSync();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'surveys',
+        },
+        () => {
+          scheduleSync();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'asistencias_jornada',
+        },
+        () => {
+          scheduleSync();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'asistencia_evidencias',
+        },
+        () => {
+          scheduleSync();
+        }
+      )
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           setIsRealtimeConnected(true);

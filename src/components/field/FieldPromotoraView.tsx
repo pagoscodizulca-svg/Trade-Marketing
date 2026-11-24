@@ -65,6 +65,8 @@ import {
 } from '../common/Metric360DashboardModal';
 import { AttendanceEvidenceSubTab } from './AttendanceEvidenceSubTab';
 import { PriceComparisonReportSubTab } from './PriceComparisonReportSubTab';
+import { RegionalPdvLinkModal } from '../admin/RegionalPdvLinkModal';
+import { inferCanonicalSucursalFromText } from '../../utils/regionalSyncClassifier';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import { buildDailyPromotoraAttendanceViewModels } from '../../services/attendanceEvidencesService';
 import {
@@ -293,6 +295,8 @@ export const FieldPromotoraView: React.FC = () => {
     assignedRegionCodes,
     isRegionalRestricted,
     canSwitchAmongAssignedRegions,
+    canSwitchSucursal,
+    activeCanonicalSucursal,
     activeRegiones,
     verifiedRegionId,
     isStrictAdmin,
@@ -317,22 +321,12 @@ export const FieldPromotoraView: React.FC = () => {
   const liveClock = useLiveVenezuelaClock();
   const [selectedMetric360, setSelectedMetric360] = useState<Metric360Id | null>(null);
 
-  // María (Centro y Andes, sin Occidente) carga degustaciones exclusivamente de forma manual en Módulo 2
-  const isCentroAndesOnlyCoordinator =
-    isRegionalRestricted &&
-    assignedRegionCodes.length > 0 &&
-    !assignedRegionCodes.includes('OCCIDENTE');
+  // Ambas sucursales ('CENTRO' y 'OCCIDENTE') disponen de su módulo simétrico y 100% aislado de Degustaciones e Historial
+  const isCentroAndesOnlyCoordinator = false;
 
   // Active sub-module tab (Degustaciones | Informes | Merchandising | Personal)
-  const [activeSubTab, setActiveSubTab] = useState<FieldSubTab>(() =>
-    isCentroAndesOnlyCoordinator ? 'informes' : 'degustaciones'
-  );
-
-  useEffect(() => {
-    if (isCentroAndesOnlyCoordinator && activeSubTab === 'degustaciones') {
-      setActiveSubTab('informes');
-    }
-  }, [isCentroAndesOnlyCoordinator, activeSubTab]);
+  const [activeSubTab, setActiveSubTab] = useState<FieldSubTab>('degustaciones');
+  const [isRegionalLinkModalOpen, setIsRegionalLinkModalOpen] = useState<boolean>(false);
 
   // Referencia tipada y estado para desplazamiento suave accesible del botón "Enlaces"
   const linksSectionRef = useRef<HTMLElement | null>(null);
@@ -341,8 +335,7 @@ export const FieldPromotoraView: React.FC = () => {
   const linksHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleScrollToLinksSection = useCallback(() => {
-    setActiveSubTab('personal');
-    setScrollToLinksTrigger((prev) => prev + 1);
+    setIsRegionalLinkModalOpen(true);
   }, []);
 
   useEffect(() => {
@@ -692,8 +685,21 @@ export const FieldPromotoraView: React.FC = () => {
         enHistorial: authState.belongsToHistorial,
       };
     });
-    return [...normalizedLocal, ...synchronizedScheduleItems];
-  }, [localSellerRequests, synchronizedScheduleItems, caracasWeekStartYmd, liveClock.todayYmd]);
+    const combined = [...normalizedLocal, ...synchronizedScheduleItems];
+    if (!activeCanonicalSucursal) return combined;
+    return combined.filter((item) => {
+      const inferred = inferCanonicalSucursalFromText(
+        `${item.storeName ?? ''} ${item.zone ?? ''} ${item.rawComments?.sucursal ?? ''} ${item.rawComments?.region ?? ''}`
+      );
+      return !inferred || inferred === activeCanonicalSucursal;
+    });
+  }, [
+    localSellerRequests,
+    synchronizedScheduleItems,
+    caracasWeekStartYmd,
+    liveClock.todayYmd,
+    activeCanonicalSucursal,
+  ]);
 
   // Partición disjunta determinista (0 duplicados, 0 pérdida) en `America/Caracas`
   const partitionedAllTastings = useMemo(
@@ -1055,6 +1061,7 @@ export const FieldPromotoraView: React.FC = () => {
         targetYearMonth: activeGlobalReportMeta.targetYearMonth,
         filterSummaryLabel: activeGlobalReportMeta.summaryLabel,
         fileSuffix: activeGlobalReportMeta.fileSuffix,
+        activeSucursal: activeCanonicalSucursal,
         scope: 'all',
       });
       setMonthlyPdfSuccess(true);
@@ -1141,12 +1148,14 @@ export const FieldPromotoraView: React.FC = () => {
       filterPredicate: matchesActiveTastingFilters,
       hasActiveFilters: pendingAuthorizationScopeMeta.hasActiveFilters,
       filterSummaryLabel: pendingAuthorizationScopeMeta.filterSummaryLabel,
+      activeSucursal: activeCanonicalSucursal,
     });
     return previewModel.rows.length;
   }, [
     partitionedAllTastings.bandejaEntrada,
     matchesActiveTastingFilters,
     pendingAuthorizationScopeMeta,
+    activeCanonicalSucursal,
   ]);
 
   const handleExportPendingAuthorizationPdf = async () => {
@@ -1163,8 +1172,15 @@ export const FieldPromotoraView: React.FC = () => {
     setIsExportingAuthPdf(true);
 
     try {
-      // 1. Revalidación fresca autenticada 100% SOLO LECTURA (respetando RLS; cero UPDATE/DELETE)
-      const freshBundle = await fetchAllModule1FromSupabase();
+      // 1. Revalidación fresca autenticada 100% SOLO LECTURA acotada estrictamente a la sucursal activa
+      const freshBundle = await fetchAllModule1FromSupabase(undefined, {
+        assignedRegion,
+        assignedRegions: activeCanonicalSucursal
+          ? [activeCanonicalSucursal]
+          : assignedRegionCodes.length > 0
+            ? assignedRegionCodes
+            : null,
+      });
 
       const mergedVisitsMap = new Map<string, ScheduledVisit>();
       (freshBundle.visitsForSchedule || []).forEach((v) => {
@@ -1211,6 +1227,7 @@ export const FieldPromotoraView: React.FC = () => {
         filterSummaryLabel: pendingAuthorizationScopeMeta.filterSummaryLabel,
         issuerName: currentUser?.name || null,
         issuerRole: currentRole || null,
+        activeSucursal: activeCanonicalSucursal,
         now: nowSnapshot,
       });
 
@@ -1838,6 +1855,7 @@ export const FieldPromotoraView: React.FC = () => {
         promotoraEmail,
         observaciones: item.notes,
         insumosCalculados: insumosPayload,
+        sucursal: activeCanonicalSucursal,
       });
 
       upsertVisitFromApprovedTasting({
@@ -2083,20 +2101,23 @@ export const FieldPromotoraView: React.FC = () => {
 
     setServerHistorialState((prev) => ({ ...prev, loading: true }));
 
-    void queryServerPaginatedHistorialSurveys({
-      page: historialPage,
-      pageSize: historialPageSize,
-      dateFrom: tastingDayFilter === 'RANGO' ? tastingDateFrom || undefined : undefined,
-      dateTo: tastingDayFilter === 'RANGO' ? tastingDateTo || undefined : undefined,
-      singleDate: isSingleIsoDate ? tastingDayFilter : undefined,
-      yearMonth: isYearMonth ? tastingDayFilter : undefined,
-      sellerFilter: tastingSellerFilter,
-      promotoraFilter: tastingPromotoraFilter,
-      statusFilter: tastingStatusFilter,
-      shiftFilter: tastingShiftFilter,
-      productFilter: tastingProductFilter,
-      searchQuery: tastingSearchQuery,
-    })
+    void queryServerPaginatedHistorialSurveys(
+      {
+        page: historialPage,
+        pageSize: historialPageSize,
+        dateFrom: tastingDayFilter === 'RANGO' ? tastingDateFrom || undefined : undefined,
+        dateTo: tastingDayFilter === 'RANGO' ? tastingDateTo || undefined : undefined,
+        singleDate: isSingleIsoDate ? tastingDayFilter : undefined,
+        yearMonth: isYearMonth ? tastingDayFilter : undefined,
+        sellerFilter: tastingSellerFilter,
+        promotoraFilter: tastingPromotoraFilter,
+        statusFilter: tastingStatusFilter,
+        shiftFilter: tastingShiftFilter,
+        productFilter: tastingProductFilter,
+        searchQuery: tastingSearchQuery,
+      },
+      { activeSucursal: activeCanonicalSucursal }
+    )
       .then((res) => {
         if (!cancelled) {
           setServerHistorialState({ loading: false, result: res });
@@ -2125,6 +2146,7 @@ export const FieldPromotoraView: React.FC = () => {
     tastingProductFilter,
     tastingSearchQuery,
     caracasWeekStartYmd,
+    activeCanonicalSucursal,
   ]);
 
   // Reconciliación sin duplicados de filas paginadas en servidor con la colección local/cronograma
@@ -5740,7 +5762,7 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Inv. Inicial Total</p>
                   <p className="text-2xl font-bold text-white">
-                    {filteredInventorySampling.reduce((acc, r) => acc + r.initialStock, 0).toFixed(1)}{' '}
+                    {Number(filteredInventorySampling.reduce((acc, r) => acc + r.initialStock, 0).toFixed(2)).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Stock al iniciar la jornada</p>
@@ -5748,7 +5770,7 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Inv. Final Remanente</p>
                   <p className="text-2xl font-bold text-amber-400">
-                    {filteredInventorySampling.reduce((acc, r) => acc + r.finalStock, 0).toFixed(1)}{' '}
+                    {Number(filteredInventorySampling.reduce((acc, r) => acc + r.finalStock, 0).toFixed(2)).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Stock físico al cierre</p>
@@ -5756,14 +5778,14 @@ export const FieldPromotoraView: React.FC = () => {
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Muestras Degustadas</p>
                   <p className="text-2xl font-bold text-purple-400">
-                    {filteredInventorySampling.reduce((acc, r) => acc + r.portionsSampled, 0).toFixed(1)}
+                    {Number(filteredInventorySampling.reduce((acc, r) => acc + r.portionsSampled, 0).toFixed(2)).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Impactos directos a consumidores</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                   <p className="text-xs text-slate-400 uppercase font-semibold mb-1">Resultado (Ventas)</p>
                   <p className="text-2xl font-bold text-emerald-400">
-                    {filteredInventorySampling.reduce((acc, r) => acc + r.salesGenerated, 0).toFixed(1)}{' '}
+                    {Number(filteredInventorySampling.reduce((acc, r) => acc + r.salesGenerated, 0).toFixed(2)).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}{' '}
                     <span className="text-xs font-normal text-slate-400">Unid/Kg</span>
                   </p>
                   <p className="text-xs text-emerald-400/80 mt-1">Rotación efectiva durante degustación</p>
@@ -7654,6 +7676,13 @@ export const FieldPromotoraView: React.FC = () => {
           }}
         />
       )}
+
+      <RegionalPdvLinkModal
+        isOpen={isRegionalLinkModalOpen}
+        onClose={() => setIsRegionalLinkModalOpen(false)}
+        activeSucursal={activeCanonicalSucursal}
+        canSwitchSucursal={canSwitchSucursal}
+      />
 
       {/* Bloque oficial de firmas para soporte impreso / PDF */}
       <PrintSignatureBlock />

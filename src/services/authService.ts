@@ -7,7 +7,7 @@ import {
   setActiveClientSucursalHeader,
 } from './supabaseClient';
 import { clearMasterDataCaches } from './masterDataSyncService';
-import { purgeAllSessionCaches } from './sessionCacheHygiene';
+import { purgeAllSessionCaches, registerMemoryCachePurgeCallback } from './sessionCacheHygiene';
 import {
   isOperativeSucursal,
   isSucursalValidForRole,
@@ -18,8 +18,10 @@ import {
   type SucursalCodigo,
 } from './userManagementService';
 import {
+  normalizeCanonicalSucursal,
   normalizeRegionName,
   type AllowedRegionCode,
+  type CanonicalSucursal,
 } from '../utils/regionalSyncClassifier';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,6 +49,10 @@ export interface VerifiedAuthProfile {
   appRole: CanonicalAppRole | null;
   iamRole: ManagedUserRole | null;
   sucursal: SucursalCodigo | null;
+  /** Sucursal canónica estricta del espacio multisede ('CENTRO' | 'OCCIDENTE') vinculada en perfiles_usuarios */
+  canonicalSucursal?: CanonicalSucursal | null;
+  /** Verdadero cuando el usuario posee rol 'admin_nacional' / 'super_admin' */
+  esAdminNacional?: boolean;
   /** UUID verificado de `public.regiones` asignado al usuario (null en `super_admin` o sin región asignada) */
   regionId?: string | null;
   /** Región operativa de perfil para promotoras (`'Occidente'` | `'Valencia'` | `'Centro'` | `'Andes'`) */
@@ -352,6 +358,12 @@ export function extractVerifiedProfileFromAuthUser(
     safeNameFromMeta ||
     (email ? email.split('@')[0]!.replace(/[._-]+/g, ' ').toUpperCase() : 'USUARIO VERIFICADO');
 
+  const rawMultisedeRol = String(appMeta.rol_multisede ?? '').trim().toLowerCase();
+  const esAdminNacional = iamRole === 'super_admin' || rawMultisedeRol === 'admin_nacional';
+  const canonicalSucursal: CanonicalSucursal | null = esAdminNacional
+    ? normalizeCanonicalSucursal(appMeta.sucursal)
+    : normalizeCanonicalSucursal(appMeta.sucursal ?? appMeta.region ?? assignedRegions[0] ?? sucursal);
+
   return {
     userId: user.id,
     email,
@@ -359,6 +371,8 @@ export function extractVerifiedProfileFromAuthUser(
     appRole,
     iamRole,
     sucursal,
+    canonicalSucursal,
+    esAdminNacional,
     regionId,
     regionLabel:
       regionLabel ??
@@ -402,7 +416,7 @@ function inferPromotoraRegionFromRow(
   if (/merida|mérida|tachira|táchira|san cristobal|san cristóbal|trujillo|valera|barinas|el vigia|el vigía|andes/.test(addr)) {
     return 'Andes';
   }
-  if (/valencia|carabobo|los guayos|tocuyito|maracay|turmero|aragua|caracas|paraiso|montalban|plaza venezuela/.test(addr)) {
+  if (/san diego|naguanagua|el saman|el samán|guacara|cagua|mariara|valencia|carabobo|los guayos|tocuyito|maracay|turmero|aragua|caracas|paraiso|montalban|plaza venezuela/.test(addr)) {
     return 'Valencia';
   }
   if (/coro|punto fijo|cabimas|maracaibo|san francisco|la villa|mara|mojan|cuatricentenario|varillal|la limpia|la popular|el silencio|el bajo|santa maria|plaza de las madres|dia de las madres|\bc2\b/.test(addr)) {
@@ -557,6 +571,21 @@ export async function findActivePromotoraInStaff(
  * `public.staff` para promotoras activas en `/portal`).
  */
 let profilesHasMustChangePasswordCol: boolean | null = null;
+let perfilesUsuariosTableSupported: boolean | null = null;
+
+registerMemoryCachePurgeCallback(() => {
+  profilesHasMustChangePasswordCol = null;
+  perfilesUsuariosTableSupported = null;
+});
+
+interface PerfilesUsuariosRow {
+  id?: string;
+  email?: string;
+  nombre_completo?: string | null;
+  rol?: 'coordinador' | 'admin_nacional' | string | null;
+  sucursal?: 'CENTRO' | 'OCCIDENTE' | string | null;
+  activo?: boolean | null;
+}
 
 interface IamProfileRow {
   role?: unknown;
@@ -576,6 +605,48 @@ export async function resolveVerifiedProfileWithStaffFallback(
   if (!base || !isSupabaseConfigured) return base;
 
   const normalizedEmail = normalizePortalEmail(base.email);
+
+  // BLOQUE 1: Consultar primero la tabla canónica inmutable `public.perfiles_usuarios`
+  let immutableSucursalFromDb: CanonicalSucursal | null = null;
+  let immutableRolFromDb: 'coordinador' | 'admin_nacional' | null = null;
+  let immutableNombreFromDb = '';
+
+  if (perfilesUsuariosTableSupported !== false) {
+    try {
+      const client = getSupabaseClient();
+      const puRes = await client
+        .from('perfiles_usuarios')
+        .select('id,email,nombre_completo,rol,sucursal,activo')
+        .eq('id', base.userId)
+        .maybeSingle();
+
+      if (puRes.error) {
+        const errCode = String(puRes.error.code || '');
+        if (errCode === 'PGRST205' || errCode === '42P01') {
+          perfilesUsuariosTableSupported = false;
+        }
+      } else {
+        perfilesUsuariosTableSupported = true;
+        const puRow = (puRes.data as PerfilesUsuariosRow | null) ?? null;
+        if (puRow) {
+          if (puRow.activo === false) {
+            return null;
+          }
+          immutableSucursalFromDb = normalizeCanonicalSucursal(puRow.sucursal);
+          const rawRol = String(puRow.rol ?? '').trim().toLowerCase();
+          immutableRolFromDb =
+            rawRol === 'admin_nacional'
+              ? 'admin_nacional'
+              : rawRol === 'coordinador'
+                ? 'coordinador'
+                : null;
+          immutableNombreFromDb = String(puRow.nombre_completo ?? '').trim();
+        }
+      }
+    } catch {
+      // Continúa hacia verificación complementaria en public.profiles
+    }
+  }
 
   try {
     const client = getSupabaseClient();
@@ -600,12 +671,26 @@ export async function resolveVerifiedProfileWithStaffFallback(
       if (iamProfile.is_active === false) {
         return null;
       }
-      const rawIamRole = String(iamProfile.role ?? '').trim().toLowerCase();
+      const rawIamRole =
+        immutableRolFromDb === 'admin_nacional'
+          ? 'super_admin'
+          : immutableRolFromDb === 'coordinador'
+            ? 'coordinacion'
+            : String(iamProfile.role ?? '').trim().toLowerCase();
       const iamRole = normalizeManagedUserRole(rawIamRole);
       const iamCanonical = normalizeCanonicalAppRole(rawIamRole);
       if (iamCanonical && iamRole) {
-        const iamFullName = String(iamProfile.full_name ?? '').trim();
+        const iamFullName = immutableNombreFromDb || String(iamProfile.full_name ?? '').trim();
+        const sucursalFromImmutable: SucursalCodigo | null =
+          immutableRolFromDb === 'admin_nacional'
+            ? 'GLOBAL'
+            : immutableSucursalFromDb === 'CENTRO'
+              ? 'CENTRO'
+              : immutableSucursalFromDb === 'OCCIDENTE'
+                ? 'ZULIA'
+                : null;
         const sucursal =
+          sucursalFromImmutable ??
           resolveSucursalForIamRole(iamRole, (iamProfile as { sucursal?: unknown }).sucursal) ??
           base.sucursal;
         const rawProfileRegionId = String(
@@ -620,25 +705,35 @@ export async function resolveVerifiedProfileWithStaffFallback(
         const profileAssignedRegions: AllowedRegionCode[] =
           iamRole === 'super_admin'
             ? []
-            : (() => {
-                const fromProfileArray = extractAssignedRegionCodesList(
-                  iamProfile.regiones_asignadas
-                );
-                if (fromProfileArray.length > 0) return fromProfileArray;
-                if (base.assignedRegions && base.assignedRegions.length > 0) {
-                  return base.assignedRegions;
-                }
-                return extractAssignedRegionCodesList(
-                  null,
-                  iamProfile.region ?? sucursal
-                );
-              })();
+            : immutableSucursalFromDb
+              ? [immutableSucursalFromDb]
+              : (() => {
+                  const fromProfileArray = extractAssignedRegionCodesList(
+                    iamProfile.regiones_asignadas
+                  );
+                  if (fromProfileArray.length > 0) return fromProfileArray;
+                  if (base.assignedRegions && base.assignedRegions.length > 0) {
+                    return base.assignedRegions;
+                  }
+                  return extractAssignedRegionCodesList(
+                    null,
+                    iamProfile.region ?? sucursal
+                  );
+                })();
         const profileAssignedRegionLabels = profileAssignedRegions.map(formatOfficialRegionLabel);
 
         const resolvedMustChangePassword =
           'must_change_password' in iamProfile && typeof iamProfile.must_change_password === 'boolean'
             ? iamProfile.must_change_password
             : base.mustChangePassword;
+
+        const resolvedCanonicalSucursal: CanonicalSucursal | null =
+          immutableSucursalFromDb ??
+          normalizeCanonicalSucursal(
+            iamRole === 'super_admin'
+              ? null
+              : profileAssignedRegions[0] ?? iamProfile.region ?? sucursal
+          );
 
         if (iamRole === 'promotora') {
           const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
@@ -649,6 +744,10 @@ export async function resolveVerifiedProfileWithStaffFallback(
             appRole: 'promotora',
             iamRole: 'promotora',
             sucursal: sucursal ?? activeStaff?.sucursal ?? null,
+            canonicalSucursal:
+              resolvedCanonicalSucursal ??
+              normalizeCanonicalSucursal(activeStaff?.sucursal ?? activeStaff?.regionLabel),
+            esAdminNacional: false,
             regionId,
             assignedRegions: profileAssignedRegions,
             assignedRegionLabels: profileAssignedRegionLabels,
@@ -668,6 +767,8 @@ export async function resolveVerifiedProfileWithStaffFallback(
           appRole: iamCanonical,
           iamRole,
           sucursal,
+          canonicalSucursal: resolvedCanonicalSucursal,
+          esAdminNacional: iamRole === 'super_admin' || immutableRolFromDb === 'admin_nacional',
           regionId,
           regionLabel:
             profileAssignedRegions.length === 1
@@ -684,7 +785,35 @@ export async function resolveVerifiedProfileWithStaffFallback(
       }
     }
   } catch {
-    // Si public.profiles aún no está disponible, continúa con verificación JWT/staff
+    // Si public.profiles aún no está disponible, continúa con verificación perfiles_usuarios/JWT/staff
+  }
+
+  if (immutableRolFromDb && immutableSucursalFromDb) {
+    const isGlobal = immutableRolFromDb === 'admin_nacional';
+    const mappedIamRole: ManagedUserRole = isGlobal ? 'super_admin' : 'coordinacion';
+    const mappedAppRole: CanonicalAppRole = isGlobal ? 'admin' : 'coordinadora';
+    const mappedSucursal: SucursalCodigo = isGlobal
+      ? 'GLOBAL'
+      : immutableSucursalFromDb === 'CENTRO'
+        ? 'CENTRO'
+        : 'ZULIA';
+    return {
+      ...base,
+      email: normalizedEmail,
+      displayName: immutableNombreFromDb || base.displayName,
+      appRole: mappedAppRole,
+      iamRole: mappedIamRole,
+      sucursal: mappedSucursal,
+      canonicalSucursal: immutableSucursalFromDb,
+      esAdminNacional: isGlobal,
+      assignedRegions: isGlobal ? [] : [immutableSucursalFromDb],
+      assignedRegionLabels: isGlobal ? [] : [formatOfficialRegionLabel(immutableSucursalFromDb)],
+      regionLabel: isGlobal ? null : formatOfficialRegionLabel(immutableSucursalFromDb),
+      rawAppRole: mappedIamRole,
+      legacyRole: mapToLegacyUserRole(mappedIamRole, mappedAppRole),
+      isCoordinatorOrAdmin: true,
+      canAccessTorreControl: true,
+    };
   }
 
   if (

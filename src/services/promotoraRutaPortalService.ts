@@ -199,6 +199,8 @@ export async function registerPromotoraRouteStep(
   );
 }
 
+let clientesLowercaseTableUnavailable = false;
+
 /**
  * Consulta las geocercas maestras (`latitud`, `longitud`, `radio_geocerca_m`) de `public.clientes`
  * dentro de la sucursal autorizada por RLS, con respaldo automático al endpoint ERP `/api/maestros/clientes`.
@@ -206,16 +208,28 @@ export async function registerPromotoraRouteStep(
 export async function fetchPortalPdvGeofences(): Promise<PortalPdvGeofenceRef[]> {
   if (!isSupabaseConfigured) return [];
   const client = getSupabaseClient();
-  const { data, error } = await client
-    .from('clientes')
-    .select('id, codigo_cliente, nombre_comercial, latitud, longitud, radio_geocerca_m')
-    .eq('activo', true)
-    .limit(2000);
-
   let sourceRows: Record<string, unknown>[] = [];
-  if (!error && Array.isArray(data)) {
-    sourceRows = data as Record<string, unknown>[];
-  } else if (typeof window !== 'undefined' && typeof fetch === 'function') {
+
+  if (!clientesLowercaseTableUnavailable) {
+    const { data, error } = await client
+      .from('clientes')
+      .select('id, codigo_cliente, nombre_comercial, latitud, longitud, radio_geocerca_m')
+      .eq('activo', true)
+      .limit(2000);
+
+    if (!error && Array.isArray(data)) {
+      sourceRows = data as Record<string, unknown>[];
+    } else if (
+      error &&
+      (error.code === 'PGRST205' ||
+        error.code === '42P01' ||
+        /could not find the table|does not exist/i.test(String(error.message || '')))
+    ) {
+      clientesLowercaseTableUnavailable = true;
+    }
+  }
+
+  if (sourceRows.length === 0 && typeof window !== 'undefined' && typeof fetch === 'function') {
     const token = await getAuthenticatedSessionToken(client).catch(() => null);
     if (token) {
       try {

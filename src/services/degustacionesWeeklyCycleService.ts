@@ -358,6 +358,8 @@ export interface RawHistoricalSurveyRow {
   en_historial?: boolean | null;
   archivado_en?: string | null;
   motivo_archivo?: string | null;
+  sucursal?: string | null;
+  region?: string | null;
 }
 
 export interface ServerPaginatedHistorialSurveyResult {
@@ -401,6 +403,7 @@ export async function queryServerPaginatedHistorialSurveys(
   options?: {
     clientOverride?: SupabaseClient | null;
     referenceNow?: Date | number | string;
+    activeSucursal?: 'CENTRO' | 'OCCIDENTE' | string | null;
   }
 ): Promise<ServerPaginatedHistorialSurveyResult> {
   const { params, window: dateWindow } = validateAndResolveHistorialQueryWindow(
@@ -464,9 +467,33 @@ export async function queryServerPaginatedHistorialSurveys(
 
     if (!error) {
       fechaEventoColumnSupported = true;
-      const totalCount = Math.max(0, count ?? (data?.length || 0));
+      const rawFetchedRows = (data || []) as unknown as RawHistoricalSurveyRow[];
+      const targetBranch = options?.activeSucursal
+        ? String(options.activeSucursal).trim().toUpperCase()
+        : '';
+      const rows =
+        targetBranch === 'CENTRO' || targetBranch === 'OCCIDENTE'
+          ? rawFetchedRows.filter((r) => {
+              const hay = `${r.store ?? ''} ${r.comments ?? ''}`
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase();
+              const isCentroRow =
+                /\b(san diego|naguanagua|el saman|saman|turmero|maracay|aragua|carabobo|valencia|guacara|tocuyito|los guayos|cagua|la victoria|puerto cabello|mariara|cojedes|caracas|miranda|andes|merida|tachira)\b/.test(
+                  hay
+                );
+              const isOccidenteRow =
+                /\b(occidente|zulia|maracaibo|san francisco|cabimas|ciudad ojeda|lagunillas|machiques|la villa|mara|falcon|coro|punto fijo|trujillo|valera|lara|barquisimeto)\b/.test(
+                  hay
+                );
+              if (isCentroRow) return targetBranch === 'CENTRO';
+              if (isOccidenteRow) return targetBranch === 'OCCIDENTE';
+              return true;
+            })
+          : rawFetchedRows;
+      const removedByClientGuard = rawFetchedRows.length - rows.length;
+      const totalCount = Math.max(0, (count ?? rawFetchedRows.length) - removedByClientGuard);
       const totalPages = Math.max(1, Math.ceil(totalCount / params.pageSize));
-      const rows = (data || []) as unknown as RawHistoricalSurveyRow[];
       return {
         rows,
         totalCount,
