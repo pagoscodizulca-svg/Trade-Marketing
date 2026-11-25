@@ -11,7 +11,7 @@
  *  4. Recibe notificaciones Web Push (VAPID) para nuevas degustaciones creadas desde FDV.
  */
 
-const SHELL_CACHE = 'codizulca-trade-shell-v334';
+const SHELL_CACHE = 'codizulca-trade-shell-v335';
 const SHELL_URLS = [
   '/',
   '/portal',

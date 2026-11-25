@@ -190,7 +190,7 @@ test('Dataset promotoras-seed.json: 33 registros exactos (24 Occidente + 9 Valen
   assert.equal(jose.region, 'Occidente');
   assert.equal(jose.direccion, null, 'Jose Barroso debe conservar direccion = null');
 
-  const scarleth = records.find((r) => r.correo === 'scarlethpina@gmail.com');
+  const scarleth = records.find((r) => r.correo === 'scarmichell22@gmail.com');
   assert.equal(scarleth?.nombre_completo, 'Scarleth Piña');
 
   const scarlett = records.find((r) => r.correo === 'scarlett060219@gmail.com');

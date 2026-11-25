@@ -16,6 +16,10 @@ import {
   validateClientImageHeaderBytes,
 } from '../src/utils/attendanceImageCompressor';
 import { validatePortalImageFile } from '../src/services/promotoraCampoService';
+import {
+  crearClienteSupabase,
+  setActiveClientSucursalHeader,
+} from '../src/services/supabaseClient';
 
 test('mobileAuthCompat: limpia caracteres invisibles de WhatsApp/iOS en correo y comillas inteligentes en contraseña', () => {
   // Correo copiado desde WhatsApp iPhone con BOM + zero-width space + NBSP + mayúsculas
@@ -140,14 +144,183 @@ test('invariantes iOS Safari: sin async directo en onAuthStateChange, inputs ant
   );
   assert.ok(
     supabaseClientSrc.includes('storage: sharedSafeAuthStorage') &&
-      supabaseClientSrc.includes('lock: sharedSafeAuthLock') &&
-      supabaseClientSrc.includes('fetchWithCompatibleTimeout'),
-    'supabaseClient debe usar storage resiliente de triple capa, lock seguro iOS y fetch con timeout compatible con iOS',
+      !supabaseClientSrc.includes('lock: sharedSafeAuthLock') &&
+      supabaseClientSrc.includes('fetchWithCompatibleTimeout') &&
+      supabaseClientSrc.includes('isSupabaseAuthEndpoint'),
+    'supabaseClient debe usar storage resiliente de triple capa, modo lockless nativo de @supabase/auth-js v2.119+, timeout compatible con iOS y omitir x-sucursal-activa en /auth/v1/',
   );
   assert.ok(
-    swSrc.includes("SHELL_CACHE = 'codizulca-trade-shell-v334'") &&
+    swSrc.includes("SHELL_CACHE = 'codizulca-trade-shell-v335'") &&
       swSrc.includes('!res.redirected'),
-    'public/sw.js debe invalidar caché viejo v322 y jamás cachear respuestas redirigidas en Safari',
+    'public/sw.js debe invalidar caché viejo v334 y jamás cachear respuestas redirigidas en Safari',
+  );
+});
+
+test('regresión rebote iPhone: createMobileSafeAuthStorage jamás lee sesión vencida de localStorage si setItem falla o se silencia', () => {
+  // Caso 1: localStorage conserva sesión vieja (8:33 AM) y lanza QuotaExceededError al escribir la nueva (9:17 AM)
+  const staleData = new Map<string, string>([
+    ['codizulca.supabase.auth.v1', '{"access_token":"old-833am","refresh_token":"dead"}'],
+  ]);
+  const quotaLocal = {
+    length: 1,
+    clear() {},
+    key: () => 'codizulca.supabase.auth.v1',
+    getItem: (k: string) => staleData.get(k) ?? null,
+    setItem() {
+      throw new Error('QuotaExceededError');
+    },
+    removeItem() {
+      // Simula WebView iOS donde incluso removeItem falla y deja el valor viejo congelado
+      throw new Error('SecurityError');
+    },
+  } as unknown as Storage;
+
+  const sessionMap = new Map<string, string>();
+  const okSession = {
+    get length() {
+      return sessionMap.size;
+    },
+    clear: () => sessionMap.clear(),
+    key: (i: number) => Array.from(sessionMap.keys())[i] ?? null,
+    getItem: (k: string) => sessionMap.get(k) ?? null,
+    setItem: (k: string, v: string) => sessionMap.set(k, v),
+    removeItem: (k: string) => sessionMap.delete(k),
+  } as unknown as Storage;
+
+  const adapter = createMobileSafeAuthStorage({
+    localStorageImpl: quotaLocal,
+    sessionStorageImpl: okSession,
+  });
+
+  adapter.setItem('codizulca.supabase.auth.v1', '{"access_token":"fresh-917am"}');
+  assert.equal(
+    adapter.getItem('codizulca.supabase.auth.v1'),
+    '{"access_token":"fresh-917am"}',
+    'Debe devolver la sesión fresca y jamás retroceder a la sesión vencida en localStorage',
+  );
+
+  // Caso 2: localStorage no lanza excepción pero silencia la escritura devolviendo siempre el valor antiguo
+  const silentFailLocal = {
+    length: 1,
+    clear() {},
+    key: () => 'codizulca.supabase.auth.v1',
+    getItem: () => '{"access_token":"stale-silent"}',
+    setItem() {
+      // No persiste nada (comportamiento documentado en ciertos WebViews iOS)
+    },
+    removeItem() {},
+  } as unknown as Storage;
+
+  const adapter2 = createMobileSafeAuthStorage({
+    localStorageImpl: silentFailLocal,
+    sessionStorageImpl: null,
+  });
+  adapter2.setItem('codizulca.supabase.auth.v1', '{"access_token":"fresh-memory-only"}');
+  assert.equal(
+    adapter2.getItem('codizulca.supabase.auth.v1'),
+    '{"access_token":"fresh-memory-only"}',
+    'Al detectar fallo silencioso de persistencia, debe usar memoria autoritativa en vez del valor obsoleto',
+  );
+});
+
+test('regresión rebote iPhone: crearClienteSupabase opera en modo lockless sin deprecation warning de GoTrueClient', () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((a) => String(a)).join(' '));
+  };
+  try {
+    const client = crearClienteSupabase({
+      url: 'http://127.0.0.1:54321',
+      publishableKey: 'sb_publishable_ios_lockless_check_1234567890',
+      permitirLoopbackPruebas: true,
+    });
+    assert.ok(client);
+    assert.equal(
+      warnings.some((w) => /"lock" option is deprecated/i.test(w)),
+      false,
+      `No debe activar la ruta legada de lock en @supabase/auth-js v2.119+: ${warnings.join(' | ')}`,
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
+test('regresión rebote iPhone: x-sucursal-activa se envía a /rest/v1/ pero se omite en /auth/v1/ para evitar preflight CORS extra', async () => {
+  const captured: Array<{ url: string; hasSucursalHeader: boolean }> = [];
+  const spyFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const headers = new Headers(init?.headers);
+    captured.push({ url, hasSucursalHeader: headers.has('x-sucursal-activa') });
+    return new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  setActiveClientSucursalHeader('ZULIA');
+  try {
+    const client = crearClienteSupabase({
+      url: 'http://127.0.0.1:54321',
+      publishableKey: 'sb_publishable_ios_cors_check_1234567890',
+      permitirLoopbackPruebas: true,
+      fetch: spyFetch,
+    });
+    await client.auth.getUser('fake-jwt-token').catch(() => undefined);
+    await client.from('promotoras').select('id').limit(1);
+
+    const authCall = captured.find((c) => c.url.includes('/auth/v1/'));
+    const restCall = captured.find((c) => c.url.includes('/rest/v1/'));
+    assert.ok(authCall, 'Debe registrar llamada a /auth/v1/');
+    assert.ok(restCall, 'Debe registrar llamada a /rest/v1/');
+    assert.equal(
+      authCall.hasSucursalHeader,
+      false,
+      '/auth/v1/* no debe enviar x-sucursal-activa (evita CORS preflight en iPhone/4G)',
+    );
+    assert.equal(
+      restCall.hasSucursalHeader,
+      true,
+      '/rest/v1/* debe conservar x-sucursal-activa para el aislamiento regional',
+    );
+  } finally {
+    setActiveClientSucursalHeader(null);
+  }
+});
+
+test('regresión rebote iPhone: blindaje de carreras en PromotoraRutaPortalView, TradeAuthGate y authService', () => {
+  const portalSrc = fs.readFileSync(
+    path.resolve('src/components/portal/PromotoraRutaPortalView.tsx'),
+    'utf8',
+  );
+  const tradeGateSrc = fs.readFileSync(
+    path.resolve('src/components/auth/TradeAuthGate.tsx'),
+    'utf8',
+  );
+  const authServiceSrc = fs.readFileSync(path.resolve('src/services/authService.ts'), 'utf8');
+
+  // 1. PromotoraRutaPortalView: protege sesión activa contra INITIAL_SESSION(null), ecos same-user y SIGNED_OUT rezagado
+  assert.ok(
+    portalSrc.includes('authenticatedUserIdRef.current = verifiedProfile.userId') &&
+      portalSrc.includes("event === 'INITIAL_SESSION' && !session") &&
+      portalSrc.includes('authenticatedUserIdRef.current === session.user.id') &&
+      portalSrc.includes('manualSignOutRef'),
+    'PromotoraRutaPortalView debe blindar la sesión activa contra rebotes silenciosos tras el login en iOS',
+  );
+
+  // 2. TradeAuthGate: jamás purga tokens de localStorage en INITIAL_SESSION vacío (solo en SIGNED_OUT explícito)
+  assert.ok(
+    tradeGateSrc.includes("if (event === 'SIGNED_OUT') {") &&
+      !tradeGateSrc.includes("reason: event === 'SIGNED_OUT' ? 'sign_out' : 'token_expired'"),
+    'TradeAuthGate solo debe purgar cachés/tokens de sesión en evento SIGNED_OUT explícito',
+  );
+
+  // 3. authService: verifica desactivación explícita y evita signOut destructivo si la promotora quedó sin señal
+  assert.ok(
+    authServiceSrc.includes('if (!resolvedCorporate)') &&
+      authServiceSrc.includes('appMeta.is_active === false') &&
+      authServiceSrc.includes('navigator.onLine === false'),
+    'verifyActivePromotoraPortalAccess debe mantener bloqueo Zero Trust para cuentas inactivas y evitar cierre destructivo offline',
   );
 });
 

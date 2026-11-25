@@ -2,7 +2,6 @@ import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import type { MasterDataDatabase } from '../types/masterData';
 import type { OperativeSucursal } from './userManagementService';
 import {
-  createMobileSafeAuthLock,
   createMobileSafeAuthStorage,
   fetchWithCompatibleTimeout,
 } from '../utils/mobileAuthCompat';
@@ -414,13 +413,29 @@ export function getActiveClientSucursalHeader(): OperativeSucursal | null {
 
 const MOBILE_FETCH_TIMEOUT_MS = 25_000;
 const sharedSafeAuthStorage = createMobileSafeAuthStorage();
-const sharedSafeAuthLock = createMobileSafeAuthLock();
+
+function isSupabaseAuthEndpoint(input: RequestInfo | URL): boolean {
+  try {
+    const rawUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : typeof Request !== 'undefined' && input instanceof Request
+            ? input.url
+            : '';
+    return /\/auth\/v1(\/|\?|$)/i.test(rawUrl);
+  } catch {
+    return false;
+  }
+}
 
 function buildSucursalAwareFetch(baseFetch?: typeof fetch): typeof fetch {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const fetchFn = baseFetch ?? globalThis.fetch;
     const currentSucursal = activeSucursalHeader;
-    if (!currentSucursal) {
+    // Jamás inyectar `x-sucursal-activa` en `/auth/v1/*`: evita preflights CORS innecesarios en iPhone/4G
+    if (!currentSucursal || isSupabaseAuthEndpoint(input)) {
       return fetchWithCompatibleTimeout(fetchFn, input, init, MOBILE_FETCH_TIMEOUT_MS);
     }
 
@@ -679,7 +694,8 @@ export function crearClienteSupabase(
       detectSessionInUrl: typeof window !== 'undefined' && !opciones.storage,
       storageKey: UNIFIED_SUPABASE_STORAGE_KEY,
       storage: opciones.storage ?? sharedSafeAuthStorage,
-      ...(typeof window !== 'undefined' ? { lock: sharedSafeAuthLock } : {}),
+      // Nota iOS/WebKit: `@supabase/auth-js` >= 2.119 coordina refrescos en modo lockless nativo;
+      // omitir `lock` evita reactivar la ruta legada obsoleta (que pierde `await` en `_emitInitialSession`).
     },
     realtime: {
       params: {
@@ -705,7 +721,7 @@ export function getSupabaseClient(): SupabaseClient {
         autoRefreshToken: isBrowser,
         detectSessionInUrl: isBrowser,
         storageKey: UNIFIED_SUPABASE_STORAGE_KEY,
-        ...(isBrowser ? { storage: sharedSafeAuthStorage, lock: sharedSafeAuthLock } : {}),
+        ...(isBrowser ? { storage: sharedSafeAuthStorage } : {}),
       },
       realtime: {
         params: {
@@ -752,7 +768,7 @@ export function getMasterDataSupabaseClient(): SupabaseClient<MasterDataDatabase
           autoRefreshToken: isBrowser,
           detectSessionInUrl: isBrowser,
           storageKey: DEDICATED_MASTER_STORAGE_KEY,
-          ...(isBrowser ? { storage: sharedSafeAuthStorage, lock: sharedSafeAuthLock } : {}),
+          ...(isBrowser ? { storage: sharedSafeAuthStorage } : {}),
         },
         realtime: {
           params: {

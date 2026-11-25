@@ -173,11 +173,19 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
         clearMasterDataCaches();
         clearMasterCatalogCaches();
         clearBcvRateCache();
-        void purgeAllSessionCaches({
-          reason: event === 'SIGNED_OUT' ? 'sign_out' : 'token_expired',
-          preserveAuthSession: false,
-        });
-        setProfile(null);
+        // Solo purgar tokens de `localStorage` e IndexedDB en cierre explícito (`SIGNED_OUT`):
+        // un `INITIAL_SESSION` vacío en otra pestaña (`/`) jamás debe borrar la sesión activa de `/portal`.
+        if (event === 'SIGNED_OUT') {
+          void purgeAllSessionCaches({
+            reason: 'sign_out',
+            preserveAuthSession: false,
+          });
+          setProfile(null);
+        } else if (event !== 'INITIAL_SESSION') {
+          setProfile(null);
+        } else {
+          setProfile((prev) => prev);
+        }
         setChecking(false);
         return;
       }

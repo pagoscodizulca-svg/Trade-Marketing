@@ -269,9 +269,15 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     };
   }, [profile]);
 
-  // Candados síncronos contra envíos múltiples en dispositivos móviles
+  // Candados síncronos contra envíos múltiples y carreras de sesión en dispositivos móviles (iOS Safari)
   const inFlightLoginRef = useRef<boolean>(false);
+  const authenticatedUserIdRef = useRef<string | null>(initialProfile?.userId ?? null);
+  const manualSignOutRef = useRef<boolean>(false);
   const inFlightStepIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    authenticatedUserIdRef.current = profile?.userId ?? null;
+  }, [profile]);
 
   const showBanner = useCallback((msg: string) => {
     setLiveBanner(msg);
@@ -448,24 +454,42 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             setTimeout(() => resolve({ data: { session: null } }), 10_000),
           ),
         ]);
-        if (!active) return;
+        if (!active || inFlightLoginRef.current) return;
         const activeSession = sessionResult?.data?.session ?? null;
         if (!activeSession) {
-          setProfile(null);
+          // Jamás sobrescribir una sesión ya establecida por `handleLoginSubmit` durante el arranque
+          if (!authenticatedUserIdRef.current) {
+            setProfile(null);
+          }
+          return;
+        }
+
+        if (authenticatedUserIdRef.current === activeSession.user.id) {
+          client.realtime.setAuth(activeSession.access_token);
           return;
         }
 
         const { profile: verified, unauthorizedReason } = await verifyActivePromotoraPortalAccess(
           activeSession
         );
-        if (!active) return;
+        if (!active || inFlightLoginRef.current) return;
+        if (
+          !verified &&
+          authenticatedUserIdRef.current &&
+          authenticatedUserIdRef.current !== activeSession.user.id
+        ) {
+          return;
+        }
+        authenticatedUserIdRef.current = verified?.userId ?? null;
         setProfile(verified);
         if (unauthorizedReason) {
           setLoginError(unauthorizedReason);
         }
       } catch {
-        if (!active) return;
-        setProfile(null);
+        if (!active || inFlightLoginRef.current) return;
+        if (!authenticatedUserIdRef.current) {
+          setProfile(null);
+        }
       } finally {
         if (active) {
           setAuthChecking(false);
@@ -487,17 +511,92 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     const { data: listener } = client.auth.onAuthStateChange((event, session) => {
       if (!active || inFlightLoginRef.current) return;
       const mySeq = ++authEventSeq;
+
+      // 1. `INITIAL_SESSION` vacío nunca debe expulsar una sesión ya verificada en este tab
+      if (event === 'INITIAL_SESSION' && !session) {
+        if (!authenticatedUserIdRef.current) {
+          setProfile(null);
+        }
+        setAuthChecking(false);
+        return;
+      }
+
+      // 2. Cierre de sesión (`SIGNED_OUT` o sin sesión): si fue un cierre inesperado en iPhone
+      //    (p. ej. carrera de un refresh antiguo previo al login), confirmar contra almacenamiento
+      //    real antes de expulsar a la promotora del portal.
       if (event === 'SIGNED_OUT' || !session) {
-        setProfile(null);
+        const expectedUserId = authenticatedUserIdRef.current;
+        if (manualSignOutRef.current || !expectedUserId) {
+          authenticatedUserIdRef.current = null;
+          setProfile(null);
+          setAuthChecking(false);
+          return;
+        }
+
+        window.setTimeout(() => {
+          if (!active || inFlightLoginRef.current) return;
+          void client.auth
+            .getSession()
+            .then(({ data }) => {
+              if (!active || inFlightLoginRef.current) return;
+              const liveSession = data?.session ?? null;
+              if (liveSession?.access_token && liveSession.user?.id === expectedUserId) {
+                // Falsa alarma de evento rezagado: la sesión activa sigue intacta en almacenamiento
+                client.realtime.setAuth(liveSession.access_token);
+                setAuthChecking(false);
+                return;
+              }
+              authenticatedUserIdRef.current = null;
+              setProfile(null);
+              setAuthChecking(false);
+              if (!manualSignOutRef.current) {
+                setLoginError((prev) =>
+                  prev || 'Tu sesión expiró o se cerró en el dispositivo. Ingresa nuevamente.'
+                );
+              }
+            })
+            .catch(() => {
+              if (!active || inFlightLoginRef.current) return;
+              authenticatedUserIdRef.current = null;
+              setProfile(null);
+              setAuthChecking(false);
+            });
+        }, 0);
+        return;
+      }
+
+      // 3. Misma promotora ya verificada (`SIGNED_IN` eco, `TOKEN_REFRESHED`, `USER_UPDATED`):
+      //    renovar JWT de Realtime sin re-ejecutar verificación destructiva ni desmontar la vista.
+      if (authenticatedUserIdRef.current && authenticatedUserIdRef.current === session.user.id) {
+        client.realtime.setAuth(session.access_token);
         setAuthChecking(false);
         return;
       }
 
       window.setTimeout(() => {
         if (!active || inFlightLoginRef.current || mySeq !== authEventSeq) return;
+        const verifyingUserId = session.user.id;
         void verifyActivePromotoraPortalAccess(session)
           .then(({ profile: verified, unauthorizedReason }) => {
-            if (!active || inFlightLoginRef.current || mySeq !== authEventSeq) return;
+            if (!active || inFlightLoginRef.current) return;
+            if (!verified) {
+              // Jamás silenciar `unauthorizedReason` aunque `signOutSupabaseSession()` haya incrementado `authEventSeq`
+              if (
+                authenticatedUserIdRef.current &&
+                authenticatedUserIdRef.current !== verifyingUserId
+              ) {
+                return;
+              }
+              authenticatedUserIdRef.current = null;
+              setProfile(null);
+              if (unauthorizedReason) {
+                setLoginError(unauthorizedReason);
+              }
+              setAuthChecking(false);
+              return;
+            }
+            if (mySeq !== authEventSeq) return;
+            authenticatedUserIdRef.current = verified.userId;
             setProfile(verified);
             if (unauthorizedReason) {
               setLoginError(unauthorizedReason);
@@ -644,10 +743,14 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
         normalizedEmail,
         passwordInput
       );
+      // Fijar ref síncronamente ANTES de liberar `inFlightLoginRef` para blindar contra ecos de `onAuthStateChange`
+      authenticatedUserIdRef.current = verifiedProfile.userId;
       setPasswordInput('');
       setShowPassword(false);
       setProfile(verifiedProfile);
+      setAuthChecking(false);
     } catch (err) {
+      authenticatedUserIdRef.current = null;
       setPasswordInput('');
       setLoginError(
         err instanceof Error && err.message
@@ -661,22 +764,28 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   };
 
   const handleSignOut = async () => {
+    manualSignOutRef.current = true;
+    authenticatedUserIdRef.current = null;
     clearDirectLocationCache();
     clearPortalAsistenciaDraft();
-    if (shiftSessionState) {
+    try {
+      if (shiftSessionState) {
+        await purgePortalOfflineSensitiveData();
+        setShiftSessionState(null);
+        setShiftRoutes([]);
+        setLoginError(null);
+        return;
+      }
+      await signOutSupabaseSession();
       await purgePortalOfflineSensitiveData();
-      setShiftSessionState(null);
-      setShiftRoutes([]);
+      setProfile(null);
+      setCachedOfflineRoutes([]);
+      setPasswordInput('');
+      setShowPassword(false);
       setLoginError(null);
-      return;
+    } finally {
+      manualSignOutRef.current = false;
     }
-    await signOutSupabaseSession();
-    await purgePortalOfflineSensitiveData();
-    setProfile(null);
-    setCachedOfflineRoutes([]);
-    setPasswordInput('');
-    setShowPassword(false);
-    setLoginError(null);
   };
 
   // ---- Hito 5 (B-08) + v1.9.0: GPS + geocerca + ejecución PDV + hook reactivo useOfflineSync ----

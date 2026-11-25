@@ -1006,12 +1006,26 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
     return { profile: null, unauthorizedReason: null };
   }
 
+  const base = extractVerifiedProfileFromAuthUser(session.user);
+  const appMeta = (session.user.app_metadata ?? {}) as Record<string, unknown>;
+  if (!base || appMeta.is_active === false) {
+    await signOutSupabaseSession();
+    return { profile: null, unauthorizedReason: PORTAL_UNAUTHORIZED_ACCESS_MESSAGE };
+  }
+
   // 1. Verificar primero identidad IAM corporativa (`public.profiles` + `app_metadata` firmado):
+  //    - Si `public.profiles` / `perfiles_usuarios` devolvió explícitamente `is_active = false`,
+  //      `resolvedCorporate` es `null`: bloquear y cerrar sesión de inmediato (Zero Trust).
   //    - Si corresponde a `super_admin` activo, concede ingreso inmediato en Modo Supervisión Global.
-  //    - Si corresponde a `promotora` activa ya verificada contra `public.profiles` (con staffId o
-  //      sucursal válida), concede ingreso inmediato sin duplicar consultas ni expulsar por micro-cortes 4G.
+  //    - Si corresponde a `promotora` activa ya verificada contra `public.profiles` (o respaldo
+  //      firmado en `app_metadata` ante micro-corte 4G), concede ingreso inmediato sin expulsar.
   const resolvedCorporate = await resolveVerifiedProfileWithStaffFallback(session);
-  if (resolvedCorporate && resolvedCorporate.iamRole === 'super_admin') {
+  if (!resolvedCorporate) {
+    await signOutSupabaseSession();
+    return { profile: null, unauthorizedReason: PORTAL_UNAUTHORIZED_ACCESS_MESSAGE };
+  }
+
+  if (resolvedCorporate.iamRole === 'super_admin') {
     const client = getSupabaseClient();
     client.realtime.setAuth(session.access_token);
     return {
@@ -1032,7 +1046,6 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
   }
 
   if (
-    resolvedCorporate &&
     resolvedCorporate.iamRole === 'promotora' &&
     (resolvedCorporate.staffId || resolvedCorporate.sucursal || resolvedCorporate.canonicalSucursal)
   ) {
@@ -1053,16 +1066,22 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
     };
   }
 
-  const base = extractVerifiedProfileFromAuthUser(session.user);
-  if (!base) {
-    await signOutSupabaseSession();
-    return { profile: null, unauthorizedReason: PORTAL_UNAUTHORIZED_ACCESS_MESSAGE };
-  }
-
   const normalizedEmail = normalizePortalEmail(base.email);
   const activeStaff = await findActivePromotoraInStaff(base.userId, normalizedEmail);
 
   if (!activeStaff) {
+    // Si el dispositivo perdió señal mientras verificaba a una promotora ya firmada en `app_metadata`,
+    // NO destruir su sesión en almacenamiento: solo informar falla de conectividad.
+    if (
+      base.iamRole === 'promotora' &&
+      typeof navigator !== 'undefined' &&
+      navigator.onLine === false
+    ) {
+      return {
+        profile: null,
+        unauthorizedReason: MOBILE_NETWORK_LOGIN_ERROR_MESSAGE,
+      };
+    }
     await signOutSupabaseSession();
     return {
       profile: null,

@@ -50,6 +50,9 @@ export function createMobileSafeAuthStorage(options?: {
   sessionStorageImpl?: Storage | null;
 }): MobileSafeAuthStorageAdapter {
   const memoryFallback = new Map<string, string>();
+  // Claves cuya escritura en `localStorage` falló (Safari Privado, ITP o cuota llena):
+  // jamás deben leer un token vencido/obsoleto que haya quedado congelado en `localStorage`.
+  const failedLocalKeys = new Set<string>();
 
   const getLocal = (): Storage | null => {
     if (options && 'localStorageImpl' in options) return options.localStorageImpl ?? null;
@@ -71,6 +74,18 @@ export function createMobileSafeAuthStorage(options?: {
 
   return {
     getItem(key: string): string | null {
+      if (failedLocalKeys.has(key)) {
+        const memVal = memoryFallback.get(key);
+        if (memVal !== undefined) return memVal;
+        try {
+          const sessVal = getSession()?.getItem(key);
+          if (sessVal !== null && sessVal !== undefined) return sessVal;
+        } catch {
+          /* ignorar */
+        }
+        return null;
+      }
+
       try {
         const val = getLocal()?.getItem(key);
         if (val !== null && val !== undefined) return val;
@@ -88,11 +103,34 @@ export function createMobileSafeAuthStorage(options?: {
 
     setItem(key: string, value: string): void {
       memoryFallback.set(key, value);
+      let persistedInLocal = false;
       try {
-        getLocal()?.setItem(key, value);
-        return;
+        const local = getLocal();
+        if (local) {
+          local.setItem(key, value);
+          // Verificar lectura inmediata: algunos WebViews iOS silencian QuotaExceededError sin persistir
+          persistedInLocal = local.getItem(key) === value;
+        }
       } catch {
-        /* localStorage bloqueado o sin cuota (Safari Privado / iOS WebView) */
+        persistedInLocal = false;
+      }
+
+      if (persistedInLocal) {
+        failedLocalKeys.delete(key);
+        try {
+          getSession()?.removeItem(key);
+        } catch {
+          /* limpiar copia vieja en sessionStorage sin afectar el flujo */
+        }
+        return;
+      }
+
+      // localStorage bloqueado o no persistió: invalidar clave obsoleta y respaldar en sessionStorage + memoria
+      failedLocalKeys.add(key);
+      try {
+        getLocal()?.removeItem(key);
+      } catch {
+        /* ignorar si localStorage está bloqueado en solo lectura */
       }
       try {
         getSession()?.setItem(key, value);
@@ -103,6 +141,7 @@ export function createMobileSafeAuthStorage(options?: {
 
     removeItem(key: string): void {
       memoryFallback.delete(key);
+      failedLocalKeys.delete(key);
       try {
         getLocal()?.removeItem(key);
       } catch {
