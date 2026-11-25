@@ -412,9 +412,12 @@ export interface MerchandisingRecord {
   activities: string[];
   observations: string;
   signatureBase64?: string;
+  signatureStoragePath?: string | null;
   signedAt?: string;
   certified: boolean;
   photos: string[];
+  photoStoragePaths?: string[];
+  region?: string | null;
   matchedCheckinIds?: string[];
   metrics?: {
     totalFacings?: number;
@@ -474,9 +477,16 @@ export interface ConsumerSurveyRecord {
   shift: ShiftType;
   storeName: string;
   zone: string;
+  region?: string | null;
+  sucursal?: string | null;
   promotora: string;
   productName: string;
   rating: number | null; // Acotado en [0, 5] o null si sin calificación
+  sabor?: number | null;
+  textura?: number | null;
+  percepcionCalidad?: string;
+  relacionCalidadPrecio?: string;
+  comments?: string;
   highAcceptance: boolean;
   acceptanceLabel: string;
   purchaseIntent: string;
@@ -3101,6 +3111,22 @@ export async function fetchAllModule1FromSupabase(
         ? activeMerchMember.canonicalKey
         : normalizeStaffTextKey(resolvedPromoter);
 
+      const photoStoragePaths = Array.from(
+        new Set(
+          (Array.isArray(c.photoStoragePaths) ? c.photoStoragePaths : [])
+            .map((p: unknown) => String(p || '').trim())
+            .filter((p: string) => p.length > 0 && !p.includes('..') && !p.startsWith('/'))
+        )
+      );
+
+      const rawSignatureStoragePath =
+        typeof c.signatureStoragePath === 'string' &&
+        c.signatureStoragePath.trim().length > 0 &&
+        !c.signatureStoragePath.includes('..') &&
+        !c.signatureStoragePath.trim().startsWith('/')
+          ? c.signatureStoragePath.trim()
+          : null;
+
       const rawSignature =
         typeof c.signatureBase64 === 'string' && c.signatureBase64.startsWith('data:image')
           ? c.signatureBase64
@@ -3135,9 +3161,12 @@ export async function fetchAllModule1FromSupabase(
         activities,
         observations: String(c.observations || '').trim(),
         signatureBase64: rawSignature,
+        signatureStoragePath: rawSignatureStoragePath,
         signedAt: c.signedAt ? formatTimeVe(c.signedAt) : undefined,
-        certified: Boolean(c.certified ?? Boolean(rawSignature)),
+        certified: Boolean(c.certified ?? (Boolean(rawSignature) || Boolean(rawSignatureStoragePath))),
         photos,
+        photoStoragePaths,
+        region: m.sucursal || m.region || activeMerchMember?.region || null,
         matchedCheckinIds: [],
         metrics: c.metrics && typeof c.metrics === 'object' ? c.metrics : undefined,
         alerts: Array.isArray(c.alerts) ? c.alerts.map(String) : undefined,
@@ -3297,6 +3326,9 @@ export async function fetchAllModule1FromSupabase(
             : 'BAJA'
           : 'REGISTRADA';
 
+    const parsedSabor = toNum(c.sensoryRatings?.sabor ?? c.sabor, NaN);
+    const parsedTextura = toNum(c.sensoryRatings?.textura ?? c.textura, NaN);
+
     return {
       id: String(s.id || `srv_cons_${idx + 1}`),
       surveyType: s.type === 'Profunda' ? 'Profunda' : 'Breve',
@@ -3305,12 +3337,19 @@ export async function fetchAllModule1FromSupabase(
       shift: inferShiftFromTime(String(c.shift || c.turno || c.time || ''), s.created_at || s.date),
       storeName,
       zone,
+      region: s.region || s.sucursal || activeMember?.region || null,
+      sucursal: s.sucursal || null,
       promotora: promoterName || 'SIN ASIGNAR',
       productName,
       rating: cleanRating,
+      sabor: Number.isFinite(parsedSabor) && parsedSabor > 0 ? Math.min(5, Math.max(1, parsedSabor)) : null,
+      textura: Number.isFinite(parsedTextura) && parsedTextura > 0 ? Math.min(5, Math.max(1, parsedTextura)) : null,
+      percepcionCalidad: String(c.percepcionCalidad || '').trim(),
+      relacionCalidadPrecio: String(c.relacionCalidadPrecio || '').trim(),
+      comments: String(c.originalComments || c.observations || '').trim(),
       highAcceptance: isHighAcceptance,
       acceptanceLabel,
-      purchaseIntent: String(s.intent || s.purchase || c.intent || '').trim(),
+      purchaseIntent: String(s.intent || s.purchase || c.intent || c.intencionCompra || '').trim(),
       createdAt: s.created_at || undefined,
     };
   });

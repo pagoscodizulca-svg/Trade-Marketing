@@ -299,11 +299,61 @@ export function formatSucursalLabel(sucursal: SucursalCodigo): string {
 }
 
 // =============================================================================
-// CLIENTE SUPABASE ÚNICO CON SESIÓN PERSISTENTE
+// CLIENTE SUPABASE ÚNICO CON SESIÓN PERSISTENTE (COMPATIBLE iOS SAFARI / ANDROID)
 // =============================================================================
 
 let cachedClient: SupabaseClient | null = null;
 let cachedClientKey = '';
+
+const rutaMemoryStorage = new Map<string, string>();
+const rutaSafeAuthStorage = {
+  getItem(key: string): string | null {
+    try {
+      const v = typeof window !== 'undefined' ? window.localStorage.getItem(key) : null;
+      if (v !== null) return v;
+    } catch {
+      /* Modo privado iOS / WebView */
+    }
+    try {
+      const v = typeof window !== 'undefined' ? window.sessionStorage.getItem(key) : null;
+      if (v !== null) return v;
+    } catch {
+      /* ignorar */
+    }
+    return rutaMemoryStorage.get(key) ?? null;
+  },
+  setItem(key: string, value: string): void {
+    rutaMemoryStorage.set(key, value);
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(key, value);
+        return;
+      }
+    } catch {
+      /* fallback */
+    }
+    try {
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(key, value);
+      }
+    } catch {
+      /* en memoria */
+    }
+  },
+  removeItem(key: string): void {
+    rutaMemoryStorage.delete(key);
+    try {
+      if (typeof window !== 'undefined') window.localStorage.removeItem(key);
+    } catch {
+      /* ignorar */
+    }
+    try {
+      if (typeof window !== 'undefined') window.sessionStorage.removeItem(key);
+    } catch {
+      /* ignorar */
+    }
+  },
+};
 
 export function createRutaSupabaseClient(cfg: RutaSupabaseConfig): SupabaseClient {
   const safeUrl = normalizarSupabaseUrl(cfg.url);
@@ -314,6 +364,7 @@ export function createRutaSupabaseClient(cfg: RutaSupabaseConfig): SupabaseClien
       autoRefreshToken: true,
       detectSessionInUrl: true,
       storageKey: UNIFIED_SUPABASE_STORAGE_KEY,
+      storage: rutaSafeAuthStorage,
     },
     global: {
       fetch: (input, init) => {
@@ -602,8 +653,15 @@ export async function signInRutaUser(
     };
   }
 
-  const cleanEmail = String(email || '').trim().toLowerCase();
-  if (!cleanEmail || !password) {
+  const cleanEmail = String(email || '')
+    .replace(/[\s\u00A0\u200B-\u200D\u2060\uFEFF]+/g, '')
+    .trim()
+    .toLowerCase();
+  const cleanPassword = String(password || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"');
+  if (!cleanEmail || !cleanPassword.trim()) {
     return {
       ok: false,
       code: 'NO_SESSION',
@@ -611,10 +669,18 @@ export async function signInRutaUser(
     };
   }
 
-  const { data, error } = await client.auth.signInWithPassword({
+  let { data, error } = await client.auth.signInWithPassword({
     email: cleanEmail,
-    password,
+    password: cleanPassword,
   });
+  if ((error || !data.session) && cleanPassword.trim() !== cleanPassword) {
+    const retry = await client.auth.signInWithPassword({
+      email: cleanEmail,
+      password: cleanPassword.trim(),
+    });
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error || !data.session) {
     return {

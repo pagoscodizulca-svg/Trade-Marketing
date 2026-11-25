@@ -4,6 +4,7 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  Image as ImageIcon,
   Loader2,
   Plus,
   RefreshCw,
@@ -32,6 +33,10 @@ import {
   type PriceCurrency,
 } from '../../utils/bimonetaryPriceMath';
 import { PortalProductSelector, PortalStoreSelector } from './PortalCatalogSelectors';
+import {
+  enqueuePortalPriceAction,
+  isTransientOfflineOrNetworkError,
+} from '../../services/portalOfflineQueueService';
 
 interface PortalPreciosTabProps {
   context: PortalPromotoraContext;
@@ -40,6 +45,7 @@ interface PortalPreciosTabProps {
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
+  onActionQueuedOffline?: () => void;
 }
 
 interface CompetitorDraftRow {
@@ -60,6 +66,7 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
   activeStore,
   onActiveStoreChange,
   onNotify,
+  onActionQueuedOffline,
 }) => {
   const [selectedProduct, setSelectedProduct] = useState<string>(products[0]?.nombre || '');
   const [ownPriceInput, setOwnPriceInput] = useState<string>('');
@@ -283,6 +290,40 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
       setSaveSuccess(true);
       onNotify(`Monitoreo bimonetario guardado (${selectedProduct.trim()})`);
     } catch (err) {
+      if (isTransientOfflineOrNetworkError(err)) {
+        try {
+          await enqueuePortalPriceAction({
+            id: clientSubmissionIdRef.current,
+            store: activeStore.trim(),
+            cadena: selectedClientMeta?.cadena,
+            zona: selectedClientMeta?.zona || context.direccion,
+            ourProduct: selectedProduct.trim(),
+            ourPriceUsd: ownConverted.priceUsd > 0 ? ownConverted.priceUsd : ownNumericInput,
+            ownCurrency,
+            ownOriginalPrice: ownNumericInput,
+            bcvRate: activeBcvRate ?? 0,
+            bcvRateDate: bcvSnapshot?.fecha ?? getCaracasIsoDate(),
+            competitors: competitors.map((c) => ({
+              name: c.name,
+              originalPrice: Number(c.priceInput.replace(',', '.')) || 0,
+              currency: c.currency,
+            })),
+            photoFile,
+            observations,
+            ocrAsistido: ocrAppliedMeta.assisted,
+            ocrConfianza: ocrAppliedMeta.confidence,
+          });
+          clientSubmissionIdRef.current = generateClientSubmissionId();
+          setSaveSuccess(true);
+          onActionQueuedOffline?.();
+          onNotify(
+            'Sin señal: comparativa de precios guardada en cola offline del teléfono. Se sincronizará automáticamente.'
+          );
+          return;
+        } catch {
+          // Si falló IndexedDB, mostrar error original
+        }
+      }
       setSubmitError(err instanceof Error ? err.message : 'No se pudo guardar el monitoreo.');
     } finally {
       isSubmittingRef.current = false;
@@ -682,22 +723,40 @@ export const PortalPreciosTab: React.FC<PortalPreciosTabProps> = ({
                 </button>
               </div>
             ) : (
-              <label className="border-2 border-dashed border-neutral-800 hover:border-neutral-700 rounded-xl p-4 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center bg-[#171717]/50">
-                <Camera className="w-6 h-6 text-red-500" />
-                <span className="text-xs font-bold text-white">
-                  Capturar Foto del Hablador / Fleje
-                </span>
-                <span className="text-[10px] text-neutral-400">
-                  Luego podrás extraer marca, producto y precio automáticamente con IA
-                </span>
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  capture="environment"
-                  onChange={handlePhotoChange}
-                  className="hidden"
-                />
-              </label>
+              <div className="border-2 border-dashed border-neutral-800 rounded-xl p-4 space-y-3 text-center bg-[#171717]/50">
+                <div className="flex flex-col items-center gap-1">
+                  <Camera className="w-6 h-6 text-red-500" />
+                  <span className="text-xs font-bold text-white">
+                    Capturar Foto del Hablador / Fleje
+                  </span>
+                  <span className="text-[10px] text-neutral-400">
+                    Luego podrás extraer marca, producto y precio automáticamente con IA
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="py-2 px-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Tomar Foto</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={handlePhotoChange}
+                      className="hidden"
+                    />
+                  </label>
+                  <label className="py-2 px-3 rounded-xl bg-[#0d0d0d] hover:bg-neutral-800 border border-neutral-700 text-white font-bold text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer">
+                    <ImageIcon className="w-3.5 h-3.5 text-neutral-300" />
+                    <span>Galería</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handlePhotoChange}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
             )}
 
             {ocrError && (

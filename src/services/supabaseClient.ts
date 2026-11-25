@@ -1,6 +1,11 @@
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import type { MasterDataDatabase } from '../types/masterData';
 import type { OperativeSucursal } from './userManagementService';
+import {
+  createMobileSafeAuthLock,
+  createMobileSafeAuthStorage,
+  fetchWithCompatibleTimeout,
+} from '../utils/mobileAuthCompat';
 
 /**
  * Cliente Único, Centralizado y Seguro de Supabase (TypeScript) — Programa de Trade Marketing.
@@ -407,12 +412,16 @@ export function getActiveClientSucursalHeader(): OperativeSucursal | null {
   return activeSucursalHeader;
 }
 
+const MOBILE_FETCH_TIMEOUT_MS = 25_000;
+const sharedSafeAuthStorage = createMobileSafeAuthStorage();
+const sharedSafeAuthLock = createMobileSafeAuthLock();
+
 function buildSucursalAwareFetch(baseFetch?: typeof fetch): typeof fetch {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const fetchFn = baseFetch ?? globalThis.fetch;
     const currentSucursal = activeSucursalHeader;
     if (!currentSucursal) {
-      return fetchFn(input, init);
+      return fetchWithCompatibleTimeout(fetchFn, input, init, MOBILE_FETCH_TIMEOUT_MS);
     }
 
     const headers = new Headers(
@@ -423,10 +432,15 @@ function buildSucursalAwareFetch(baseFetch?: typeof fetch): typeof fetch {
       headers.set('x-sucursal-activa', currentSucursal);
     }
 
-    return fetchFn(input, {
-      ...init,
-      headers,
-    });
+    return fetchWithCompatibleTimeout(
+      fetchFn,
+      input,
+      {
+        ...init,
+        headers,
+      },
+      MOBILE_FETCH_TIMEOUT_MS,
+    );
   };
 }
 
@@ -664,7 +678,8 @@ export function crearClienteSupabase(
       autoRefreshToken: shouldPersist,
       detectSessionInUrl: typeof window !== 'undefined' && !opciones.storage,
       storageKey: UNIFIED_SUPABASE_STORAGE_KEY,
-      ...(opciones.storage ? { storage: opciones.storage } : {}),
+      storage: opciones.storage ?? sharedSafeAuthStorage,
+      ...(typeof window !== 'undefined' ? { lock: sharedSafeAuthLock } : {}),
     },
     realtime: {
       params: {
@@ -690,6 +705,7 @@ export function getSupabaseClient(): SupabaseClient {
         autoRefreshToken: isBrowser,
         detectSessionInUrl: isBrowser,
         storageKey: UNIFIED_SUPABASE_STORAGE_KEY,
+        ...(isBrowser ? { storage: sharedSafeAuthStorage, lock: sharedSafeAuthLock } : {}),
       },
       realtime: {
         params: {
@@ -736,6 +752,7 @@ export function getMasterDataSupabaseClient(): SupabaseClient<MasterDataDatabase
           autoRefreshToken: isBrowser,
           detectSessionInUrl: isBrowser,
           storageKey: DEDICATED_MASTER_STORAGE_KEY,
+          ...(isBrowser ? { storage: sharedSafeAuthStorage, lock: sharedSafeAuthLock } : {}),
         },
         realtime: {
           params: {

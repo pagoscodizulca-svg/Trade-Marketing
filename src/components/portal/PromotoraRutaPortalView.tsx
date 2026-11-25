@@ -98,12 +98,17 @@ import {
 import {
   buildFallbackPromotoraContext,
   clearPortalAsistenciaDraft,
+  createPortalConsumerSurvey,
+  createPortalInventoryLog,
+  createPortalMerchandisingReport,
+  createPortalPriceSurvey,
   fetchPortalClientsCatalog,
   fetchPortalProductsCatalog,
   getSavedPortalActiveStore,
   loadPortalAsistenciaDraft,
   resolvePortalPromotoraContext,
   savePortalActiveStore,
+  submitPortalAttendanceEvidence,
   type PortalClientOption,
   type PortalProductOption,
   type PortalPromotoraContext,
@@ -429,30 +434,43 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
         }
       }
 
-      // 3. Sesión estándar Supabase Auth por correo electrónico
+      // 3. Sesión estándar Supabase Auth por correo electrónico (blindado contra cuelgues en iOS Safari)
       if (!isSupabaseConfigured) {
         setAuthChecking(false);
         return;
       }
 
-      const client = getSupabaseClient();
-      const { data } = await client.auth.getSession();
-      if (!active) return;
-      if (!data.session) {
-        setProfile(null);
-        setAuthChecking(false);
-        return;
-      }
+      try {
+        const client = getSupabaseClient();
+        const sessionResult = await Promise.race([
+          client.auth.getSession(),
+          new Promise<{ data: { session: null } }>((resolve) =>
+            setTimeout(() => resolve({ data: { session: null } }), 10_000),
+          ),
+        ]);
+        if (!active) return;
+        const activeSession = sessionResult?.data?.session ?? null;
+        if (!activeSession) {
+          setProfile(null);
+          return;
+        }
 
-      const { profile: verified, unauthorizedReason } = await verifyActivePromotoraPortalAccess(
-        data.session
-      );
-      if (!active) return;
-      setProfile(verified);
-      if (unauthorizedReason) {
-        setLoginError(unauthorizedReason);
+        const { profile: verified, unauthorizedReason } = await verifyActivePromotoraPortalAccess(
+          activeSession
+        );
+        if (!active) return;
+        setProfile(verified);
+        if (unauthorizedReason) {
+          setLoginError(unauthorizedReason);
+        }
+      } catch {
+        if (!active) return;
+        setProfile(null);
+      } finally {
+        if (active) {
+          setAuthChecking(false);
+        }
       }
-      setAuthChecking(false);
     };
 
     void bootstrapAuthOrShift();
@@ -463,23 +481,35 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
       };
     }
 
+    let authEventSeq = 0;
     const client = getSupabaseClient();
-    const { data: listener } = client.auth.onAuthStateChange(async (event, session) => {
+    // Diferir verificación asíncrona fuera del frame síncrono de onAuthStateChange (evita deadlock WebKit/iOS)
+    const { data: listener } = client.auth.onAuthStateChange((event, session) => {
       if (!active || inFlightLoginRef.current) return;
+      const mySeq = ++authEventSeq;
       if (event === 'SIGNED_OUT' || !session) {
         setProfile(null);
         setAuthChecking(false);
         return;
       }
 
-      const { profile: verified, unauthorizedReason } =
-        await verifyActivePromotoraPortalAccess(session);
-      if (!active) return;
-      setProfile(verified);
-      if (unauthorizedReason) {
-        setLoginError(unauthorizedReason);
-      }
-      setAuthChecking(false);
+      window.setTimeout(() => {
+        if (!active || inFlightLoginRef.current || mySeq !== authEventSeq) return;
+        void verifyActivePromotoraPortalAccess(session)
+          .then(({ profile: verified, unauthorizedReason }) => {
+            if (!active || inFlightLoginRef.current || mySeq !== authEventSeq) return;
+            setProfile(verified);
+            if (unauthorizedReason) {
+              setLoginError(unauthorizedReason);
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            if (active && mySeq === authEventSeq) {
+              setAuthChecking(false);
+            }
+          });
+      }, 0);
     });
 
     return () => {
@@ -677,6 +707,11 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     shiftExpiresAtIso: shiftSessionState?.session.expires_at ?? null,
     executeAction: async (action) => {
       if (shiftSessionState) {
+        if (action.kind !== 'INCIDENCIA_PDV' && action.kind !== 'RUTA_STEP') {
+          throw new Error(
+            'Este registro de campo requiere sesión estándar de promotora para sincronizar.'
+          );
+        }
         const mut =
           action.kind === 'INCIDENCIA_PDV'
             ? {
@@ -737,17 +772,150 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
         return;
       }
 
-      await submitPromotoraRouteExecution({
-        rutaId: action.rutaId,
-        accion: action.accion,
-        clientSubmissionId: action.id,
-        lat: action.lat,
-        lng: action.lng,
-        accuracyMeters: action.accuracyMeters,
-        motivoFueraGeocerca: action.motivoFueraGeocerca,
-        ejecucion: action.ejecucion ?? null,
-        superAdminBypass: allowGeofenceBypass,
-      });
+      if (action.kind === 'RUTA_STEP') {
+        await submitPromotoraRouteExecution({
+          rutaId: action.rutaId,
+          accion: action.accion,
+          clientSubmissionId: action.id,
+          lat: action.lat,
+          lng: action.lng,
+          accuracyMeters: action.accuracyMeters,
+          motivoFueraGeocerca: action.motivoFueraGeocerca,
+          ejecucion: action.ejecucion ?? null,
+          superAdminBypass: allowGeofenceBypass,
+        });
+        return;
+      }
+
+      const activeCtx = portalContext ?? (profile ? buildFallbackPromotoraContext(profile) : null);
+      if (!activeCtx) {
+        throw new Error('Esperando contexto de promotora para sincronizar registros offline.');
+      }
+
+      if (action.kind === 'INVENTARIO_LOG') {
+        await createPortalInventoryLog({
+          context: activeCtx,
+          store: action.store,
+          zona: action.zona,
+          product: action.product,
+          initialQuantity: action.initialQuantity,
+          salesGenerated: action.salesGenerated,
+          degustations: action.degustations,
+          comments: action.comments,
+          cronogramaId: action.cronogramaId ?? null,
+          clientSubmissionId: action.id,
+        });
+        return;
+      }
+
+      if (action.kind === 'PRECIO_SURVEY') {
+        const photoBlob = action.photoBase64
+          ? decodeBase64ToBlob(action.photoBase64, action.photoMimeType)
+          : null;
+        await createPortalPriceSurvey({
+          context: activeCtx,
+          store: action.store,
+          cadena: action.cadena,
+          zona: action.zona,
+          ourProduct: action.ourProduct,
+          ourPriceUsd: action.ourPriceUsd,
+          ownCurrency: action.ownCurrency,
+          ownOriginalPrice: action.ownOriginalPrice,
+          bcvRate: action.bcvRate,
+          bcvRateDate: action.bcvRateDate,
+          competitors: action.competitors,
+          photoFile: photoBlob,
+          observations: action.observations,
+          ocrAsistido: action.ocrAsistido,
+          ocrConfianza: action.ocrConfianza,
+          clientSubmissionId: action.id,
+        });
+        return;
+      }
+
+      if (action.kind === 'ENCUESTA_CONSUMIDOR') {
+        await createPortalConsumerSurvey({
+          context: activeCtx,
+          store: action.store,
+          product: action.product,
+          sabor: action.sabor,
+          textura: action.textura,
+          intencionCompra: action.intencionCompra,
+          percepcionCalidad: action.percepcionCalidad,
+          relacionCalidadPrecio: action.relacionCalidadPrecio,
+          recomendacion: action.recomendacion,
+          comments: action.comments,
+          clientSubmissionId: action.id,
+        });
+        return;
+      }
+
+      if (action.kind === 'MERCHANDISING_REPORT') {
+        const photoBlobs = (action.photosBase64 || []).map((p) =>
+          decodeBase64ToBlob(p.base64, p.mimeType)
+        );
+        const signatureBlob = action.signatureBase64
+          ? decodeBase64ToBlob(action.signatureBase64, 'image/png')
+          : null;
+        await createPortalMerchandisingReport({
+          context: activeCtx,
+          mode: action.mode,
+          store: action.store,
+          address: action.address,
+          date: action.date,
+          time: action.time,
+          activities: action.activities,
+          productDetail: action.productDetail,
+          observations: action.observations,
+          storeManagerName: action.storeManagerName,
+          storeManagerRole: action.storeManagerRole,
+          storeManagerPhone: action.storeManagerPhone,
+          photoFiles: photoBlobs,
+          signatureBlob,
+          shelfMetrics: action.shelfMetrics,
+          clientSubmissionId: action.id,
+        });
+        return;
+      }
+
+      if (action.kind === 'ASISTENCIA_EVIDENCIA') {
+        const imageBlob = decodeBase64ToBlob(action.photoBase64, action.photoMimeType);
+        let lat = action.lat;
+        let lng = action.lng;
+        let gpsAccuracy = action.gpsAccuracy;
+        let locationSource = action.locationSource;
+        if (lat === null || lng === null) {
+          const fallbackLoc = await resolveDirectLocationCascade({
+            fallbackContext: {
+              pdvNombre: action.pdvNombre,
+              region: activeCtx.region,
+              sucursal: profile?.sucursal ?? null,
+            },
+          });
+          if (fallbackLoc.ok) {
+            lat = fallbackLoc.fix.lat;
+            lng = fallbackLoc.fix.lng;
+            gpsAccuracy = fallbackLoc.fix.accuracyMeters;
+            locationSource = fallbackLoc.fix.locationSource;
+          }
+        }
+        if (lat === null || lng === null) {
+          throw new Error('Esperando ubicación válida para sincronizar la asistencia pendiente.');
+        }
+        await submitPortalAttendanceEvidence({
+          context: activeCtx,
+          slotFoto: action.slotFoto,
+          pdvNombre: action.pdvNombre,
+          zona: action.zona,
+          lat,
+          lng,
+          gpsAccuracy,
+          locationSource,
+          imageFile: imageBlob,
+          fechaJornada: action.fechaJornada,
+        });
+        return;
+      }
     },
     onSynced: (count) => {
       showBanner(`${count} registro(s) offline sincronizado(s) con el servidor.`);
@@ -1109,7 +1277,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
                 value={emailInput}
                 onChange={(e) => setEmailInput(e.target.value)}
                 placeholder="nombre@correo.com"
-                className="w-full px-3.5 py-3 rounded-xl bg-black border border-zinc-700 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
+                className="w-full px-3.5 py-3 rounded-xl bg-black border border-zinc-700 text-base sm:text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
               />
             </div>
 
@@ -1125,13 +1293,16 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
                   id="portal-promotora-password"
                   name="password"
                   type={showPassword ? 'text' : 'password'}
+                  autoCapitalize="none"
+                  autoCorrect="off"
                   autoComplete="current-password"
+                  spellCheck={false}
                   required
                   disabled={isSubmitting}
                   value={passwordInput}
                   onChange={(e) => setPasswordInput(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full pl-3.5 pr-11 py-3 rounded-xl bg-black border border-zinc-700 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
+                  className="w-full pl-3.5 pr-11 py-3 rounded-xl bg-black border border-zinc-700 text-base sm:text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 disabled:opacity-60 transition"
                 />
                 <button
                   type="button"
@@ -1738,6 +1909,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}
+            onActionQueuedOffline={() => void refreshPending()}
           />
         )}
 
@@ -1749,6 +1921,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}
+            onActionQueuedOffline={() => void refreshPending()}
           />
         )}
 
@@ -1760,6 +1933,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}
+            onActionQueuedOffline={() => void refreshPending()}
           />
         )}
 
@@ -1771,6 +1945,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}
+            onActionQueuedOffline={() => void refreshPending()}
           />
         )}
 
@@ -1781,6 +1956,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}
+            onActionQueuedOffline={() => void refreshPending()}
           />
         )}
 

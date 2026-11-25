@@ -7,6 +7,12 @@
  */
 
 import type { EjecucionPdvInput, RutaPromotoraRecord } from '../types/degustacionesPipeline';
+import type {
+  AttendanceLocationSource,
+  SlotFotoAsistencia,
+} from '../types/attendanceEvidences';
+import type { PriceCurrency } from '../utils/bimonetaryPriceMath';
+import { compressAttendancePhotoForMobileUpload } from '../utils/attendanceImageCompressor';
 import type { SeveridadIncidenciaPdv, TipoIncidenciaPdv } from './popIncidenciasService';
 import type { OperativeSucursal } from './userManagementService';
 import type { VerifiedShiftSession } from './shiftLinksService';
@@ -65,9 +71,133 @@ export interface QueuedPortalIncidenciaAction {
   createdAtIso: string;
 }
 
+export interface QueuedPortalInventoryAction {
+  /** Identificador único idempotente (`client_submission_id`) */
+  id: string;
+  kind: 'INVENTARIO_LOG';
+  store: string;
+  zona?: string;
+  product: string;
+  initialQuantity: number;
+  salesGenerated: number;
+  degustations: number;
+  comments?: string;
+  cronogramaId?: string | null;
+  attemptCount: number;
+  nextRetryAtMs: number;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export interface QueuedPortalPriceAction {
+  /** Identificador único idempotente (`client_submission_id`) */
+  id: string;
+  kind: 'PRECIO_SURVEY';
+  store: string;
+  cadena?: string;
+  zona?: string;
+  ourProduct: string;
+  ourPriceUsd: number;
+  ownCurrency?: PriceCurrency;
+  ownOriginalPrice?: number;
+  bcvRate: number;
+  bcvRateDate?: string;
+  competitors: Array<{
+    name: string;
+    priceUsd?: number;
+    originalPrice?: number;
+    currency?: PriceCurrency;
+  }>;
+  photoBase64?: string | null;
+  photoMimeType?: AllowedIncidenciaPhotoMime | null;
+  observations?: string;
+  ocrAsistido?: boolean;
+  ocrConfianza?: 'alta' | 'media' | 'baja' | null;
+  attemptCount: number;
+  nextRetryAtMs: number;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export interface QueuedPortalSurveyAction {
+  /** Identificador único idempotente (`client_submission_id`) */
+  id: string;
+  kind: 'ENCUESTA_CONSUMIDOR';
+  store: string;
+  product: string;
+  sabor: number;
+  textura: number;
+  intencionCompra: 'Muy probable' | 'Probable' | 'Poco probable' | 'Nada probable';
+  percepcionCalidad: 'Mejor' | 'Igual' | 'Peor';
+  relacionCalidadPrecio: 'Excelente' | 'Buena' | 'Regular' | 'Mala';
+  recomendacion: number;
+  comments?: string;
+  attemptCount: number;
+  nextRetryAtMs: number;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export interface QueuedPortalMerchandisingAction {
+  /** Identificador único idempotente (`client_submission_id`) */
+  id: string;
+  kind: 'MERCHANDISING_REPORT';
+  mode: 'escaneo_gondola' | 'certificacion_visita';
+  store: string;
+  address?: string;
+  date: string;
+  time: string;
+  activities: string[];
+  productDetail: string;
+  observations?: string;
+  storeManagerName?: string;
+  storeManagerRole?: string;
+  storeManagerPhone?: string;
+  photosBase64: Array<{ base64: string; mimeType: AllowedIncidenciaPhotoMime }>;
+  signatureBase64?: string | null;
+  shelfMetrics?: {
+    category: string;
+    ourFacings: number;
+    competitorFacings: number;
+    totalFacings: number;
+    shareOfShelfPercent: number;
+    outOfStockDetected: boolean;
+    popDetected: boolean;
+  };
+  attemptCount: number;
+  nextRetryAtMs: number;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export interface QueuedPortalAttendanceAction {
+  /** Identificador único idempotente (`client_submission_id`) */
+  id: string;
+  kind: 'ASISTENCIA_EVIDENCIA';
+  slotFoto: SlotFotoAsistencia;
+  pdvNombre: string;
+  zona?: string;
+  lat: number | null;
+  lng: number | null;
+  gpsAccuracy: number | null;
+  locationSource?: AttendanceLocationSource;
+  fechaJornada?: string;
+  photoBase64: string;
+  photoMimeType: AllowedIncidenciaPhotoMime;
+  attemptCount: number;
+  nextRetryAtMs: number;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
 export type QueuedPortalAction =
   | QueuedPortalRutaStepAction
-  | QueuedPortalIncidenciaAction;
+  | QueuedPortalIncidenciaAction
+  | QueuedPortalInventoryAction
+  | QueuedPortalPriceAction
+  | QueuedPortalSurveyAction
+  | QueuedPortalMerchandisingAction
+  | QueuedPortalAttendanceAction;
 
 export interface EnqueuePortalActionInput {
   id?: string;
@@ -385,6 +515,12 @@ export function isTransientOfflineOrNetworkError(err: unknown): boolean {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return true;
   }
+  if (err && typeof err === 'object') {
+    const obj = err as { category?: unknown; name?: unknown };
+    if (obj.category === 'NETWORK_OFFLINE' || obj.name === 'AbortError') {
+      return true;
+    }
+  }
   const msg = String((err as { message?: string })?.message ?? err ?? '').toLowerCase();
   return (
     msg.includes('failed to fetch') ||
@@ -392,6 +528,7 @@ export function isTransientOfflineOrNetworkError(err: unknown): boolean {
     msg.includes('network request failed') ||
     msg.includes('fetch failed') ||
     msg.includes('load failed') ||
+    msg.includes('aborted') ||
     msg.includes('offline') ||
     msg.includes('sin conexión') ||
     msg.includes('timeout') ||
@@ -505,6 +642,254 @@ export async function enqueuePortalIncidenciaOffline(
     createdAtIso: new Date(nowMs).toISOString(),
   };
 
+  await putActionRecord(item);
+  return item;
+}
+
+/**
+ * Comprime (incluyendo fotos HEIC/HEIF de iPhone en navegador) y codifica un Blob de imagen
+ * a Base64 seguro para persistencia offline en IndexedDB.
+ */
+export async function encodeBlobToOfflineBase64(
+  file: Blob,
+  maxLongestSidePx = 1280
+): Promise<{ base64: string; mimeType: AllowedIncidenciaPhotoMime }> {
+  let targetBlob: Blob = file;
+  let mimeType: AllowedIncidenciaPhotoMime =
+    file.type === 'image/png' || file.type === 'image/webp' || file.type === 'image/jpeg'
+      ? file.type
+      : 'image/jpeg';
+
+  try {
+    const compressed = await compressAttendancePhotoForMobileUpload(file, {
+      maxLongestSidePx,
+      quality: 0.78,
+    });
+    targetBlob = compressed.blob;
+    mimeType = compressed.mimeType;
+  } catch {
+    // Si ya es JPEG/PNG/WebP válido en entorno sin canvas, validar magic bytes abajo
+  }
+
+  const rawBuf = await targetBlob.arrayBuffer();
+  const verified = validateClientImageMagicBytes(rawBuf, MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES);
+  const base64 = encodeBinaryToBase64(rawBuf, MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES);
+  return { base64, mimeType: verified.mimeType ?? mimeType };
+}
+
+export async function enqueuePortalInventoryAction(input: {
+  id?: string;
+  store: string;
+  zona?: string;
+  product: string;
+  initialQuantity: number;
+  salesGenerated: number;
+  degustations: number;
+  comments?: string;
+  cronogramaId?: string | null;
+  nowMs?: number;
+}): Promise<QueuedPortalInventoryAction> {
+  const nowMs = input.nowMs ?? Date.now();
+  const item: QueuedPortalInventoryAction = {
+    id: input.id && input.id.trim() ? input.id.trim() : generateSubmissionId(),
+    kind: 'INVENTARIO_LOG',
+    store: String(input.store || '').trim(),
+    zona: input.zona,
+    product: String(input.product || '').trim(),
+    initialQuantity: Number(input.initialQuantity),
+    salesGenerated: Number(input.salesGenerated),
+    degustations: Number(input.degustations),
+    comments: input.comments,
+    cronogramaId: input.cronogramaId ?? null,
+    attemptCount: 0,
+    nextRetryAtMs: nowMs,
+    lastError: null,
+    createdAtIso: new Date(nowMs).toISOString(),
+  };
+  await putActionRecord(item);
+  return item;
+}
+
+export async function enqueuePortalPriceAction(input: {
+  id?: string;
+  store: string;
+  cadena?: string;
+  zona?: string;
+  ourProduct: string;
+  ourPriceUsd: number;
+  ownCurrency?: PriceCurrency;
+  ownOriginalPrice?: number;
+  bcvRate: number;
+  bcvRateDate?: string;
+  competitors: Array<{
+    name: string;
+    priceUsd?: number;
+    originalPrice?: number;
+    currency?: PriceCurrency;
+  }>;
+  photoFile?: Blob | null;
+  observations?: string;
+  ocrAsistido?: boolean;
+  ocrConfianza?: 'alta' | 'media' | 'baja' | null;
+  nowMs?: number;
+}): Promise<QueuedPortalPriceAction> {
+  let photoBase64: string | null = null;
+  let photoMimeType: AllowedIncidenciaPhotoMime | null = null;
+  if (input.photoFile) {
+    const encoded = await encodeBlobToOfflineBase64(input.photoFile, 960);
+    photoBase64 = encoded.base64;
+    photoMimeType = encoded.mimeType;
+  }
+  const nowMs = input.nowMs ?? Date.now();
+  const item: QueuedPortalPriceAction = {
+    id: input.id && input.id.trim() ? input.id.trim() : generateSubmissionId(),
+    kind: 'PRECIO_SURVEY',
+    store: String(input.store || '').trim(),
+    cadena: input.cadena,
+    zona: input.zona,
+    ourProduct: String(input.ourProduct || '').trim(),
+    ourPriceUsd: Number(input.ourPriceUsd),
+    ownCurrency: input.ownCurrency,
+    ownOriginalPrice: input.ownOriginalPrice,
+    bcvRate: Number(input.bcvRate),
+    bcvRateDate: input.bcvRateDate,
+    competitors: input.competitors,
+    photoBase64,
+    photoMimeType,
+    observations: input.observations,
+    ocrAsistido: input.ocrAsistido,
+    ocrConfianza: input.ocrConfianza ?? null,
+    attemptCount: 0,
+    nextRetryAtMs: nowMs,
+    lastError: null,
+    createdAtIso: new Date(nowMs).toISOString(),
+  };
+  await putActionRecord(item);
+  return item;
+}
+
+export async function enqueuePortalSurveyAction(input: {
+  id?: string;
+  store: string;
+  product: string;
+  sabor: number;
+  textura: number;
+  intencionCompra: 'Muy probable' | 'Probable' | 'Poco probable' | 'Nada probable';
+  percepcionCalidad: 'Mejor' | 'Igual' | 'Peor';
+  relacionCalidadPrecio: 'Excelente' | 'Buena' | 'Regular' | 'Mala';
+  recomendacion: number;
+  comments?: string;
+  nowMs?: number;
+}): Promise<QueuedPortalSurveyAction> {
+  const nowMs = input.nowMs ?? Date.now();
+  const item: QueuedPortalSurveyAction = {
+    id: input.id && input.id.trim() ? input.id.trim() : generateSubmissionId(),
+    kind: 'ENCUESTA_CONSUMIDOR',
+    store: String(input.store || '').trim(),
+    product: String(input.product || '').trim(),
+    sabor: input.sabor,
+    textura: input.textura,
+    intencionCompra: input.intencionCompra,
+    percepcionCalidad: input.percepcionCalidad,
+    relacionCalidadPrecio: input.relacionCalidadPrecio,
+    recomendacion: input.recomendacion,
+    comments: input.comments,
+    attemptCount: 0,
+    nextRetryAtMs: nowMs,
+    lastError: null,
+    createdAtIso: new Date(nowMs).toISOString(),
+  };
+  await putActionRecord(item);
+  return item;
+}
+
+export async function enqueuePortalMerchandisingAction(input: {
+  id?: string;
+  mode: 'escaneo_gondola' | 'certificacion_visita';
+  store: string;
+  address?: string;
+  date: string;
+  time: string;
+  activities: string[];
+  productDetail: string;
+  observations?: string;
+  storeManagerName?: string;
+  storeManagerRole?: string;
+  storeManagerPhone?: string;
+  photoFiles: Blob[];
+  signatureBlob?: Blob | null;
+  shelfMetrics?: QueuedPortalMerchandisingAction['shelfMetrics'];
+  nowMs?: number;
+}): Promise<QueuedPortalMerchandisingAction> {
+  const photosBase64: Array<{ base64: string; mimeType: AllowedIncidenciaPhotoMime }> = [];
+  for (const photo of input.photoFiles.slice(0, 6)) {
+    photosBase64.push(await encodeBlobToOfflineBase64(photo, 1200));
+  }
+  let signatureBase64: string | null = null;
+  if (input.signatureBlob) {
+    const rawBuf = await input.signatureBlob.arrayBuffer();
+    signatureBase64 = encodeBinaryToBase64(rawBuf, MAX_OFFLINE_INCIDENCIA_PHOTO_BYTES);
+  }
+  const nowMs = input.nowMs ?? Date.now();
+  const item: QueuedPortalMerchandisingAction = {
+    id: input.id && input.id.trim() ? input.id.trim() : generateSubmissionId(),
+    kind: 'MERCHANDISING_REPORT',
+    mode: input.mode,
+    store: String(input.store || '').trim(),
+    address: input.address,
+    date: input.date,
+    time: input.time,
+    activities: input.activities,
+    productDetail: input.productDetail,
+    observations: input.observations,
+    storeManagerName: input.storeManagerName,
+    storeManagerRole: input.storeManagerRole,
+    storeManagerPhone: input.storeManagerPhone,
+    photosBase64,
+    signatureBase64,
+    shelfMetrics: input.shelfMetrics,
+    attemptCount: 0,
+    nextRetryAtMs: nowMs,
+    lastError: null,
+    createdAtIso: new Date(nowMs).toISOString(),
+  };
+  await putActionRecord(item);
+  return item;
+}
+
+export async function enqueuePortalAttendanceAction(input: {
+  id?: string;
+  slotFoto: SlotFotoAsistencia;
+  pdvNombre: string;
+  zona?: string;
+  lat: number | null;
+  lng: number | null;
+  gpsAccuracy: number | null;
+  locationSource?: AttendanceLocationSource;
+  fechaJornada?: string;
+  imageFile: Blob;
+  nowMs?: number;
+}): Promise<QueuedPortalAttendanceAction> {
+  const encoded = await encodeBlobToOfflineBase64(input.imageFile, 1280);
+  const nowMs = input.nowMs ?? Date.now();
+  const item: QueuedPortalAttendanceAction = {
+    id: input.id && input.id.trim() ? input.id.trim() : generateSubmissionId(),
+    kind: 'ASISTENCIA_EVIDENCIA',
+    slotFoto: input.slotFoto,
+    pdvNombre: String(input.pdvNombre || '').trim(),
+    zona: input.zona,
+    lat: input.lat,
+    lng: input.lng,
+    gpsAccuracy: input.gpsAccuracy,
+    locationSource: input.locationSource ?? 'gps_high',
+    fechaJornada: input.fechaJornada,
+    photoBase64: encoded.base64,
+    photoMimeType: encoded.mimeType,
+    attemptCount: 0,
+    nextRetryAtMs: nowMs,
+    lastError: null,
+    createdAtIso: new Date(nowMs).toISOString(),
+  };
   await putActionRecord(item);
   return item;
 }

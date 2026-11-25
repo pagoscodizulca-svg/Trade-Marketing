@@ -3,6 +3,7 @@ import {
   ALLOWED_ATTENDANCE_IMAGE_MIMES,
   MAX_ATTENDANCE_EVIDENCE_BYTES,
 } from '../types/attendanceEvidences';
+import { isCanvasFrameSolidBlack } from './cameraFrameGuard';
 
 export interface CompressedAttendanceImage {
   blob: Blob;
@@ -16,11 +17,41 @@ export interface CompressedAttendanceImage {
 const ALLOWED_MIME_SET = new Set<string>(ALLOWED_ATTENDANCE_IMAGE_MIMES);
 const DEFAULT_MAX_LONGEST_SIDE_PX = 1600;
 const DEFAULT_QUALITY = 0.8;
+const HEIC_ISOBMFF_BRANDS = new Set([
+  'heic',
+  'heix',
+  'hevc',
+  'hevx',
+  'heim',
+  'heis',
+  'mif1',
+  'msf1',
+]);
+
+/**
+ * Detecta cabeceras reales ISO-BMFF de fotografías HEIC/HEIF capturadas por iPhone (iOS),
+ * permitiendo su transcodificación segura a JPEG/WebP en `<canvas>` sin permitir archivos maliciosos.
+ */
+export function isHeicHeaderBytes(bytes: Uint8Array): boolean {
+  if (!bytes || bytes.length < 12) return false;
+  // Caja ISO-BMFF `ftyp` en bytes 4..7
+  if (
+    bytes[4] !== 0x66 || // f
+    bytes[5] !== 0x74 || // t
+    bytes[6] !== 0x79 || // y
+    bytes[7] !== 0x70 // p
+  ) {
+    return false;
+  }
+  const majorBrand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]).toLowerCase();
+  return HEIC_ISOBMFF_BRANDS.has(majorBrand);
+}
 
 /**
  * Valida en el navegador los primeros bytes reales del archivo seleccionado antes de
  * decodificarlo en `<canvas>` o enviarlo por red, bloqueando de inmediato archivos
  * `.svg`, `.html`, `.exe` o extensiones falsificadas.
+ * Admite fotos HEIC/HEIF nativas de iPhone (iOS) para transcodificarlas a JPEG en `<canvas>`.
  */
 export async function validateClientImageHeaderBytes(
   file: Blob
@@ -34,7 +65,7 @@ export async function validateClientImageHeaderBytes(
 
   if (bytes.length < 12) {
     throw new Error(
-      'Archivo inválido. Seleccione una fotografía válida en formato JPEG, PNG o WebP.'
+      'Archivo inválido. Seleccione una fotografía válida en formato JPEG, PNG, WebP o HEIC (iPhone).'
     );
   }
 
@@ -87,8 +118,12 @@ export async function validateClientImageHeaderBytes(
     return 'image/webp';
   }
 
+  if (isHeicHeaderBytes(bytes)) {
+    return 'image/jpeg';
+  }
+
   throw new Error(
-    'Formato no admitido. Suba únicamente fotografías reales en formato JPEG, PNG o WebP.'
+    'Formato no admitido. Suba únicamente fotografías reales en formato JPEG, PNG, WebP o HEIC (iPhone).'
   );
 }
 
@@ -157,6 +192,8 @@ export async function compressAttendancePhotoForMobileUpload(
     quality?: number;
   }
 ): Promise<CompressedAttendanceImage> {
+  const headBytes = new Uint8Array(await file.slice(0, 32).arrayBuffer());
+  const sourceIsHeic = isHeicHeaderBytes(headBytes);
   const detectedMime = await validateClientImageHeaderBytes(file);
   const maxSide = options?.maxLongestSidePx ?? DEFAULT_MAX_LONGEST_SIDE_PX;
   const quality = options?.quality ?? DEFAULT_QUALITY;
@@ -206,14 +243,43 @@ export async function compressAttendancePhotoForMobileUpload(
     canvas.width = width;
     canvas.height = height;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       throw new Error('No se pudo inicializar el motor gráfico de compresión en el navegador.');
     }
 
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(drawSource, 0, 0, width, height);
+
+    // Protección contra fallo GPU/iOS Safari donde createImageBitmap pinta un lienzo en negro
+    if (bitmapToClose && isCanvasFrameSolidBlack(ctx, width, height)) {
+      const imgEl = await loadHtmlImageFromBlob(file);
+      if (typeof imgEl.decode === 'function') {
+        await imgEl.decode().catch(() => undefined);
+      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(imgEl, 0, 0, width, height);
+    }
+
+    // Si aún así el canvas quedara corrupto/en negro pero el archivo original es seguro <= 5 MB (y no HEIC crudo), preservar el original
+    if (
+      !sourceIsHeic &&
+      isCanvasFrameSolidBlack(ctx, width, height) &&
+      file.size <= MAX_ATTENDANCE_EVIDENCE_BYTES
+    ) {
+      return {
+        blob: file,
+        mimeType: detectedMime,
+        width: naturalWidth || width,
+        height: naturalHeight || height,
+        originalBytes: file.size,
+        compressedBytes: file.size,
+      };
+    }
 
     // Intentar WebP primero (óptimo para redes móviles 3G/4G), con fallback a JPEG
     let outputMime: AllowedAttendanceImageMime = 'image/webp';

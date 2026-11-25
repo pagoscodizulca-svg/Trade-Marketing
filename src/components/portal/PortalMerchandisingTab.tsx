@@ -22,6 +22,10 @@ import {
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
 import { PortalStoreSelector } from './PortalCatalogSelectors';
+import {
+  enqueuePortalMerchandisingAction,
+  isTransientOfflineOrNetworkError,
+} from '../../services/portalOfflineQueueService';
 
 interface PortalMerchandisingTabProps {
   context: PortalPromotoraContext;
@@ -29,6 +33,7 @@ interface PortalMerchandisingTabProps {
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
+  onActionQueuedOffline?: () => void;
 }
 
 export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
@@ -37,6 +42,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
   activeStore,
   onActiveStoreChange,
   onNotify,
+  onActionQueuedOffline,
 }) => {
   const [subTab, setSubTab] = useState<'escaneo_gondola' | 'certificacion_visita'>(
     'certificacion_visita'
@@ -224,6 +230,62 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
       setSavedSuccess(true);
       onNotify('Informe de Merchandising sincronizado con Módulo 1 → Merchandising');
     } catch (err) {
+      if (isTransientOfflineOrNetworkError(err)) {
+        try {
+          let offlineSignatureBlob: Blob | null = null;
+          if (subTab === 'certificacion_visita' && hasSignature && canvasRef.current) {
+            offlineSignatureBlob = await new Promise<Blob | null>((resolve) =>
+              canvasRef.current?.toBlob((b) => resolve(b), 'image/png')
+            );
+          }
+          const nowTime = new Date().toLocaleTimeString('es-VE', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZone: 'America/Caracas',
+          });
+          await enqueuePortalMerchandisingAction({
+            id: clientSubmissionIdRef.current,
+            mode: subTab,
+            store: activeStore.trim(),
+            address,
+            date: getCaracasTodayYmd(),
+            time: nowTime,
+            activities:
+              subTab === 'escaneo_gondola'
+                ? ['Escaneo Inteligente de Góndolas', 'Medición de Share of Shelf']
+                : selectedActivities,
+            productDetail,
+            observations,
+            storeManagerName,
+            storeManagerRole,
+            storeManagerPhone,
+            photoFiles,
+            signatureBlob: offlineSignatureBlob,
+            shelfMetrics:
+              subTab === 'escaneo_gondola'
+                ? {
+                    category: shelfCategory,
+                    ourFacings,
+                    competitorFacings: compFacings,
+                    totalFacings,
+                    shareOfShelfPercent,
+                    outOfStockDetected,
+                    popDetected,
+                  }
+                : undefined,
+          });
+          clientSubmissionIdRef.current = generateClientSubmissionId();
+          setSavedSuccess(true);
+          onActionQueuedOffline?.();
+          onNotify(
+            'Sin señal: informe de Merchandising guardado en cola offline del teléfono. Se enviará al recuperar red.'
+          );
+          return;
+        } catch {
+          // Si falló IndexedDB, mostrar error original
+        }
+      }
       setSubmitError(err instanceof Error ? err.message : 'No se pudo guardar el informe.');
     } finally {
       isSubmittingRef.current = false;
@@ -536,7 +598,7 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
                   <input
                     type="file"
                     multiple
-                    accept="image/jpeg,image/png,image/webp"
+                    accept="image/*"
                     onChange={handleAddPhotos}
                     className="hidden"
                   />

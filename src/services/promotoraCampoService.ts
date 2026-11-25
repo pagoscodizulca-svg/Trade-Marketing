@@ -12,6 +12,7 @@ import {
   isSlotAllowedForProfile,
 } from '../types/attendanceEvidences';
 import { isValidCoordinatePair } from '../utils/geofenceHaversine';
+import { isCanvasFrameSolidBlack } from '../utils/cameraFrameGuard';
 import type { ClienteConVendedor, ProductoMaestro } from '../types/masterData';
 import type { RutaPromotoraRecord } from '../types/degustacionesPipeline';
 import type { VerifiedAuthProfile } from './authService';
@@ -574,6 +575,23 @@ export async function fetchPortalProductsCatalog(): Promise<PortalProductOption[
   }
 }
 
+const HEIC_IMAGE_MIMES = new Set([
+  'image/heic',
+  'image/heif',
+  'image/heic-sequence',
+  'image/heif-sequence',
+]);
+
+function isHeicOrHeifPortalImage(file: File | Blob): boolean {
+  const mime = String(file?.type || '').trim().toLowerCase();
+  if (HEIC_IMAGE_MIMES.has(mime)) return true;
+  const name =
+    typeof File !== 'undefined' && file instanceof File
+      ? String(file.name || '').trim().toLowerCase()
+      : '';
+  return /\.(heic|heif)$/i.test(name);
+}
+
 export function validatePortalImageFile(file: File | Blob): {
   mimeType: AllowedAttendanceImageMime;
   ext: 'jpg' | 'png' | 'webp';
@@ -584,9 +602,31 @@ export function validatePortalImageFile(file: File | Blob): {
   if (file.size > MAX_ATTENDANCE_EVIDENCE_BYTES) {
     throw new Error('La fotografía supera el límite máximo permitido de 5 MB.');
   }
-  const mime = String(file.type || '').trim().toLowerCase() as AllowedAttendanceImageMime;
+  const rawMime = String(file.type || '').trim().toLowerCase();
+  const fileName =
+    typeof File !== 'undefined' && file instanceof File
+      ? String(file.name || '').trim().toLowerCase()
+      : '';
+
+  // Fotos nativas de iPhone (HEIC/HEIF) admitidas para transcodificación automática a JPEG en <canvas>
+  if (HEIC_IMAGE_MIMES.has(rawMime) || (rawMime === '' && /\.(heic|heif)$/i.test(fileName))) {
+    return { mimeType: 'image/jpeg', ext: 'jpg' };
+  }
+
+  let mime = rawMime as AllowedAttendanceImageMime;
+  // Algunos WebViews iOS/Android entregan file.type vacío al retornar desde cámara nativa
+  if (!rawMime && fileName) {
+    if (/\.png$/i.test(fileName)) {
+      mime = 'image/png';
+    } else if (/\.webp$/i.test(fileName)) {
+      mime = 'image/webp';
+    } else if (/\.(jpe?g)$/i.test(fileName)) {
+      mime = 'image/jpeg';
+    }
+  }
+
   if (!ALLOWED_ATTENDANCE_IMAGE_MIMES.includes(mime)) {
-    throw new Error('Formato de imagen no permitido. Usa únicamente JPEG, PNG o WebP.');
+    throw new Error('Formato de imagen no permitido. Usa únicamente JPEG, PNG, WebP o HEIC (iPhone).');
   }
   const ext: 'jpg' | 'png' | 'webp' =
     mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
@@ -653,6 +693,7 @@ export async function stampAndCompressImageBlob(params: {
   sha256Hex: string;
 }> {
   const validated = validatePortalImageFile(params.file);
+  const sourceIsHeic = isHeicOrHeifPortalImage(params.file);
   const maxDim = params.maxDimension ?? 1024;
 
   // En entornos headless o archivos pequeños PNG sintéticos de QA, si Canvas no está disponible devolvemos el original validado
@@ -682,6 +723,9 @@ export async function stampAndCompressImageBlob(params: {
       el.onerror = () => reject(new Error('No se pudo decodificar la imagen.'));
       el.src = dataUrl;
     });
+    if (typeof img.decode === 'function') {
+      await img.decode().catch(() => undefined);
+    }
 
     let width = img.naturalWidth || img.width || 640;
     let height = img.naturalHeight || img.height || 480;
@@ -699,39 +743,57 @@ export async function stampAndCompressImageBlob(params: {
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
-        if (params.watermarkText && height >= 120) {
-          const barH = Math.min(44, Math.max(26, Math.round(height * 0.08)));
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-          ctx.fillRect(0, height - barH, width, barH);
-          ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${Math.max(10, Math.round(barH * 0.36))}px monospace`;
-          ctx.fillText(params.watermarkText.slice(0, 95), 10, height - Math.round(barH * 0.32));
-        }
 
-        const outMime: AllowedAttendanceImageMime =
-          validated.mimeType === 'image/png' ? 'image/png' : 'image/jpeg';
-        const outExt: 'jpg' | 'png' = outMime === 'image/png' ? 'png' : 'jpg';
-        const outBlob = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob((b) => resolve(b), outMime, 0.82)
-        );
-        if (outBlob && outBlob.size > 0 && outBlob.size <= MAX_ATTENDANCE_EVIDENCE_BYTES) {
-          const sha256Hex = await computeSha256Hex(outBlob);
-          return {
-            blob: outBlob,
-            mimeType: outMime,
-            ext: outExt,
-            width,
-            height,
-            sha256Hex,
-          };
+        // Si el motor gráfico móvil dibujó un fotograma negro/corrupto, NO sobrescribir la foto real:
+        // caer al archivo original ya validado por magic bytes.
+        if (!isCanvasFrameSolidBlack(ctx, width, height)) {
+          if (params.watermarkText && height >= 120) {
+            const barH = Math.min(44, Math.max(26, Math.round(height * 0.08)));
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+            ctx.fillRect(0, height - barH, width, barH);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(10, Math.round(barH * 0.36))}px monospace`;
+            ctx.fillText(params.watermarkText.slice(0, 95), 10, height - Math.round(barH * 0.32));
+          }
+
+          const outMime: AllowedAttendanceImageMime =
+            validated.mimeType === 'image/png' ? 'image/png' : 'image/jpeg';
+          const outExt: 'jpg' | 'png' = outMime === 'image/png' ? 'png' : 'jpg';
+          const outBlob = await new Promise<Blob | null>((resolve) =>
+            canvas.toBlob((b) => resolve(b), outMime, 0.82)
+          );
+          if (outBlob && outBlob.size > 0 && outBlob.size <= MAX_ATTENDANCE_EVIDENCE_BYTES) {
+            const sha256Hex = await computeSha256Hex(outBlob);
+            return {
+              blob: outBlob,
+              mimeType: outMime,
+              ext: outExt,
+              width,
+              height,
+              sha256Hex,
+            };
+          }
         }
       }
     }
   } catch {
+    if (sourceIsHeic) {
+      throw new Error(
+        'Tu navegador no pudo convertir la foto HEIC a JPEG. Usa "Cámara In-App" o selecciona una foto en formato JPEG/PNG.'
+      );
+    }
     // Fallback seguro al blob original ya validado
+  }
+
+  if (sourceIsHeic) {
+    throw new Error(
+      'No se pudo convertir la foto HEIC a JPEG antes de subirla. Intenta capturar la fotografía nuevamente.'
+    );
   }
 
   const sha256Hex = await computeSha256Hex(params.file);
@@ -882,6 +944,49 @@ export async function fetchPortalTodayAttendance(params: {
   }
 
   return { jornada, evidencias, signedUrlsByEvidenceId };
+}
+
+/**
+ * Firma en lote rutas sanitizadas dentro del bucket privado `asistencia-evidencias`
+ * (usado por evidencias y firmas de Merchandising subidas desde `/portal`).
+ */
+export async function signPortalStoragePathsBatch(
+  paths: readonly string[]
+): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  if (!isSupabaseConfigured || !Array.isArray(paths) || paths.length === 0) {
+    return result;
+  }
+
+  const sanitized = Array.from(
+    new Set(
+      paths
+        .map((p) => String(p || '').trim())
+        .filter((p) => p.length > 0 && !p.includes('..') && !p.startsWith('/'))
+    )
+  );
+  if (sanitized.length === 0) return result;
+
+  const client = getSupabaseClient();
+  for (let i = 0; i < sanitized.length; i += 50) {
+    const chunk = sanitized.slice(i, i + 50);
+    try {
+      const { data, error } = await client.storage
+        .from(ASISTENCIA_PRIVATE_BUCKET_ID)
+        .createSignedUrls(chunk, 900);
+      if (!error && Array.isArray(data)) {
+        chunk.forEach((origPath, idx) => {
+          const signed = data[idx]?.signedUrl;
+          if (signed) {
+            result[origPath] = signed;
+          }
+        });
+      }
+    } catch {
+      // Continuar con el resto de lotes ante error transitorio de red
+    }
+  }
+  return result;
 }
 
 function extractSupabaseErrorDetails(err: unknown): SupabaseErrorDetails {
@@ -1625,6 +1730,50 @@ export async function fetchPortalInventoryLogs(
   }));
 }
 
+export function resolvePortalCanonicalSucursal(
+  region?: string | null
+): 'OCCIDENTE' | 'CENTRO' {
+  const token = String(region || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+  if (
+    token === 'CENTRO' ||
+    token === 'VALENCIA' ||
+    token === 'CARABOBO' ||
+    token === 'ARAGUA' ||
+    token === 'MARACAY' ||
+    token === 'CAPITAL' ||
+    token === 'CARACAS' ||
+    token === 'ANDES' ||
+    token === 'MERIDA' ||
+    token === 'TACHIRA' ||
+    token === 'BARINAS'
+  ) {
+    return 'CENTRO';
+  }
+  return 'OCCIDENTE';
+}
+
+async function ensureActivePortalWriteSession(
+  client: ReturnType<typeof getSupabaseClient>
+): Promise<void> {
+  if (!client?.auth || typeof client.auth.getSession !== 'function') return;
+  try {
+    const current = await client.auth.getSession();
+    const session = current.data?.session ?? null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const isExpiringSoon =
+      typeof session?.expires_at === 'number' && session.expires_at - nowSec <= 60;
+    if ((!session?.access_token || isExpiringSoon) && typeof client.auth.refreshSession === 'function') {
+      await client.auth.refreshSession().catch(() => undefined);
+    }
+  } catch {
+    // Continuar para que el error real de red o sesión se clasifique en la operación
+  }
+}
+
 /**
  * Crea un balance de inventario y degustación en `public.inventory` vinculado
  * directamente al Módulo 1 -> Informes -> Inventario y Degustación.
@@ -1663,8 +1812,60 @@ export async function createPortalInventoryLog(params: {
   }
 
   const client = getSupabaseClient();
+  await ensureActivePortalWriteSession(client);
   const nowCaracasIso = getCaracasIsoTimestamp();
   const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+  const canonicalSucursal = resolvePortalCanonicalSucursal(params.context.region);
+  const cleanComments = String(params.comments || '').trim().slice(0, 600);
+  const cleanZona = String(params.zona || params.context.direccion || params.context.region).trim();
+
+  // Ruta prioritaria: RPC SECURITY DEFINER idempotente (blindaje RLS AGENTS.md)
+  if (typeof client.rpc === 'function') {
+    const rpcRes = await client.rpc('rpc_registrar_inventario_portal', {
+      p_store: cleanStore,
+      p_product: cleanProduct,
+      p_initial_quantity: Number(init.toFixed(2)),
+      p_sales_generated: Number(sales.toFixed(2)),
+      p_degustations: Number(samples.toFixed(2)),
+      p_comments: cleanComments,
+      p_zona: cleanZona,
+      p_region: params.context.region,
+      p_sucursal: canonicalSucursal,
+      p_cronograma_id: params.cronogramaId || null,
+      p_client_submission_id: submissionId,
+      p_date: nowCaracasIso,
+    });
+    if (!rpcRes.error && rpcRes.data) {
+      const saved = (Array.isArray(rpcRes.data) ? rpcRes.data[0] : rpcRes.data) as Record<
+        string,
+        unknown
+      >;
+      if (saved && saved.id) {
+        return {
+          id: String(saved.id),
+          date: String(saved.date || nowCaracasIso),
+          store: String(saved.store || cleanStore),
+          product: String(saved.product || cleanProduct),
+          initialQuantity: Number(saved.initialQuantity ?? init),
+          finalQuantity: Number(saved.finalQuantity ?? finalQuantity),
+          degustations: Number(saved.degustations ?? samples),
+          sales_generated: Number(saved.sales_generated ?? sales),
+          comments: String(saved.comments || cleanComments),
+          promoter: String(saved.promoter || params.context.nombre),
+          promotora_id: saved.promotora_id ? String(saved.promotora_id) : params.context.promotoraId,
+          region: saved.region ? String(saved.region) : params.context.region,
+          zona: saved.zona ? String(saved.zona) : cleanZona,
+          created_at: saved.created_at ? String(saved.created_at) : nowCaracasIso,
+        };
+      }
+    } else if (rpcRes.error && !isMissingRpcFunctionError(rpcRes.error)) {
+      throw new Error(
+        rpcRes.error.code === '42501'
+          ? 'Permiso denegado por RLS al guardar inventario. Verifica tu sesión.'
+          : `No se pudo guardar el balance de inventario (${rpcRes.error.message}).`
+      );
+    }
+  }
 
   const baseRow = {
     date: nowCaracasIso,
@@ -1674,21 +1875,23 @@ export async function createPortalInventoryLog(params: {
     finalQuantity,
     degustations: Number(samples.toFixed(2)),
     sales_generated: Number(sales.toFixed(2)),
-    comments: String(params.comments || '').trim().slice(0, 600),
+    comments: cleanComments,
     creatorId: params.context.correo || params.context.nombre,
     promoter: params.context.nombre,
     promotora_id: params.context.promotoraId,
     auth_user_id: params.context.authUserId,
     region: params.context.region,
-    zona: String(params.zona || params.context.direccion || params.context.region).trim(),
+    sucursal: canonicalSucursal,
+    zona: cleanZona,
     cronograma_id: params.cronogramaId || null,
   };
 
   const payload = submissionId ? { ...baseRow, client_submission_id: submissionId } : baseRow;
   let { data, error } = await client.from('inventory').insert(payload).select('*');
 
-  if (error && submissionId && isMissingColumnError(error)) {
-    const retry = await client.from('inventory').insert(baseRow).select('*');
+  if (error && isMissingColumnError(error)) {
+    const { sucursal: _omitSuc, ...legacyNoSuc } = baseRow;
+    const retry = await client.from('inventory').insert(legacyNoSuc).select('*');
     data = retry.data;
     error = retry.error;
   } else if (error && submissionId && isUniqueViolationError(error)) {
@@ -1757,8 +1960,40 @@ export async function createPortalConsumerSurvey(params: {
   if (!cleanProduct) throw new Error('Selecciona el producto degustado.');
 
   const client = getSupabaseClient();
+  await ensureActivePortalWriteSession(client);
   const nowCaracasIso = getCaracasIsoTimestamp();
   const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+  const canonicalSucursal = resolvePortalCanonicalSucursal(params.context.region);
+  const commentsJson = JSON.stringify({
+    isTasting: true,
+    acceptance: params.recomendacion >= 4 ? 'Alta' : params.recomendacion === 3 ? 'Media' : 'Baja',
+    sensoryRatings: { sabor: params.sabor, textura: params.textura },
+    percepcionCalidad: params.percepcionCalidad,
+    relacionCalidadPrecio: params.relacionCalidadPrecio,
+    intencionCompra: params.intencionCompra,
+    originalComments: String(params.comments || '').trim().slice(0, 500),
+  });
+
+  if (typeof client.rpc === 'function') {
+    const rpcRes = await client.rpc('rpc_registrar_encuesta_portal', {
+      p_type: 'Profunda',
+      p_date: nowCaracasIso,
+      p_store: cleanStore,
+      p_product: cleanProduct,
+      p_rating: params.recomendacion,
+      p_intent: params.intencionCompra,
+      p_comments: commentsJson,
+      p_region: params.context.region,
+      p_sucursal: canonicalSucursal,
+      p_client_submission_id: submissionId,
+    });
+    if (!rpcRes.error && rpcRes.data) {
+      const row = (Array.isArray(rpcRes.data) ? rpcRes.data[0] : rpcRes.data) as { id?: string };
+      if (row?.id) return { id: String(row.id) };
+    } else if (rpcRes.error && !isMissingRpcFunctionError(rpcRes.error)) {
+      throw new Error(`No se pudo registrar la encuesta (${rpcRes.error.message}).`);
+    }
+  }
 
   const baseRow = {
     type: 'Profunda',
@@ -1768,28 +2003,27 @@ export async function createPortalConsumerSurvey(params: {
     product: cleanProduct,
     rating: params.recomendacion,
     intent: params.intencionCompra,
-    comments: JSON.stringify({
-      isTasting: true,
-      acceptance: params.recomendacion >= 4 ? 'Alta' : params.recomendacion === 3 ? 'Media' : 'Baja',
-      sensoryRatings: { sabor: params.sabor, textura: params.textura },
-      percepcionCalidad: params.percepcionCalidad,
-      relacionCalidadPrecio: params.relacionCalidadPrecio,
-      intencionCompra: params.intencionCompra,
-      originalComments: String(params.comments || '').trim().slice(0, 500),
-    }),
+    comments: commentsJson,
     creatorId: params.context.correo || params.context.nombre,
     promotora_id: params.context.promotoraId,
     auth_user_id: params.context.authUserId,
     region: params.context.region,
+    sucursal: canonicalSucursal,
   };
 
   const payload = submissionId ? { ...baseRow, client_submission_id: submissionId } : baseRow;
   let { data, error } = await client.from('surveys').insert(payload).select('id');
 
-  if (error && submissionId && isMissingColumnError(error)) {
+  if (error && isMissingColumnError(error)) {
     const retry = await client.from('surveys').insert(baseRow).select('id');
     data = retry.data;
     error = retry.error;
+    if (error && isMissingColumnError(error)) {
+      const { sucursal: _omitSuc, ...legacyRow } = baseRow;
+      const retryLegacy = await client.from('surveys').insert(legacyRow).select('id');
+      data = retryLegacy.data;
+      error = retryLegacy.error;
+    }
   } else if (error && submissionId && isUniqueViolationError(error)) {
     const existing = await client
       .from('surveys')
@@ -1865,7 +2099,9 @@ export async function createPortalPriceSurvey(params: {
   });
 
   const client = getSupabaseClient();
+  await ensureActivePortalWriteSession(client);
   const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+  const canonicalSucursal = resolvePortalCanonicalSucursal(params.context.region);
   let uploadedPhotoPath: string | null = null;
 
   if (params.photoFile) {
@@ -1914,6 +2150,7 @@ export async function createPortalPriceSurvey(params: {
       promotora_id: params.context.promotoraId,
       auth_user_id: params.context.authUserId,
       region: params.context.region,
+      sucursal: canonicalSucursal,
     };
 
     const extendedPayload = {
@@ -1934,6 +2171,19 @@ export async function createPortalPriceSurvey(params: {
       ocr_asistido: Boolean(params.ocrAsistido),
       ocr_confianza: params.ocrAsistido ? (params.ocrConfianza ?? 'media') : null,
     };
+
+    if (typeof client.rpc === 'function') {
+      const rpcRes = await client.rpc('rpc_registrar_precio_portal', {
+        p_payload: extendedPayload,
+        p_client_submission_id: submissionId,
+      });
+      if (!rpcRes.error && rpcRes.data) {
+        const row = (Array.isArray(rpcRes.data) ? rpcRes.data[0] : rpcRes.data) as { id?: string };
+        if (row?.id) return { id: String(row.id) };
+      } else if (rpcRes.error && !isMissingRpcFunctionError(rpcRes.error)) {
+        throw new Error(`No se pudo guardar el monitoreo de precios (${rpcRes.error.message}).`);
+      }
+    }
 
     let { data, error } = await client.from('prices').insert(extendedPayload).select('id');
 
@@ -2036,7 +2286,9 @@ export async function createPortalMerchandisingReport(params: {
   }
 
   const client = getSupabaseClient();
+  await ensureActivePortalWriteSession(client);
   const submissionId = normalizeOptionalClientSubmissionId(params.clientSubmissionId);
+  const canonicalSucursal = resolvePortalCanonicalSucursal(params.context.region);
   const uploadedPaths: string[] = [];
 
   try {
@@ -2079,32 +2331,56 @@ export async function createPortalMerchandisingReport(params: {
       uploadedPaths.push(sigPath);
     }
 
+    const merchCommentsJson = JSON.stringify({
+      mode: params.mode,
+      date: params.date,
+      time: params.time,
+      address: params.address || '',
+      activities: params.activities,
+      observations: String(params.observations || '').trim(),
+      storeManagerName: params.storeManagerName || '',
+      storeManagerRole: params.storeManagerRole || 'Encargado de Tienda',
+      storeManagerPhone: params.storeManagerPhone || '',
+      certified: Boolean(signaturePath),
+      signedAt: getCaracasIsoTimestamp(),
+      photoStoragePaths: uploadedPaths.filter((p) => p !== signaturePath),
+      signatureStoragePath: signaturePath,
+      ...(params.shelfMetrics ? { category: params.shelfMetrics.category, metrics: params.shelfMetrics } : {}),
+    });
+
+    if (typeof client.rpc === 'function') {
+      const rpcRes = await client.rpc('rpc_registrar_encuesta_portal', {
+        p_type: 'Merchandising',
+        p_date: params.date,
+        p_store: cleanStore,
+        p_product: params.productDetail || 'Línea General Codizulca',
+        p_rating: null,
+        p_intent: null,
+        p_comments: merchCommentsJson,
+        p_region: params.context.region,
+        p_sucursal: canonicalSucursal,
+        p_client_submission_id: submissionId,
+      });
+      if (!rpcRes.error && rpcRes.data) {
+        const row = (Array.isArray(rpcRes.data) ? rpcRes.data[0] : rpcRes.data) as { id?: string };
+        if (row?.id) return { id: String(row.id) };
+      } else if (rpcRes.error && !isMissingRpcFunctionError(rpcRes.error)) {
+        throw new Error(`No se pudo guardar el informe de merchandising (${rpcRes.error.message}).`);
+      }
+    }
+
     const baseMerchRow = {
       type: 'Merchandising',
       date: params.date,
       store: cleanStore,
       promoter: params.context.nombre,
       product: params.productDetail || 'Línea General Codizulca',
-      comments: JSON.stringify({
-        mode: params.mode,
-        date: params.date,
-        time: params.time,
-        address: params.address || '',
-        activities: params.activities,
-        observations: String(params.observations || '').trim(),
-        storeManagerName: params.storeManagerName || '',
-        storeManagerRole: params.storeManagerRole || 'Encargado de Tienda',
-        storeManagerPhone: params.storeManagerPhone || '',
-        certified: Boolean(signaturePath),
-        signedAt: getCaracasIsoTimestamp(),
-        photoStoragePaths: uploadedPaths.filter((p) => p !== signaturePath),
-        signatureStoragePath: signaturePath,
-        ...(params.shelfMetrics ? { category: params.shelfMetrics.category, metrics: params.shelfMetrics } : {}),
-      }),
+      comments: merchCommentsJson,
       creatorId: params.context.correo || params.context.nombre,
       promotora_id: params.context.promotoraId,
       auth_user_id: params.context.authUserId,
       region: params.context.region,
+      sucursal: canonicalSucursal,
     };
 
     const merchPayload = submissionId
@@ -2112,10 +2388,16 @@ export async function createPortalMerchandisingReport(params: {
       : baseMerchRow;
     let { data, error } = await client.from('surveys').insert(merchPayload).select('id');
 
-    if (error && submissionId && isMissingColumnError(error)) {
+    if (error && isMissingColumnError(error)) {
       const retry = await client.from('surveys').insert(baseMerchRow).select('id');
       data = retry.data;
       error = retry.error;
+      if (error && isMissingColumnError(error)) {
+        const { sucursal: _omitSuc, ...legacyMerch } = baseMerchRow;
+        const retryLegacy = await client.from('surveys').insert(legacyMerch).select('id');
+        data = retryLegacy.data;
+        error = retryLegacy.error;
+      }
     } else if (error && submissionId && isUniqueViolationError(error)) {
       const existing = await client
         .from('surveys')

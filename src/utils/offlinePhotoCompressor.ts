@@ -12,6 +12,7 @@ import {
   validateClientImageMagicBytes,
   type AllowedIncidenciaPhotoMime,
 } from '../services/portalOfflineQueueService';
+import { isCanvasFrameSolidBlack } from './cameraFrameGuard';
 
 export const MAX_OFFLINE_COMPRESSED_PHOTO_BYTES = 350 * 1024; // 350 KB estricto
 
@@ -140,13 +141,27 @@ export async function compressOfflineEvidencePhoto(
       const canvas = document.createElement('canvas');
       canvas.width = dims.width;
       canvas.height = dims.height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) {
         throw new Error('No se pudo inicializar Canvas 2D para comprimir la fotografía.');
       }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, dims.width, dims.height);
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(source, 0, 0, dims.width, dims.height);
+
+      // Respaldo anti-fotograma negro si createImageBitmap falló al decodificar en GPU móvil
+      if (bitmap && isCanvasFrameSolidBlack(ctx, dims.width, dims.height)) {
+        const imgFallback = await loadImageElement(input);
+        if (typeof imgFallback.decode === 'function') {
+          await imgFallback.decode().catch(() => undefined);
+        }
+        source = imgFallback;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, dims.width, dims.height);
+        ctx.drawImage(imgFallback, 0, 0, dims.width, dims.height);
+      }
 
       let candidate = await canvasToBlob(canvas, 'image/webp', step.quality);
       let candidateMime: AllowedIncidenciaPhotoMime = 'image/webp';

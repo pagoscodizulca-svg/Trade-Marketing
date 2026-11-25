@@ -11,7 +11,7 @@
  *  4. Recibe notificaciones Web Push (VAPID) para nuevas degustaciones creadas desde FDV.
  */
 
-const SHELL_CACHE = 'codizulca-trade-shell-v322';
+const SHELL_CACHE = 'codizulca-trade-shell-v334';
 const SHELL_URLS = [
   '/',
   '/portal',
@@ -83,22 +83,24 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navegación SPA (Network-First con fallback offline al App Shell)
+  // Navegación SPA (Network-First con fallback offline seguro para iOS Safari y Android)
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          if (res.ok && !url.searchParams.has('t')) {
+          if (res.ok && res.type === 'basic' && !res.redirected && !url.searchParams.has('t')) {
             const clone = res.clone();
-            caches.open(SHELL_CACHE).then((cache) => cache.put('/portal', clone)).catch(() => undefined);
+            const cacheKey = url.pathname === '/portal' ? '/portal' : '/';
+            caches.open(SHELL_CACHE).then((cache) => cache.put(cacheKey, clone)).catch(() => undefined);
           }
           return res;
         })
-        .catch(() =>
-          caches
-            .match(url.pathname === '/portal' ? '/portal' : '/')
-            .then((cached) => cached || caches.match('/'))
-        )
+        .catch(async () => {
+          const fallback =
+            (await caches.match(url.pathname === '/portal' ? '/portal' : '/')) ||
+            (await caches.match('/'));
+          return fallback || Response.error();
+        })
     );
     return;
   }

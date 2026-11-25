@@ -69,6 +69,7 @@ import { RegionalPdvLinkModal } from '../admin/RegionalPdvLinkModal';
 import { inferCanonicalSucursalFromText } from '../../utils/regionalSyncClassifier';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import { buildDailyPromotoraAttendanceViewModels } from '../../services/attendanceEvidencesService';
+import { signPortalStoragePathsBatch } from '../../services/promotoraCampoService';
 import {
   DegustacionNotificationItem,
   OperationalSupplies,
@@ -2304,9 +2305,9 @@ export const FieldPromotoraView: React.FC = () => {
 
   // ----------------------------------------------------
   // SUBMÓDULO 2: INFORMES DE CAMPO (CARGADOS EXACTAMENTE DESDE SUPABASE)
-  // Pestañas: Inventario y Degustación (inventory) | Asistencia en PDV (checkins agrupados)
+  // Pestañas: Inventario y Degustación | Asistencia en PDV | Comparativa de Precio | Encuestas PDV
   // ----------------------------------------------------
-  type ReportSubTab = 'inventario' | 'asistencia' | 'comparativa';
+  type ReportSubTab = 'inventario' | 'asistencia' | 'comparativa' | 'encuestas';
   type FieldRegionBucket = 'Occidente' | 'Centro' | 'Andes';
   type FieldRegionFilter = 'TODAS' | 'ASSIGNED' | FieldRegionBucket;
 
@@ -2461,6 +2462,7 @@ export const FieldPromotoraView: React.FC = () => {
   const [invDateFrom, setInvDateFrom] = useState<string>('');
   const [invDateTo, setInvDateTo] = useState<string>('');
   const [checkinPhotosMap, setCheckinPhotosMap] = useState<Record<string, string>>({});
+  const [merchStorageSignedUrlsMap, setMerchStorageSignedUrlsMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setInvRegionFilter((prev) => {
@@ -2645,6 +2647,49 @@ export const FieldPromotoraView: React.FC = () => {
     return module1Bundle?.attendanceRecords || [];
   }, [module1Bundle]);
 
+  const effectiveAttendanceTabCount =
+    scopedAsistenciaJornadas.length > 0 ? scopedAsistenciaJornadas.length : attendanceRecords.length;
+
+  const consumerSurveysList = useMemo(() => {
+    return module1Bundle?.consumerSurveys || [];
+  }, [module1Bundle]);
+
+  const filteredConsumerSurveys = useMemo(() => {
+    const q = reportSearchQuery.trim().toLowerCase();
+    return consumerSurveysList.filter((s) => {
+      if (!s) return false;
+      const bucket = normalizeFieldRegionBucket(s.sucursal || s.region, s.zone);
+      if (allowedRegionBuckets && !allowedRegionBuckets.includes(bucket)) return false;
+      if (
+        invRegionFilter !== 'TODAS' &&
+        invRegionFilter !== 'ASSIGNED' &&
+        bucket !== invRegionFilter
+      ) {
+        return false;
+      }
+      const ymd = String(s.date || '').slice(0, 10);
+      if (invDateFrom && ymd && ymd < invDateFrom) return false;
+      if (invDateTo && ymd && ymd > invDateTo) return false;
+      if (!q) return true;
+      return (
+        String(s.storeName || '').toLowerCase().includes(q) ||
+        String(s.productName || '').toLowerCase().includes(q) ||
+        String(s.promotora || '').toLowerCase().includes(q) ||
+        String(s.zone || '').toLowerCase().includes(q) ||
+        String(s.purchaseIntent || '').toLowerCase().includes(q) ||
+        String(s.comments || '').toLowerCase().includes(q)
+      );
+    });
+  }, [
+    consumerSurveysList,
+    allowedRegionBuckets,
+    invRegionFilter,
+    invDateFrom,
+    invDateTo,
+    reportSearchQuery,
+    normalizeFieldRegionBucket,
+  ]);
+
   const handleSaveInventoryObservation = async (id: string, newObs: string) => {
     try {
       await updateSupabaseInventoryObservation(id, newObs);
@@ -2741,6 +2786,22 @@ export const FieldPromotoraView: React.FC = () => {
         `${Number(pc.gapPercent ?? 0).toFixed(1)}%`,
         pc.bcvRate ? `${pc.bcvRate.toFixed(2)} Bs` : '—',
         pc.promotora,
+      ]);
+    } else if (activeReportTab === 'encuestas') {
+      title = singleLockedRegionDisplay
+        ? `Encuestas de Degustación al Consumidor — Región ${singleLockedRegionDisplay}`
+        : isMultiRegionScope
+          ? `Encuestas de Degustación al Consumidor — Regiones ${assignedRegionsDisplayLabel}`
+          : 'Encuestas de Degustación al Consumidor en PDV (Supabase)';
+      head = [['FECHA', 'PDV / ZONA', 'PRODUCTO', 'PROMOTORA', 'CALIFICACIÓN', 'INTENCIÓN', 'COMENTARIO']];
+      body = filteredConsumerSurveys.slice(0, 300).map((sv) => [
+        sv.date || sv.dayLabel,
+        `${sv.storeName}\n${sv.zone}`,
+        sv.productName,
+        sv.promotora,
+        sv.rating !== null ? `${sv.rating}/5 (${sv.acceptanceLabel})` : sv.acceptanceLabel,
+        sv.purchaseIntent || '—',
+        sv.comments || '—',
       ]);
     } else {
       title = 'Registro de Evidencias de Asistencia Condicional por Perfil (Supabase)';
@@ -2881,12 +2942,79 @@ export const FieldPromotoraView: React.FC = () => {
     };
   }, [activeSubTab, filteredMerchandisingReports, selectedMerchReportForAudit, checkinPhotosMap]);
 
+  // Firma segura en lote para fotos y firmas de Merchandising almacenadas en bucket privado `asistencia-evidencias` (/portal)
+  useEffect(() => {
+    if (activeSubTab !== 'merchandising' && !selectedMerchReportForAudit) return;
+
+    const neededPaths: string[] = [];
+    const collectPaths = (r: MerchandisingRecord) => {
+      (r.photoStoragePaths || []).forEach((p) => {
+        if (p && merchStorageSignedUrlsMap[p] === undefined && !neededPaths.includes(p)) {
+          neededPaths.push(p);
+        }
+      });
+      if (
+        r.signatureStoragePath &&
+        merchStorageSignedUrlsMap[r.signatureStoragePath] === undefined &&
+        !neededPaths.includes(r.signatureStoragePath)
+      ) {
+        neededPaths.push(r.signatureStoragePath);
+      }
+    };
+
+    if (selectedMerchReportForAudit) {
+      collectPaths(selectedMerchReportForAudit);
+    }
+    filteredMerchandisingReports.forEach(collectPaths);
+
+    if (neededPaths.length === 0) return;
+
+    const batch = neededPaths.slice(0, 40);
+    let cancelled = false;
+    signPortalStoragePathsBatch(batch)
+      .then((signedMap) => {
+        if (cancelled) return;
+        setMerchStorageSignedUrlsMap((prev) => {
+          const next = { ...prev };
+          batch.forEach((p) => {
+            next[p] = signedMap[p] || '';
+          });
+          return next;
+        });
+      })
+      .catch(() => {
+        // Error transitorio firmando fotos privadas de merchandising silenciado
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSubTab, filteredMerchandisingReports, selectedMerchReportForAudit, merchStorageSignedUrlsMap]);
+
+  const getMerchResolvedSignature = (report: MerchandisingRecord): string => {
+    if (report.signatureBase64) return report.signatureBase64;
+    if (report.signatureStoragePath) {
+      return merchStorageSignedUrlsMap[report.signatureStoragePath] || '';
+    }
+    return '';
+  };
+
   const getMerchResolvedPhotos = (
     report: MerchandisingRecord
   ): { photos: string[]; isLoading: boolean; isFromVisitCheckin: boolean } => {
     const directPhotos = (report.photos || []).filter((p) => typeof p === 'string' && p.length > 20);
-    if (directPhotos.length > 0) {
-      return { photos: directPhotos, isLoading: false, isFromVisitCheckin: false };
+    const storagePaths = report.photoStoragePaths || [];
+    const signedStoragePhotos = storagePaths
+      .map((p) => merchStorageSignedUrlsMap[p])
+      .filter((u): u is string => typeof u === 'string' && u.length > 20);
+    const combinedDirect = Array.from(new Set([...directPhotos, ...signedStoragePhotos]));
+    if (combinedDirect.length > 0) {
+      return { photos: combinedDirect, isLoading: false, isFromVisitCheckin: false };
+    }
+    const isLoadingStorage =
+      storagePaths.length > 0 && storagePaths.some((p) => merchStorageSignedUrlsMap[p] === undefined);
+    if (isLoadingStorage) {
+      return { photos: [], isLoading: true, isFromVisitCheckin: false };
     }
     const matchedIds = report.matchedCheckinIds || [];
     const checkinPhotos = matchedIds
@@ -5628,11 +5756,12 @@ export const FieldPromotoraView: React.FC = () => {
                 <UserCheck className="w-4 h-4" />
                 <span>Asistencia en PDV</span>
                 <span
+                  data-testid="informe-tab-asistencia-count"
                   className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
                     activeReportTab === 'asistencia' ? 'bg-black/40 text-white' : 'bg-zinc-900 text-zinc-500'
                   }`}
                 >
-                  {attendanceRecords.length}
+                  {effectiveAttendanceTabCount}
                 </span>
               </button>
 
@@ -5654,6 +5783,28 @@ export const FieldPromotoraView: React.FC = () => {
                   }`}
                 >
                   {priceComparisons.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="informe-tab-encuestas"
+                onClick={() => setActiveReportTab('encuestas')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                  activeReportTab === 'encuestas'
+                    ? 'bg-red-600 text-white shadow-md shadow-red-950/60 border border-red-500'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-900 border border-transparent'
+                }`}
+              >
+                <ClipboardCheck className="w-4 h-4" />
+                <span>Encuestas PDV</span>
+                <span
+                  data-testid="informe-tab-encuestas-count"
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                    activeReportTab === 'encuestas' ? 'bg-black/40 text-white' : 'bg-zinc-900 text-zinc-500'
+                  }`}
+                >
+                  {filteredConsumerSurveys.length}
                 </span>
               </button>
             </div>
@@ -6313,6 +6464,130 @@ export const FieldPromotoraView: React.FC = () => {
               onNotify={showToast}
             />
           )}
+
+          {/* ========================================================================= */}
+          {/* TAB 6: ENCUESTAS AL CONSUMIDOR EN PDV (SINCRONIZADO 100% CON `surveys`)   */}
+          {/* ========================================================================= */}
+          {activeReportTab === 'encuestas' && (
+            <div className="space-y-4" data-testid="informe-encuestas-panel">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+                <div>
+                  <h4 className="font-semibold text-white flex items-center gap-2">
+                    <ClipboardCheck className="w-5 h-5 text-red-400" />
+                    Encuestas de Degustación al Consumidor en PDV
+                    <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-red-500/10 text-red-400 border border-red-500/20">
+                      {filteredConsumerSurveys.length} encuestas
+                    </span>
+                  </h4>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Evaluaciones sensoriales (sabor, textura, intención de compra y recomendación) enviadas desde la App de Promotoras.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[220px]">
+                    <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={reportSearchQuery}
+                      onChange={(e) => setReportSearchQuery(e.target.value)}
+                      placeholder="Buscar PDV, producto o promotora..."
+                      className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => refreshSupabaseData()}
+                    disabled={isLoadingSupabase}
+                    className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors text-xs font-medium border border-slate-700 disabled:opacity-50 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isLoadingSupabase ? 'animate-spin' : ''}`} />
+                    {isLoadingSupabase ? 'Sincronizando...' : 'Sincronizar'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-900 border-b border-slate-800 text-xs text-slate-400 uppercase">
+                        <th className="p-3.5 font-semibold">Fecha</th>
+                        <th className="p-3.5 font-semibold">PDV / Región</th>
+                        <th className="p-3.5 font-semibold">Promotora</th>
+                        <th className="p-3.5 font-semibold">Producto</th>
+                        <th className="p-3.5 font-semibold text-center">Calificación / Sensorial</th>
+                        <th className="p-3.5 font-semibold">Intención & Calidad</th>
+                        <th className="p-3.5 font-semibold">Comentarios</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 text-xs">
+                      {filteredConsumerSurveys.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="p-8 text-center text-slate-400">
+                            No se encontraron encuestas al consumidor con los filtros seleccionados.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredConsumerSurveys.slice(0, reportRowLimit).map((sv) => (
+                          <tr key={sv.id} className="hover:bg-slate-800/30 transition-colors">
+                            <td className="p-3.5 text-slate-300 font-mono whitespace-nowrap">
+                              {sv.date || sv.dayLabel}
+                            </td>
+                            <td className="p-3.5">
+                              <div className="font-semibold text-white">{sv.storeName}</div>
+                              <div className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+                                <span>{sv.zone}</span>
+                                <span className="px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-700 text-[10px] font-mono text-zinc-300">
+                                  {sv.sucursal || sv.region || 'OCCIDENTE'}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="p-3.5 text-slate-200 font-medium">{sv.promotora}</td>
+                            <td className="p-3.5 text-red-300 font-medium">{sv.productName}</td>
+                            <td className="p-3.5 text-center font-mono">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded-full font-bold border ${
+                                  sv.highAcceptance
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                    : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                }`}
+                              >
+                                {sv.rating !== null ? `★ ${sv.rating}/5` : sv.acceptanceLabel}
+                              </span>
+                              {(sv.sabor || sv.textura) && (
+                                <div className="text-[10px] text-slate-400 mt-1">
+                                  {sv.sabor ? `Sabor ${sv.sabor}/5` : ''}
+                                  {sv.sabor && sv.textura ? ' · ' : ''}
+                                  {sv.textura ? `Textura ${sv.textura}/5` : ''}
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3.5">
+                              <div className="text-white font-semibold">{sv.purchaseIntent || '—'}</div>
+                              {(sv.percepcionCalidad || sv.relacionCalidadPrecio) && (
+                                <div className="text-[10px] text-slate-400 mt-0.5">
+                                  {sv.percepcionCalidad ? `Calidad: ${sv.percepcionCalidad}` : ''}
+                                  {sv.percepcionCalidad && sv.relacionCalidadPrecio ? ' · ' : ''}
+                                  {sv.relacionCalidadPrecio ? `Precio: ${sv.relacionCalidadPrecio}` : ''}
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3.5 text-slate-300 max-w-xs">
+                              {sv.comments ? (
+                                <span className="line-clamp-2">{sv.comments}</span>
+                              ) : (
+                                <span className="text-slate-500 italic">Sin comentario</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -6449,7 +6724,8 @@ export const FieldPromotoraView: React.FC = () => {
                   const activePhotoIdx =
                     totalPhotos > 0 ? Math.min(merchCardPhotoIdx[report.id] || 0, totalPhotos - 1) : 0;
                   const coverPhoto = totalPhotos > 0 ? resolvedPhotos[activePhotoIdx] : '';
-                  const hasSignature = Boolean(report.signatureBase64);
+                  const resolvedSignature = getMerchResolvedSignature(report);
+                  const hasSignature = Boolean(resolvedSignature);
 
                   return (
                     <div
@@ -6697,7 +6973,7 @@ export const FieldPromotoraView: React.FC = () => {
                           {hasSignature ? (
                             <div className="h-8 w-24 bg-white/5 rounded border border-white/10 p-0.5 flex items-center justify-center overflow-hidden">
                               <img
-                                src={report.signatureBase64}
+                                src={resolvedSignature}
                                 alt="Firma"
                                 className="h-full object-contain filter invert opacity-80"
                               />
@@ -6937,9 +7213,9 @@ export const FieldPromotoraView: React.FC = () => {
                       </p>
                     </div>
                     <div className="flex flex-col items-center bg-white rounded-xl p-3 min-w-[220px] shadow-inner">
-                      {selectedMerchReportForAudit.signatureBase64 ? (
+                      {getMerchResolvedSignature(selectedMerchReportForAudit) ? (
                         <img
-                          src={selectedMerchReportForAudit.signatureBase64}
+                          src={getMerchResolvedSignature(selectedMerchReportForAudit)}
                           alt="Firma del Encargado"
                           className="h-20 object-contain"
                         />

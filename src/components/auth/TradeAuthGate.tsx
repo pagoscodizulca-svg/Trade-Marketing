@@ -165,8 +165,10 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
       setChecking(false);
     });
 
-    const { data: sub } = client.auth.onAuthStateChange(async (event, session) => {
+    let authEventSeq = 0;
+    const { data: sub } = client.auth.onAuthStateChange((event, session) => {
       if (!active) return;
+      const mySeq = ++authEventSeq;
       if (event === 'SIGNED_OUT' || !session) {
         clearMasterDataCaches();
         clearMasterCatalogCaches();
@@ -186,26 +188,37 @@ export const TradeAuthGate: React.FC<TradeAuthGateProps> = ({
         clearBcvRateCache();
       }
 
-      const resolved = await resolveVerifiedProfileWithStaffFallback(session);
-      if (!active) return;
-      if (isClienteProfile(resolved) && !isOnClienteRoute()) {
-        window.location.replace('/cliente');
-        return;
-      }
-      if (isChoferProfile(resolved)) {
-        window.location.replace('/logistica/');
-        return;
-      }
-      if (
-        resolved?.appRole === 'promotora' ||
-        Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
-      ) {
-        window.location.replace('/portal');
-        return;
-      }
-      setLocalDevActive(false);
-      setProfile(resolved);
-      setChecking(false);
+      // Diferir consultas PostgREST fuera del frame síncrono de onAuthStateChange (evita deadlock iOS WebKit)
+      window.setTimeout(() => {
+        if (!active || mySeq !== authEventSeq) return;
+        void resolveVerifiedProfileWithStaffFallback(session)
+          .then((resolved) => {
+            if (!active || mySeq !== authEventSeq) return;
+            if (isClienteProfile(resolved) && !isOnClienteRoute()) {
+              window.location.replace('/cliente');
+              return;
+            }
+            if (isChoferProfile(resolved)) {
+              window.location.replace('/logistica/');
+              return;
+            }
+            if (
+              resolved?.appRole === 'promotora' ||
+              Boolean(resolved?.staffId && !resolved?.canAccessTorreControl)
+            ) {
+              window.location.replace('/portal');
+              return;
+            }
+            setLocalDevActive(false);
+            setProfile(resolved);
+            setChecking(false);
+          })
+          .catch(() => {
+            if (active && mySeq === authEventSeq) {
+              setChecking(false);
+            }
+          });
+      }, 0);
     });
 
     return () => {

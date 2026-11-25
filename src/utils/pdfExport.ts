@@ -1022,7 +1022,7 @@ export const exportExecutiveKpisPdf = async (metrics: {
 // 5. EXPORT PROMOTORA MOBILE REPORTS PDF (HISTORIAL, PRECIOS, INVENTARIO, ASISTENCIA)
 // ---------------------------------------------------------------------------------
 export const exportPromotoraReportsPdf = async (
-  reportType: 'visitas' | 'precios' | 'inventario' | 'asistencia',
+  reportType: 'visitas' | 'precios' | 'inventario' | 'asistencia' | 'encuestas',
   reportTitle: string,
   tableHead: string[][],
   tableBody: (string | number)[][],

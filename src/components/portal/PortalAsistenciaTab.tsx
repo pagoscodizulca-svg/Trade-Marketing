@@ -24,6 +24,12 @@ import {
   getCaracasTodayYmd,
 } from '../../types/attendanceEvidences';
 import {
+  attachStreamAndWaitForVideoFrame,
+  isCanvasFrameSolidBlack,
+  isVideoElementFrameReady,
+  requestResilientCameraStream,
+} from '../../utils/cameraFrameGuard';
+import {
   PortalAttendanceSubmitError,
   fetchPortalTodayAttendance,
   getCaracasClockAndPunctuality,
@@ -44,6 +50,10 @@ import {
   IOS_SAFARI_GPS_COMPACT_HINT,
 } from '../../utils/directLocationEngine';
 import { PortalStoreSelector } from './PortalCatalogSelectors';
+import {
+  enqueuePortalAttendanceAction,
+  isTransientOfflineOrNetworkError,
+} from '../../services/portalOfflineQueueService';
 
 interface PortalAsistenciaTabProps {
   context: PortalPromotoraContext;
@@ -51,6 +61,7 @@ interface PortalAsistenciaTabProps {
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
+  onActionQueuedOffline?: () => void;
 }
 
 interface CapturedGpsSummary {
@@ -66,6 +77,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
   activeStore,
   onActiveStoreChange,
   onNotify,
+  onActionQueuedOffline,
 }) => {
   const todayYmd = getCaracasTodayYmd();
   const [initialDraft] = useState(() => loadPortalAsistenciaDraft());
@@ -184,28 +196,90 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     gps: CapturedGpsSummary;
   } | null>(null);
 
+  const [isVideoReady, setIsVideoReady] = useState(false);
+  const [isCapturingFrame, setIsCapturingFrame] = useState(false);
+  const [cameraSessionId, setCameraSessionId] = useState(0);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const stopCamera = useCallback(() => {
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.srcObject = null;
+      } catch {
+        /* ignorar al desmontar */
+      }
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    setIsVideoReady(false);
     setIsCameraActive(false);
   }, []);
 
+  // Limpieza exclusiva al desmontar el componente (jamás matar la cámara cuando cambia previewUrl)
   useEffect(() => {
     return () => {
       submitAbortRef.current?.abort();
       stopCamera();
+    };
+  }, [stopCamera]);
+
+  // Liberación independiente de ObjectURLs previos sin tocar el stream de cámara activo
+  useEffect(() => {
+    return () => {
       if (previewUrl && previewUrl.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrl);
       }
     };
-  }, [previewUrl, stopCamera]);
+  }, [previewUrl]);
+
+  // Vincula el MediaStream al elemento <video> de forma determinista DESPUÉS del commit de React
+  // y espera a que el primer fotograma real esté decodificado (elimina pantalla negra en móviles).
+  useEffect(() => {
+    if (!isCameraActive || cameraSessionId === 0) return;
+    const stream = streamRef.current;
+    const video = videoRef.current;
+    if (!stream || !video) return;
+
+    let cancelled = false;
+    setIsVideoReady(false);
+
+    const handleTrackEnded = () => {
+      if (cancelled) return;
+      stopCamera();
+      setFileError(
+        'La cámara integrada se detuvo. Puedes reintentar o usar "Cámara Nativa".'
+      );
+    };
+
+    const tracks = stream.getVideoTracks();
+    tracks.forEach((t) => t.addEventListener('ended', handleTrackEnded));
+
+    void attachStreamAndWaitForVideoFrame(video, stream, { timeoutMs: 4500 }).then((res) => {
+      if (cancelled) return;
+      if (res.ready) {
+        setIsVideoReady(true);
+        setFileError(null);
+      } else {
+        stopCamera();
+        setFileError(
+          res.reason ||
+            'La cámara integrada mostró pantalla negra. Usa "Cámara Nativa" para tomar la foto.'
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      tracks.forEach((t) => t.removeEventListener('ended', handleTrackEnded));
+    };
+  }, [isCameraActive, cameraSessionId, stopCamera]);
 
   const syncTodayAttendance = useCallback(async () => {
     setIsSyncing(true);
@@ -248,19 +322,13 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     }
     try {
       stopCamera();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: mode }, width: { ideal: 720 }, height: { ideal: 960 } },
-        audio: false,
-      });
+      const stream = await requestResilientCameraStream(mode);
       streamRef.current = stream;
+      setIsVideoReady(false);
       setIsCameraActive(true);
-      requestAnimationFrame(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => undefined);
-        }
-      });
+      setCameraSessionId((n) => n + 1);
     } catch {
+      stopCamera();
       persistDraftSnapshot();
       nativeCameraInputRef.current?.click();
     }
@@ -268,28 +336,70 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
 
   const handleCaptureSelfie = async () => {
     const video = videoRef.current;
-    if (!video) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 720;
-    canvas.height = video.videoHeight || 960;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    if (facingMode === 'user') {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.85)
-    );
-    if (!blob) {
-      setFileError('No se pudo capturar la imagen desde la cámara.');
+    if (!video || isCapturingFrame) return;
+    if (!isVideoElementFrameReady(video)) {
+      setFileError(
+        'La cámara todavía se está enfocando. Espera un segundo o utiliza "Cámara Nativa".'
+      );
       return;
     }
-    if (previewUrl && previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
-    setSelectedFile(blob);
-    setPreviewUrl(URL.createObjectURL(blob));
-    stopCamera();
+
+    setIsCapturingFrame(true);
+    setFileError(null);
+    try {
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        setFileError('No se pudo inicializar la captura de imagen.');
+        return;
+      }
+
+      // Reintentar hasta 3 fotogramas si el sensor del teléfono aún está saliendo de exposición negra
+      let capturedValidFrame = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (facingMode === 'user') {
+          ctx.translate(width, 0);
+          ctx.scale(-1, 1);
+        }
+        ctx.drawImage(video, 0, 0, width, height);
+        ctx.restore();
+
+        if (!isCanvasFrameSolidBlack(ctx, width, height)) {
+          capturedValidFrame = true;
+          break;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 220));
+      }
+
+      if (!capturedValidFrame) {
+        stopCamera();
+        setFileError(
+          'Se detectó un fotograma completamente en negro desde la cámara integrada. Presiona "Cámara Nativa" para capturar la foto correctamente.'
+        );
+        return;
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.88)
+      );
+      if (!blob || blob.size < 1024) {
+        setFileError(
+          'No se pudo capturar una fotografía válida desde la cámara. Intenta con "Cámara Nativa".'
+        );
+        return;
+      }
+      setSelectedFile(blob);
+      setPreviewUrl(URL.createObjectURL(blob));
+      stopCamera();
+    } finally {
+      setIsCapturingFrame(false);
+    }
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -299,7 +409,6 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
     setFileError(null);
     try {
       validatePortalImageFile(file);
-      if (previewUrl && previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
       setSelectedFile(file);
       setPreviewUrl(URL.createObjectURL(file));
       stopCamera();
@@ -391,6 +500,42 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
       );
       await syncTodayAttendance();
     } catch (err) {
+      const canQueueAttendanceOffline =
+        isTransientOfflineOrNetworkError(err) && Boolean(selectedFile);
+      if (canQueueAttendanceOffline && selectedFile) {
+        try {
+          const fallbackLoc = gpsLocation;
+          await enqueuePortalAttendanceAction({
+            slotFoto: selectedSlot,
+            pdvNombre: activeStore.trim(),
+            zona: selectedZona,
+            lat: fallbackLoc?.lat ?? null,
+            lng: fallbackLoc?.lng ?? null,
+            gpsAccuracy: fallbackLoc?.accuracyMeters ?? null,
+            locationSource: fallbackLoc?.locationSource ?? 'gps_high',
+            fechaJornada: todayYmd,
+            imageFile: selectedFile,
+          });
+          setSavedSummary({
+            slot: selectedSlot,
+            store: activeStore.trim(),
+            timeVe: 'En cola offline (se sincronizará al volver la señal)',
+            gps: {
+              lat: fallbackLoc?.lat ?? 0,
+              lng: fallbackLoc?.lng ?? 0,
+              accuracy: fallbackLoc?.accuracyMeters ?? 0,
+              locationSource: fallbackLoc?.locationSource ?? 'gps_high',
+            },
+          });
+          onActionQueuedOffline?.();
+          onNotify(
+            `Sin señal: asistencia (${SLOT_FOTO_CATALOG[selectedSlot].shortBadge}) resguardada en cola offline. Se enviará automáticamente al volver la red.`
+          );
+          return;
+        } catch {
+          // Si falló IndexedDB, mostrar error original clasificado
+        }
+      }
       if (err instanceof PortalAttendanceSubmitError) {
         setSubmitErrorCategory(err.category);
         setSubmitError(err.message);
@@ -789,8 +934,30 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                     autoPlay
                     playsInline
                     muted
+                    onLoadedMetadata={() => {
+                      if (videoRef.current) {
+                        videoRef.current.play().catch(() => undefined);
+                        if (isVideoElementFrameReady(videoRef.current)) {
+                          setIsVideoReady(true);
+                        }
+                      }
+                    }}
+                    onPlaying={() => {
+                      if (isVideoElementFrameReady(videoRef.current)) {
+                        setIsVideoReady(true);
+                      }
+                    }}
                     className={`w-full h-full object-cover ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
                   />
+                  {!isVideoReady && (
+                    <div className="absolute inset-0 bg-neutral-950/90 flex flex-col items-center justify-center gap-2 text-center px-4">
+                      <Loader2 className="w-7 h-7 animate-spin text-red-500" />
+                      <p className="text-xs font-bold text-white">Iniciando sensor de cámara…</p>
+                      <p className="text-[10px] text-neutral-400">
+                        Si tu equipo tarda, puedes usar el botón «Cámara Nativa» debajo.
+                      </p>
+                    </div>
+                  )}
                   <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                     <div className="w-36 h-48 border-2 border-dashed border-red-500/70 rounded-[50%]" />
                   </div>
@@ -800,6 +967,13 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                   <img
                     src={previewUrl}
                     alt="Evidencia de asistencia"
+                    onError={() => {
+                      setSelectedFile(null);
+                      setPreviewUrl(null);
+                      setFileError(
+                        'La fotografía seleccionada no pudo visualizarse. Tómala nuevamente con "Cámara Nativa".'
+                      );
+                    }}
                     className="w-full h-full object-contain bg-black"
                   />
                   <button
@@ -837,7 +1011,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
             <input
               ref={nativeCameraInputRef}
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/*"
               capture={facingMode === 'user' ? 'user' : 'environment'}
               onChange={handleFileInputChange}
               className="hidden"
@@ -846,7 +1020,7 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
               ref={galleryInputRef}
               data-testid="portal-asistencia-file-input"
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/*"
               onChange={handleFileInputChange}
               className="hidden"
             />
@@ -888,14 +1062,48 @@ export const PortalAsistenciaTab: React.FC<PortalAsistenciaTabProps> = ({
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleCaptureSelfie()}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 text-white font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Camera className="w-4 h-4" />
-                <span>Tomar Fotografía de Evidencia</span>
-              </button>
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={!isVideoReady || isCapturingFrame}
+                  onClick={() => void handleCaptureSelfie()}
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 disabled:opacity-55 text-white font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {!isVideoReady || isCapturingFrame ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>{isCapturingFrame ? 'Procesando foto…' : 'Enfocando cámara…'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      <span>Tomar Fotografía de Evidencia</span>
+                    </>
+                  )}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stopCamera();
+                      persistDraftSnapshot();
+                      triggerGpsOnNaturalGesture();
+                      nativeCameraInputRef.current?.click();
+                    }}
+                    className="py-2 px-3 rounded-xl bg-[#171717] hover:bg-neutral-800 border border-neutral-700 text-emerald-300 font-bold text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Cámara Nativa</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopCamera}
+                    className="py-2 px-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 font-bold text-[11px] uppercase flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Cancelar</span>
+                  </button>
+                </div>
+              </div>
             )}
           </div>
 

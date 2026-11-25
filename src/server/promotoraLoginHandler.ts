@@ -3,14 +3,22 @@ import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { serverLogger } from './logger';
 
+const INVISIBLE_INPUT_CHARS_REGEX = /[\u200B-\u200D\u2060\uFEFF]/g;
+
 const PromotoraLoginBodySchema = z.object({
   email: z
     .string()
-    .trim()
-    .toLowerCase()
-    .email('Ingresa un correo electrónico válido.')
-    .max(254),
-  password: z.string().min(1, 'Ingresa tu contraseña.').max(256),
+    .transform((v) => v.replace(/[\s\u00A0\u200B-\u200D\u2060\uFEFF]+/g, '').toLowerCase())
+    .pipe(z.string().email('Ingresa un correo electrónico válido.').max(254)),
+  password: z
+    .string()
+    .transform((v) =>
+      v
+        .replace(INVISIBLE_INPUT_CHARS_REGEX, '')
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"'),
+    )
+    .pipe(z.string().min(1, 'Ingresa tu contraseña.').max(256)),
 });
 
 interface FailedAttemptBucket {

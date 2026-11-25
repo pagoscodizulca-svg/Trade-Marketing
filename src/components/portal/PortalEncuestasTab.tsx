@@ -9,6 +9,10 @@ import {
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
 import { PortalProductSelector, PortalStoreSelector } from './PortalCatalogSelectors';
+import {
+  enqueuePortalSurveyAction,
+  isTransientOfflineOrNetworkError,
+} from '../../services/portalOfflineQueueService';
 
 interface PortalEncuestasTabProps {
   context: PortalPromotoraContext;
@@ -17,6 +21,7 @@ interface PortalEncuestasTabProps {
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
+  onActionQueuedOffline?: () => void;
 }
 
 export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
@@ -26,6 +31,7 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
   activeStore,
   onActiveStoreChange,
   onNotify,
+  onActionQueuedOffline,
 }) => {
   const [selectedProduct, setSelectedProduct] = useState<string>(products[0]?.nombre || '');
   const [sabor, setSabor] = useState<number>(5);
@@ -85,6 +91,31 @@ export const PortalEncuestasTab: React.FC<PortalEncuestasTabProps> = ({
       setSubmittedSuccess(true);
       onNotify(`Encuesta de degustación sincronizada (${selectedProduct.trim()})`);
     } catch (err) {
+      if (isTransientOfflineOrNetworkError(err)) {
+        try {
+          await enqueuePortalSurveyAction({
+            id: clientSubmissionIdRef.current,
+            store: activeStore.trim(),
+            product: selectedProduct.trim(),
+            sabor,
+            textura,
+            intencionCompra,
+            percepcionCalidad,
+            relacionCalidadPrecio,
+            recomendacion,
+            comments,
+          });
+          clientSubmissionIdRef.current = generateClientSubmissionId();
+          setSubmittedSuccess(true);
+          onActionQueuedOffline?.();
+          onNotify(
+            'Sin señal: encuesta guardada en tu teléfono. Se enviará automáticamente al recuperar red.'
+          );
+          return;
+        } catch {
+          // Si falló IndexedDB, mostrar error original
+        }
+      }
       setSubmitError(
         err instanceof Error ? err.message : 'No se pudo enviar la encuesta al servidor.'
       );

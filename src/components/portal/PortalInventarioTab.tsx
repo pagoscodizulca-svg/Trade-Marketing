@@ -19,6 +19,10 @@ import {
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
 import { PortalProductSelector, PortalStoreSelector } from './PortalCatalogSelectors';
+import {
+  enqueuePortalInventoryAction,
+  isTransientOfflineOrNetworkError,
+} from '../../services/portalOfflineQueueService';
 
 interface PortalInventarioTabProps {
   context: PortalPromotoraContext;
@@ -27,6 +31,7 @@ interface PortalInventarioTabProps {
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
+  onActionQueuedOffline?: () => void;
 }
 
 export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
@@ -36,6 +41,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
   activeStore,
   onActiveStoreChange,
   onNotify,
+  onActionQueuedOffline,
 }) => {
   const [selectedZona, setSelectedZona] = useState<string>(context.direccion || context.region);
   const [productName, setProductName] = useState<string>(products[0]?.nombre || '');
@@ -126,6 +132,43 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
       );
       await loadHistory();
     } catch (err) {
+      if (isTransientOfflineOrNetworkError(err)) {
+        try {
+          const queued = await enqueuePortalInventoryAction({
+            id: clientSubmissionIdRef.current,
+            store: activeStore.trim(),
+            zona: selectedZona,
+            product: productName.trim(),
+            initialQuantity: initialStock,
+            salesGenerated,
+            degustations: tastingsGiven,
+            comments: observations,
+          });
+          setSavedRecord({
+            id: queued.id,
+            date: queued.createdAtIso,
+            store: queued.store,
+            product: queued.product,
+            initialQuantity: queued.initialQuantity,
+            finalQuantity: finalStock,
+            degustations: queued.degustations,
+            sales_generated: queued.salesGenerated,
+            comments: queued.comments || '',
+            promoter: context.nombre,
+            promotora_id: context.promotoraId,
+            region: context.region,
+            zona: queued.zona || '',
+          });
+          clientSubmissionIdRef.current = generateClientSubmissionId();
+          onActionQueuedOffline?.();
+          onNotify(
+            'Sin señal: balance guardado en cola offline del teléfono. Se sincronizará automáticamente al volver la red.'
+          );
+          return;
+        } catch {
+          // Si falló IndexedDB, mostrar error original
+        }
+      }
       setSubmitError(
         err instanceof Error ? err.message : 'No se pudo guardar el balance de inventario.'
       );

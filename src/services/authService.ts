@@ -23,6 +23,12 @@ import {
   type AllowedRegionCode,
   type CanonicalSucursal,
 } from '../utils/regionalSyncClassifier';
+import {
+  fetchWithCompatibleTimeout,
+  isMobileNetworkAuthError,
+  normalizeMobileLoginEmail,
+  sanitizeMobileLoginPassword,
+} from '../utils/mobileAuthCompat';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STRICT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -80,7 +86,7 @@ export interface SesionPerfilUnificado {
 }
 
 export function normalizePortalEmail(rawEmail: string): string {
-  return String(rawEmail ?? '').trim().toLowerCase();
+  return normalizeMobileLoginEmail(rawEmail);
 }
 
 export function isValidPortalEmailFormat(rawEmail: string): boolean {
@@ -1001,8 +1007,9 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
   }
 
   // 1. Verificar primero identidad IAM corporativa (`public.profiles` + `app_metadata` firmado):
-  //    Si corresponde a `super_admin` activo, concede ingreso inmediato a `/portal` en
-  //    Modo Supervisión Global sin exigir fila en `public.staff` ni cerrar su sesión.
+  //    - Si corresponde a `super_admin` activo, concede ingreso inmediato en Modo Supervisión Global.
+  //    - Si corresponde a `promotora` activa ya verificada contra `public.profiles` (con staffId o
+  //      sucursal válida), concede ingreso inmediato sin duplicar consultas ni expulsar por micro-cortes 4G.
   const resolvedCorporate = await resolveVerifiedProfileWithStaffFallback(session);
   if (resolvedCorporate && resolvedCorporate.iamRole === 'super_admin') {
     const client = getSupabaseClient();
@@ -1018,6 +1025,28 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
         staffId: null,
         isCoordinatorOrAdmin: true,
         canAccessTorreControl: true,
+        mustChangePassword: false,
+      },
+      unauthorizedReason: null,
+    };
+  }
+
+  if (
+    resolvedCorporate &&
+    resolvedCorporate.iamRole === 'promotora' &&
+    (resolvedCorporate.staffId || resolvedCorporate.sucursal || resolvedCorporate.canonicalSucursal)
+  ) {
+    const client = getSupabaseClient();
+    client.realtime.setAuth(session.access_token);
+    return {
+      profile: {
+        ...resolvedCorporate,
+        appRole: 'promotora',
+        iamRole: 'promotora',
+        rawAppRole: 'promotora',
+        legacyRole: 'promotora',
+        isCoordinatorOrAdmin: false,
+        canAccessTorreControl: false,
         mustChangePassword: false,
       },
       unauthorizedReason: null,
@@ -1069,12 +1098,16 @@ export async function verifyActivePromotoraPortalAccess(session: Session | null)
   };
 }
 
+const PORTAL_LOGIN_API_TIMEOUT_MS = 10_000;
+const MOBILE_NETWORK_LOGIN_ERROR_MESSAGE =
+  'Conexión inestable o sin respuesta del servidor. Verifica tu señal móvil/Wi-Fi e intenta nuevamente.';
+
 export async function signInPromotoraPortalWithPassword(
   rawEmail: string,
   rawPassword: string
 ): Promise<{ session: Session; profile: VerifiedAuthProfile }> {
   const email = normalizePortalEmail(rawEmail);
-  const password = String(rawPassword ?? '');
+  const password = sanitizeMobileLoginPassword(rawPassword);
 
   if (!isValidPortalEmailFormat(email) || password.trim().length === 0) {
     throw new Error('Ingresa un correo electrónico válido y tu contraseña.');
@@ -1086,62 +1119,116 @@ export async function signInPromotoraPortalWithPassword(
   const client = getSupabaseClient();
   let session: Session | null = null;
 
-  // Intentar primero el endpoint backend con rate limiting estricto por (IP + correo)
+  // En iOS el teclado predictivo suele agregar un espacio al final de la contraseña;
+  // si el primer intento devuelve 401 y difiere de `.trim()`, reintentamos una sola vez con `.trim()`.
+  const passwordCandidates =
+    password.trim() !== password && password.trim().length > 0
+      ? [password, password.trim()]
+      : [password];
+
+  // Intentar primero el endpoint backend con rate limiting estricto por (IP + correo) y timeout seguro de 10 s
   let fallbackToDirectSupabase = true;
   if (typeof window !== 'undefined' && typeof fetch === 'function') {
-    try {
-      const apiRes = await fetch('/api/auth/promotora-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      if (apiRes.status === 429) {
-        const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
-        throw new Error(
-          body.error || 'Demasiados intentos fallidos. Espera unos minutos antes de reintentar.'
+    for (let idx = 0; idx < passwordCandidates.length; idx += 1) {
+      const candidatePassword = passwordCandidates[idx]!;
+      const hasMoreCandidates = idx < passwordCandidates.length - 1;
+      try {
+        const apiRes = await fetchWithCompatibleTimeout(
+          fetch,
+          '/api/auth/promotora-login',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password: candidatePassword }),
+          },
+          PORTAL_LOGIN_API_TIMEOUT_MS,
         );
-      }
-      if (apiRes.status === 401) {
-        const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error || GENERIC_INVALID_CREDENTIALS_MESSAGE);
-      }
-      if (apiRes.ok) {
-        const body = (await apiRes.json().catch(() => ({}))) as {
-          session?: { access_token?: string; refresh_token?: string };
-        };
-        if (body.session?.access_token && body.session?.refresh_token) {
-          const { data: hydrated, error: setErr } = await client.auth.setSession({
-            access_token: body.session.access_token,
-            refresh_token: body.session.refresh_token,
-          });
-          if (!setErr && hydrated.session && hydrated.user) {
-            session = hydrated.session;
-            fallbackToDirectSupabase = false;
+        if (apiRes.status === 429) {
+          const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
+          throw new Error(
+            body.error || 'Demasiados intentos fallidos. Espera unos minutos antes de reintentar.'
+          );
+        }
+        if (apiRes.status === 401) {
+          if (hasMoreCandidates) continue;
+          const body = (await apiRes.json().catch(() => ({}))) as { error?: string };
+          throw new Error(body.error || GENERIC_INVALID_CREDENTIALS_MESSAGE);
+        }
+        if (apiRes.ok) {
+          const body = (await apiRes.json().catch(() => ({}))) as {
+            session?: { access_token?: string; refresh_token?: string };
+          };
+          if (body.session?.access_token && body.session?.refresh_token) {
+            const { data: hydrated, error: setErr } = await client.auth.setSession({
+              access_token: body.session.access_token,
+              refresh_token: body.session.refresh_token,
+            });
+            if (!setErr && hydrated.session && hydrated.user) {
+              session = hydrated.session;
+              fallbackToDirectSupabase = false;
+            }
           }
         }
+        break;
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          (/Demasiados intentos|Credenciales inválidas|Verifica tu correo/i.test(err.message) ||
+            err.message === GENERIC_INVALID_CREDENTIALS_MESSAGE)
+        ) {
+          throw err;
+        }
+        // Si el BFF tardó demasiado o no está disponible (despliegue estático / micro-corte iOS), degradar a Auth directo
+        fallbackToDirectSupabase = true;
+        break;
       }
-    } catch (err) {
-      if (
-        err instanceof Error &&
-        (/Demasiados intentos|Credenciales inválidas|Verifica tu correo/i.test(err.message) ||
-          err.message === GENERIC_INVALID_CREDENTIALS_MESSAGE)
-      ) {
-        throw err;
-      }
-      // En despliegues estáticos sin backend Express, degrada de forma segura al Auth directo
-      fallbackToDirectSupabase = true;
     }
   }
 
   if (fallbackToDirectSupabase) {
-    const { data, error } = await client.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error || !data.session || !data.user) {
-      throw new Error(GENERIC_INVALID_CREDENTIALS_MESSAGE);
+    let lastDirectError: unknown = null;
+    for (let idx = 0; idx < passwordCandidates.length; idx += 1) {
+      const candidatePassword = passwordCandidates[idx]!;
+      const hasMoreCandidates = idx < passwordCandidates.length - 1;
+      try {
+        const { data, error } = await client.auth.signInWithPassword({
+          email,
+          password: candidatePassword,
+        });
+        if (!error && data.session && data.user) {
+          session = data.session;
+          lastDirectError = null;
+          break;
+        }
+        lastDirectError = error;
+        if (error && isMobileNetworkAuthError(error)) {
+          throw new Error(MOBILE_NETWORK_LOGIN_ERROR_MESSAGE);
+        }
+        if (!hasMoreCandidates) {
+          throw new Error(GENERIC_INVALID_CREDENTIALS_MESSAGE);
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message === MOBILE_NETWORK_LOGIN_ERROR_MESSAGE) {
+          throw err;
+        }
+        if (isMobileNetworkAuthError(err)) {
+          throw new Error(MOBILE_NETWORK_LOGIN_ERROR_MESSAGE);
+        }
+        if (!hasMoreCandidates) {
+          throw new Error(
+            err instanceof Error && err.message ? err.message : GENERIC_INVALID_CREDENTIALS_MESSAGE,
+          );
+        }
+        lastDirectError = err;
+      }
     }
-    session = data.session;
+    if (!session && lastDirectError) {
+      throw new Error(
+        isMobileNetworkAuthError(lastDirectError)
+          ? MOBILE_NETWORK_LOGIN_ERROR_MESSAGE
+          : GENERIC_INVALID_CREDENTIALS_MESSAGE,
+      );
+    }
   }
 
   if (!session) {
