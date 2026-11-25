@@ -2,16 +2,19 @@
 /**
  * Service Worker PWA Offline-First + Web Push (VAPID) — CODIZULCA C.A. Trade Marketing (`/` y `/portal`)
  *
- * Reglas de seguridad y privacidad:
- *  1. Precachea ÚNICAMENTE el App Shell público estático (HTML, assets inmutables, íconos y manifest).
- *  2. NUNCA cachea `/api/*`, `*.supabase.co`, ni respuestas con datos de negocio o credenciales:
- *     toda copia offline operativa reside exclusivamente en IndexedDB para garantizar purga determinista
- *     al expirar o revocarse una jornada.
- *  3. Responde al mensaje `PURGE_PRIVATE_CACHES` limpiando cachés dinámicas cuando se cierra o expira un enlace.
- *  4. Recibe notificaciones Web Push (VAPID) para nuevas degustaciones creadas desde FDV.
+ * Reglas de seguridad, privacidad e invalidación automática de caché:
+ *  1. `APP_BUILD_ID` se estampa automáticamente en cada build por `createBuildVersionPlugin`
+ *     (cero versionado manual): cada despliegue cambia el archivo byte-a-byte y purga cachés viejas.
+ *  2. NUNCA intercepta ni cachea `/api/*`, `/version.json`, `/sw.js`, `*.supabase.co`, ni datos de negocio:
+ *     toda copia offline operativa reside exclusivamente en IndexedDB.
+ *  3. Jamás guarda respuestas `text/html` bajo rutas `/assets/*` o estáticos (evita cache poisoning).
+ *  4. Responde a `SKIP_WAITING`, `PURGE_PRIVATE_CACHES` y `PURGE_ALL_SHELL_CACHES`.
+ *  5. Recibe notificaciones Web Push (VAPID) para nuevas degustaciones creadas desde FDV.
  */
 
-const SHELL_CACHE = 'codizulca-trade-shell-v335';
+const APP_BUILD_ID = '__APP_BUILD_ID__';
+const SHELL_CACHE_PREFIX = 'codizulca-trade-shell-';
+const SHELL_CACHE = `${SHELL_CACHE_PREFIX}${APP_BUILD_ID}`;
 const SHELL_URLS = [
   '/',
   '/portal',
@@ -24,11 +27,29 @@ const SHELL_URLS = [
   '/icons/icon-maskable-512.png',
 ];
 
+function isHtmlResponse(res) {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  return ct.includes('text/html');
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(SHELL_CACHE)
-      .then((cache) => cache.addAll(SHELL_URLS).catch(() => undefined))
+      .then((cache) =>
+        Promise.all(
+          SHELL_URLS.map((url) =>
+            fetch(new Request(url, { cache: 'reload' }))
+              .then((res) => {
+                if (res.ok && res.type === 'basic') {
+                  return cache.put(url, res);
+                }
+                return undefined;
+              })
+              .catch(() => undefined)
+          )
+        )
+      )
       .then(() => self.skipWaiting())
   );
 });
@@ -54,6 +75,18 @@ self.addEventListener('message', (event) => {
     self.skipWaiting();
     return;
   }
+  if (type === 'PURGE_ALL_SHELL_CACHES') {
+    event.waitUntil(
+      caches.keys().then((keys) =>
+        Promise.all(
+          keys
+            .filter((k) => k.startsWith('codizulca-trade-'))
+            .map((k) => caches.delete(k))
+        )
+      )
+    );
+    return;
+  }
   if (type === 'PURGE_PRIVATE_CACHES') {
     event.waitUntil(
       caches.keys().then((keys) =>
@@ -73,22 +106,30 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url);
 
-  // Nunca interceptar llamadas API, Supabase, WebSockets ni el sub-PWA /logistica (tiene su propio SW)
+  // Nunca interceptar llamadas API, manifiesto de versión, Supabase, WebSockets ni el sub-PWA /logistica
   if (
     url.origin !== self.location.origin ||
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/logistica') ||
+    url.pathname === '/version.json' ||
+    url.pathname.endsWith('/version.json') ||
     url.pathname.endsWith('/sw.js')
   ) {
     return;
   }
 
-  // Navegación SPA (Network-First con fallback offline seguro para iOS Safari y Android)
+  // Navegación SPA (Network-First estricto con fallback offline seguro para iOS Safari y Android)
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          if (res.ok && res.type === 'basic' && !res.redirected && !url.searchParams.has('t')) {
+          if (
+            res.ok &&
+            res.type === 'basic' &&
+            !res.redirected &&
+            isHtmlResponse(res) &&
+            !url.searchParams.has('t')
+          ) {
             const clone = res.clone();
             const cacheKey = url.pathname === '/portal' ? '/portal' : '/';
             caches.open(SHELL_CACHE).then((cache) => cache.put(cacheKey, clone)).catch(() => undefined);
@@ -105,24 +146,58 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Assets inmutables de Vite (`/assets/*`) e íconos: Cache-First con llenado progresivo
-  if (
-    url.pathname.startsWith('/assets/') ||
-    url.pathname.startsWith('/icons/') ||
-    url.pathname === '/favicon.ico' ||
-    url.pathname === '/codizulca-logo.png' ||
-    url.pathname === '/manifest.webmanifest'
-  ) {
+  // Manifest PWA: Network-First para reflejar íconos y metadatos nuevos sin caché pegada
+  if (url.pathname === '/manifest.webmanifest') {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res.ok && res.type === 'basic' && !isHtmlResponse(res)) {
+            const clone = res.clone();
+            caches.open(SHELL_CACHE).then((cache) => cache.put(req, clone)).catch(() => undefined);
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then((cached) => cached || Response.error()))
+    );
+    return;
+  }
+
+  // Assets inmutables con hash de Vite (`/assets/*`): Cache-First blindado contra HTML fallback
+  if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
       caches.match(req).then((cached) => {
-        if (cached) return cached;
+        if (cached && !isHtmlResponse(cached)) return cached;
         return fetch(req).then((res) => {
-          if (res.ok) {
+          if (res.ok && res.type === 'basic' && !isHtmlResponse(res)) {
             const clone = res.clone();
             caches.open(SHELL_CACHE).then((cache) => cache.put(req, clone)).catch(() => undefined);
           }
           return res;
         });
+      })
+    );
+    return;
+  }
+
+  // Íconos y branding sin hash: Stale-While-Revalidate blindado contra HTML fallback
+  if (
+    url.pathname.startsWith('/icons/') ||
+    url.pathname === '/favicon.ico' ||
+    url.pathname === '/codizulca-logo.png'
+  ) {
+    event.respondWith(
+      caches.match(req).then((cached) => {
+        const networkPromise = fetch(req)
+          .then((res) => {
+            if (res.ok && res.type === 'basic' && !isHtmlResponse(res)) {
+              const clone = res.clone();
+              caches.open(SHELL_CACHE).then((cache) => cache.put(req, clone)).catch(() => undefined);
+            }
+            return res;
+          })
+          .catch(() => cached || Response.error());
+
+        return cached && !isHtmlResponse(cached) ? cached : networkPromise;
       })
     );
   }

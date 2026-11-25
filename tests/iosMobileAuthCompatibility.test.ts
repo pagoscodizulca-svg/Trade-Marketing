@@ -150,9 +150,11 @@ test('invariantes iOS Safari: sin async directo en onAuthStateChange, inputs ant
     'supabaseClient debe usar storage resiliente de triple capa, modo lockless nativo de @supabase/auth-js v2.119+, timeout compatible con iOS y omitir x-sucursal-activa en /auth/v1/',
   );
   assert.ok(
-    swSrc.includes("SHELL_CACHE = 'codizulca-trade-shell-v335'") &&
+    swSrc.includes("APP_BUILD_ID = '__APP_BUILD_ID__'") &&
+      swSrc.includes("SHELL_CACHE_PREFIX = 'codizulca-trade-shell-'") &&
+      !swSrc.includes('codizulca-trade-shell-v334') &&
       swSrc.includes('!res.redirected'),
-    'public/sw.js debe invalidar caché viejo v334 y jamás cachear respuestas redirigidas en Safari',
+    'public/sw.js debe invalidar automáticamente cachés viejos por buildId y jamás cachear respuestas redirigidas en Safari',
   );
 });
 

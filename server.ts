@@ -70,6 +70,7 @@ import {
   validateServerEnvConfig,
   type ClosableHttpServer,
 } from './src/server/gracefulShutdown';
+import { mountSpaRoutes } from './src/server/spaCachePolicy';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -899,56 +900,10 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
 // 3. VITE MIDDLEWARE & STATIC SERVING (UN SOLO EXPRESS: `/`, `/portal`, `/logistica`)
 // ============================================================================
 function serveSpa(mountPath: string, distPath: string, label: string): void {
-  const indexFile = path.join(distPath, 'index.html');
-  if (!fs.existsSync(indexFile)) {
-    serverLogger.warn('spa_dist_missing', { label, distPath });
-    return;
-  }
-
-  // En sub-SPAs con prefijo (ej. `/logistica`), redirigir `/logistica` -> `/logistica/`
-  // preservando la query string para que el Service Worker (`scope: /logistica/`) y el manifest PWA
-  // operen siempre dentro de su alcance oficial.
-  if (mountPath !== '/') {
-    app.get(mountPath, (req: Request, res: Response, next: NextFunction) => {
-      const qIdx = req.originalUrl.indexOf('?');
-      const rawPath = qIdx >= 0 ? req.originalUrl.slice(0, qIdx) : req.originalUrl;
-      if (rawPath === mountPath) {
-        const qs = qIdx >= 0 ? req.originalUrl.slice(qIdx) : '';
-        res.redirect(302, `${mountPath}/${qs}`);
-        return;
-      }
-      next();
-    });
-  }
-
-  const staticMw = express.static(distPath, {
-    index: false,
-    setHeaders(res, filePath) {
-      const base = path.basename(filePath);
-      if (/^(sw\.js|registerSW\.js)$/i.test(base)) {
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Service-Worker-Allowed', '/');
-      } else if (/^(index\.html|manifest\.json|manifest\.webmanifest)$/i.test(base)) {
-        res.setHeader('Cache-Control', 'no-cache');
-        if (base.endsWith('.webmanifest')) {
-          res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
-        }
-      } else if (
-        /^(favicon\.ico|codizulca-logo\.png)$/i.test(base) ||
-        filePath.includes(`${path.sep}icons${path.sep}`)
-      ) {
-        res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
-      } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      }
+  mountSpaRoutes(app, mountPath, distPath, label, {
+    onMissingDist(missingLabel, missingDistPath) {
+      serverLogger.warn('spa_dist_missing', { label: missingLabel, distPath: missingDistPath });
     },
-  });
-
-  app.use(mountPath, staticMw);
-  const fallbackPattern = mountPath === '/' ? /^\/(?!api(\/|$)).*/ : new RegExp(`^${mountPath}(/.*)?$`);
-  app.get(fallbackPattern, (_req: Request, res: Response) => {
-    res.setHeader('Cache-Control', 'no-cache');
-    res.sendFile(indexFile);
   });
 }
 

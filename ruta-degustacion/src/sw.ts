@@ -32,14 +32,19 @@ interface SwScope {
 declare const self: SwScope;
 
 const BACKGROUND_SYNC_TAG = 'sync-deliveries-outbox';
+const APP_BUILD_ID = '__APP_BUILD_ID__';
 
 cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
 
-// App de una sola página: cualquier navegación sin red se resuelve con el index.html precacheado.
-// El alcance del SW (`/` en desarrollo, `/logistica/` en producción) define la ruta del App Shell.
+// App de una sola página: cualquier navegación sin red se resuelve con el index.html precacheado,
+// excluyendo explícitamente `version.json`, `/assets/*` y `/api/*` para jamás envenenar cachés con HTML.
 const SW_SCOPE_URL = (self as unknown as { registration: { scope: string } }).registration.scope;
-registerRoute(new NavigationRoute(createHandlerBoundToURL(new URL('index.html', SW_SCOPE_URL).pathname)));
+registerRoute(
+  new NavigationRoute(createHandlerBoundToURL(new URL('index.html', SW_SCOPE_URL).pathname), {
+    denylist: [/\/version\.json$/i, /\/assets\//i, /\/api\//i, /\/sw\.js$/i],
+  }),
+);
 
 // Fuentes de Google (hoja CSS y archivos): se guardan al verlas por primera vez y se sirven offline.
 registerRoute(
@@ -50,9 +55,16 @@ registerRoute(
   }),
 );
 
-// La nueva versión se activa solo cuando la app lo pide (no se recarga a mitad de una entrega).
+// La nueva versión se activa bajo control del guardián de versión / usuario (sin cortar una entrega activa).
 self.addEventListener('message', (event: SwMessageEvent) => {
-  if (event.data?.type === 'SKIP_WAITING') void self.skipWaiting();
+  if (event.data?.type === 'SKIP_WAITING') {
+    void self.skipWaiting();
+    return;
+  }
+  if (event.data?.type === 'GET_BUILD_ID') {
+    const port = (event as unknown as { ports?: Array<{ postMessage: (msg: unknown) => void }> }).ports?.[0];
+    port?.postMessage({ buildId: APP_BUILD_ID });
+  }
 });
 self.addEventListener('activate', (event: SwEvent) => {
   event.waitUntil(self.clients.claim());

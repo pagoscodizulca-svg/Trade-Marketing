@@ -2,10 +2,18 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import {createBuildVersionPlugin} from './scripts/lib/buildVersionPlugin.ts';
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      createBuildVersionPlugin({
+        appName: 'trade-marketing',
+        stampFiles: ['sw.js'],
+      }),
+    ],
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),

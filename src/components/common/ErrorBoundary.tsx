@@ -1,5 +1,12 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
+import {
+  DEFAULT_TRADE_CACHE_PREFIXES,
+  PRELOAD_RELOAD_GUARD_KEY,
+  getCurrentBuildId,
+  isChunkLoadErrorMessage,
+  performCleanVersionReload,
+} from '../../lib/appVersionGuard';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -27,10 +34,25 @@ export class ErrorBoundary extends React.Component<
     // El detalle técnico va a la consola del navegador (no a la interfaz).
     console.error('[ErrorBoundary]', this.state.errorId, error, info.componentStack);
     this.props.onError?.(error, info, this.state.errorId);
+    if (isChunkLoadErrorMessage(error)) {
+      void performCleanVersionReload({
+        reason: 'preload-error',
+        targetSignature: `eb-chunk:${getCurrentBuildId() || 'current'}`,
+        guardKey: PRELOAD_RELOAD_GUARD_KEY,
+        cachePrefixes: DEFAULT_TRADE_CACHE_PREFIXES,
+        swScope: '/',
+        cooldownMs: 30 * 1000,
+      });
+    }
   }
 
   private handleReload = () => {
-    window.location.reload();
+    void performCleanVersionReload({
+      reason: 'manual',
+      targetSignature: `manual-eb:${Date.now()}`,
+      cachePrefixes: DEFAULT_TRADE_CACHE_PREFIXES,
+      swScope: '/',
+    });
   };
 
   private handleRetry = () => {
