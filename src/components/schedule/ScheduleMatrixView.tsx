@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useApp } from '../../context/AppContext';
 import { 
@@ -404,7 +404,7 @@ export const ScheduleMatrixView: React.FC = () => {
   const [debouncedStoreSearchInBatch, setDebouncedStoreSearchInBatch] = useState<string>('');
   const [visibleBatchStoresLimit, setVisibleBatchStoresLimit] = useState<number>(150);
 
-  // Debounce ligero (~180 ms) para mantener búsqueda fluida con miles de PDVs
+  // Búsqueda fluida (~80 ms) para mantener agilidad con miles de PDVs
   useEffect(() => {
     if (!storeSearchInBatch.trim()) {
       setDebouncedStoreSearchInBatch('');
@@ -412,7 +412,7 @@ export const ScheduleMatrixView: React.FC = () => {
     }
     const timer = window.setTimeout(() => {
       setDebouncedStoreSearchInBatch(storeSearchInBatch);
-    }, 180);
+    }, 80);
     return () => window.clearTimeout(timer);
   }, [storeSearchInBatch]);
 
@@ -467,9 +467,25 @@ export const ScheduleMatrixView: React.FC = () => {
     () => users.find((u) => u.role === 'promotora')?.name || 'POR ASIGNAR (Trade Marketing)'
   );
 
+  const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (notificationTimerRef.current) {
+        clearTimeout(notificationTimerRef.current);
+      }
+    };
+  }, []);
+
   const showNotification = (text: string, count: number, subtitle?: string) => {
+    if (notificationTimerRef.current) {
+      clearTimeout(notificationTimerRef.current);
+    }
     setNotificationMsg({ text, count, subtitle });
-    setTimeout(() => setNotificationMsg(null), 4500);
+    notificationTimerRef.current = setTimeout(() => {
+      setNotificationMsg(null);
+      notificationTimerRef.current = null;
+    }, 5000);
   };
 
   // Helper de Validación: Comprueba si una promotora activa ya está agendada el mismo día en la misma jornada
@@ -931,13 +947,21 @@ export const ScheduleMatrixView: React.FC = () => {
         return;
       }
 
+      // Auto-desmarcar tiendas y limpiar buscador/promotora tras cada lote exitoso para evitar marcas acumuladas
+      setSelectedStoreIds([]);
+      setStoreSearchInBatch('');
+      setDebouncedStoreSearchInBatch('');
       setBatchNotes('');
+      if (batchPromotora !== 'AUTO') {
+        setBatchPromotora('AUTO');
+      }
+
       const totalProcessed = result.countUpdated + result.countCreated;
+      const storeWord = totalProcessed === 1 ? 'tienda' : 'tiendas';
       showNotification(
-        `¡Llenado por lote persistido en Supabase! Se cargó ${batchProductBadgeLabel} (${batchQuantity}) en ${totalProcessed} tiendas para la jornada ${shiftToUse}.` +
-          (hiddenSelectedCount > 0 ? ` ${hiddenSelectedCount} marcados ocultos por filtro omitidos.` : ''),
+        `¡Llenado por lote guardado! Se cargó ${batchProductBadgeLabel} (${batchQuantity}) en ${totalProcessed} ${storeWord} para la jornada ${shiftToUse}.`,
         totalProcessed,
-        'Sincronizado en cronograma_degustaciones, rutas_promotoras y entregas_degustacion.'
+        'Sincronizado en cronograma_degustaciones, rutas_promotoras y entregas_degustacion. Selección reiniciada para el siguiente lote.'
       );
     } finally {
       setIsPersistingMatrix(false);
@@ -1195,29 +1219,52 @@ export const ScheduleMatrixView: React.FC = () => {
         documentCode="CZ-MOD2-MTZ"
       />
 
-      {/* Real-time Notification Banner */}
-      {notificationMsg && (
-        <div className={`fixed top-20 right-6 z-50 text-white font-black text-xs px-5 py-3.5 rounded-2xl shadow-2xl border-2 flex items-center gap-3 animate-bounce ${
-          notificationMsg.count === 0
-            ? 'bg-amber-600 border-amber-300 shadow-amber-950/80'
-            : 'bg-red-600 border-white shadow-red-950'
-        }`}>
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center font-black text-xs ${
-            notificationMsg.count === 0 ? 'bg-amber-100 text-amber-800' : 'bg-white text-red-600'
-          }`}>
-            {notificationMsg.count === 0 ? '!' : '✓'}
-          </div>
-          <div>
-            <div className="font-extrabold text-sm">{notificationMsg.text}</div>
-            <div className="text-[10px] text-white/90">
-              {notificationMsg.subtitle ||
-                (notificationMsg.count === 0
-                  ? 'Los cambios no persistidos fueron revertidos automáticamente o requieren ajuste.'
-                  : 'La Tabla General ha sido actualizada y persistida en tiempo real.')}
+      {/* Real-time Notification Toast (Portal en esquina inferior derecha sin tapar el formulario) */}
+      {notificationMsg &&
+        (() => {
+          const toastNode = (
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="schedule-matrix-notification-toast"
+              className={`cz-obsidian-anchor fixed bottom-5 right-5 z-[115] max-w-md w-[calc(100vw-2.5rem)] sm:w-auto text-white text-xs px-4 py-3.5 rounded-2xl shadow-2xl border flex items-start gap-3 ${
+                notificationMsg.count === 0
+                  ? 'bg-amber-600 border-amber-300/80 shadow-amber-950/80'
+                  : 'bg-emerald-600 border-emerald-300/80 shadow-emerald-950/80'
+              }`}
+            >
+              <div
+                className={`w-6 h-6 rounded-full flex items-center justify-center font-black text-xs shrink-0 mt-0.5 ${
+                  notificationMsg.count === 0
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-white text-emerald-700'
+                }`}
+              >
+                {notificationMsg.count === 0 ? '!' : '✓'}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="font-extrabold text-sm leading-snug">{notificationMsg.text}</div>
+                <div className="text-[11px] text-white/90 mt-0.5 leading-snug">
+                  {notificationMsg.subtitle ||
+                    (notificationMsg.count === 0
+                      ? 'Los cambios no persistidos fueron revertidos automáticamente o requieren ajuste.'
+                      : 'La Tabla General ha sido actualizada y persistida en tiempo real.')}
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Cerrar notificación"
+                onClick={() => setNotificationMsg(null)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-black/20 transition shrink-0 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-          </div>
-        </div>
-      )}
+          );
+          return typeof document !== 'undefined'
+            ? createPortal(toastNode, document.body)
+            : toastNode;
+        })()}
 
       {/* Top Banner: Codizulca Corporate (Negro, Blanco y Rojo) */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden backdrop-blur-md">
@@ -1554,21 +1601,23 @@ export const ScheduleMatrixView: React.FC = () => {
                     1
                   </div>
                   <h4 className="text-xs font-black text-white uppercase tracking-wider">
-                    Seleccionar Clientes / PDVs ({selectedStoreIds.length} elegidos)
+                    Seleccionar Clientes / PDVs ({effectiveBatchStoreIds.length} elegidos)
                   </h4>
                 </div>
 
                 <div className="flex items-center gap-1 text-[11px]">
                   <button
+                    type="button"
                     onClick={handleSelectAllFilteredStores}
-                    className="text-red-500 hover:text-red-400 font-bold px-1.5 py-0.5 rounded hover:bg-zinc-900 transition"
+                    className="text-red-500 hover:text-red-400 font-bold px-1.5 py-0.5 rounded hover:bg-zinc-900 transition cursor-pointer"
                   >
                     Todos
                   </button>
                   <span className="text-zinc-600">|</span>
                   <button
+                    type="button"
                     onClick={handleDeselectAllStores}
-                    className="text-zinc-400 hover:text-white font-bold px-1.5 py-0.5 rounded hover:bg-zinc-900 transition"
+                    className="text-zinc-400 hover:text-white font-bold px-1.5 py-0.5 rounded hover:bg-zinc-900 transition cursor-pointer"
                   >
                     Ninguno
                   </button>
@@ -1578,14 +1627,28 @@ export const ScheduleMatrixView: React.FC = () => {
               {/* Filtro rápido por zona y buscador de clientes */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
                 <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
+                    data-testid="batch-store-search-input"
                     placeholder="Filtrar cliente..."
                     value={storeSearchInBatch}
                     onChange={(e) => setStoreSearchInBatch(e.target.value)}
-                    className="w-full pl-8 pr-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
+                    className="w-full pl-8 pr-7 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-600"
                   />
+                  {storeSearchInBatch && (
+                    <button
+                      type="button"
+                      aria-label="Limpiar filtro de cliente"
+                      onClick={() => {
+                        setStoreSearchInBatch('');
+                        setDebouncedStoreSearchInBatch('');
+                      }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
                 <select
@@ -1601,6 +1664,40 @@ export const ScheduleMatrixView: React.FC = () => {
                   ))}
                 </select>
               </div>
+
+              {hiddenSelectedCount > 0 && (
+                <div
+                  data-testid="batch-hidden-stores-notice"
+                  className="mb-2.5 px-2.5 py-2 rounded-xl bg-amber-950/40 border border-amber-600/40 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2"
+                >
+                  <span>
+                    {hiddenSelectedCount}{' '}
+                    {hiddenSelectedCount === 1
+                      ? 'cliente marcado fuera del filtro actual.'
+                      : 'clientes marcados fuera del filtro actual.'}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStoreSearchInBatch('');
+                        setDebouncedStoreSearchInBatch('');
+                        setStoreZoneFilter('TODAS');
+                      }}
+                      className="px-2 py-0.5 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[10px] font-bold text-white cursor-pointer"
+                    >
+                      Ver todos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStoreIds(effectiveBatchStoreIds)}
+                      className="px-2 py-0.5 rounded-md bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/50 text-[10px] font-bold text-amber-100 cursor-pointer"
+                    >
+                      Desmarcar ocultos
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Listado con Checkboxes de Tiendas (renderizado incremental para carteras > 3,000 clientes) */}
               <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1 divide-y divide-zinc-900/60">

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -133,4 +135,34 @@ test('Buscador inteligente Portal de Promotoras (PortalProductSelector) · respa
   );
   assert.match(html, /data-testid="qa-portal-prod-search"/);
   assert.match(html, /152 SKUs/);
+});
+
+test('ScheduleMatrixView · auto-desmarca tiendas tras cada llenado por lote y muestra toast limpio vía Portal', () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src/components/schedule/ScheduleMatrixView.tsx'),
+    'utf8'
+  );
+
+  // Después de guardar el lote exitosamente debe limpiar selectedStoreIds, buscador y promotora
+  const batchFnMatch = src.match(
+    /const handleExecuteBatchFill = async[\s\S]*?finally\s*\{\s*setIsPersistingMatrix\(false\);\s*\}/
+  );
+  assert.ok(batchFnMatch, 'Debe existir handleExecuteBatchFill en ScheduleMatrixView.tsx');
+  const batchFn = batchFnMatch[0];
+  assert.match(batchFn, /setSelectedStoreIds\(\[\]\)/, 'Debe auto-desmarcar las tiendas al completar cada lote');
+  assert.match(batchFn, /setStoreSearchInBatch\(''\)/, 'Debe limpiar el filtro de cliente tras guardar el lote');
+  assert.match(batchFn, /setBatchPromotora\('AUTO'\)/, 'Debe restablecer la promotora a AUTO para evitar conflictos consecutivos');
+  assert.doesNotMatch(
+    batchFn,
+    /ocultos por filtro omitidos/,
+    'No debe acumular ni mostrar el aviso de marcados ocultos omitidos'
+  );
+
+  // Toast montado en document.body vía Portal, verde en éxito, con botón de cierre y sin animate-bounce
+  assert.match(src, /data-testid="schedule-matrix-notification-toast"/);
+  assert.match(src, /createPortal\(toastNode,\s*document\.body\)/);
+  assert.match(src, /bg-emerald-600/);
+  assert.doesNotMatch(src, /schedule-matrix-notification-toast[\s\S]{0,400}animate-bounce/);
+  assert.match(src, /data-testid="batch-hidden-stores-notice"/);
+  assert.match(src, /Desmarcar ocultos/);
 });
