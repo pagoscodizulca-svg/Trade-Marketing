@@ -26,6 +26,7 @@ import {
   normalizePriceSurveyBimonetary,
   type PriceCurrency,
 } from '../utils/bimonetaryPriceMath';
+import { OFFICIAL_PORTAL_PRODUCT_OPTIONS } from '../data/officialTradeProductsCatalog';
 
 export const PORTAL_ACTIVE_STORE_STORAGE_KEY = 'codizulca_portal_active_store_v2';
 export const PORTAL_ASISTENCIA_DRAFT_STORAGE_KEY = 'codizulca_asistencia_draft_v1';
@@ -561,7 +562,7 @@ export async function fetchPortalClientsCatalog(
 export async function fetchPortalProductsCatalog(): Promise<PortalProductOption[]> {
   try {
     const raw: ProductoMaestro[] = await obtenerProductosMaestros({ soloActivos: true });
-    return raw
+    const mapped = raw
       .filter((p) => Boolean(p.nombre))
       .map((p) => ({
         id: String(p.id),
@@ -570,8 +571,22 @@ export async function fetchPortalProductsCatalog(): Promise<PortalProductOption[
         categoria: String(p.categoria || 'General').trim(),
         presentacion: String(p.unidad_medida || p.marca || '').trim(),
       }));
+    if (mapped.length > 0) return mapped;
+    return OFFICIAL_PORTAL_PRODUCT_OPTIONS.map((p) => ({
+      id: p.id,
+      codigo: p.codigo,
+      nombre: p.nombre,
+      categoria: p.categoria,
+      presentacion: p.presentacion,
+    }));
   } catch {
-    return [];
+    return OFFICIAL_PORTAL_PRODUCT_OPTIONS.map((p) => ({
+      id: p.id,
+      codigo: p.codigo,
+      nombre: p.nombre,
+      categoria: p.categoria,
+      presentacion: p.presentacion,
+    }));
   }
 }
 

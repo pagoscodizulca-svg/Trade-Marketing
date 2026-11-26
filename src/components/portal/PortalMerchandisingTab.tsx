@@ -19,9 +19,10 @@ import {
   savePortalActiveStore,
   validatePortalImageFile,
   type PortalClientOption,
+  type PortalProductOption,
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
-import { PortalStoreSelector } from './PortalCatalogSelectors';
+import { PortalProductSelector, PortalStoreSelector } from './PortalCatalogSelectors';
 import {
   enqueuePortalMerchandisingAction,
   isTransientOfflineOrNetworkError,
@@ -30,6 +31,7 @@ import {
 interface PortalMerchandisingTabProps {
   context: PortalPromotoraContext;
   clients: PortalClientOption[];
+  products?: PortalProductOption[];
   activeStore: string;
   onActiveStoreChange: (store: string) => void;
   onNotify: (message: string) => void;
@@ -39,6 +41,7 @@ interface PortalMerchandisingTabProps {
 export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
   context,
   clients,
+  products = [],
   activeStore,
   onActiveStoreChange,
   onNotify,
@@ -483,12 +486,13 @@ export const PortalMerchandisingTab: React.FC<PortalMerchandisingTabProps> = ({
                     );
                   })}
                 </div>
-                <input
-                  type="text"
+                <PortalProductSelector
                   value={productDetail}
-                  onChange={(e) => setProductDetail(e.target.value)}
-                  placeholder="Líneas / SKUs trabajados..."
-                  className="w-full bg-[#171717] border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+                  onChange={(prod) => setProductDetail(prod)}
+                  products={products}
+                  label="Producto / SKU Trabajado:"
+                  testIdPrefix="merch-product"
+                  placeholder="Buscar producto por nombre o código..."
                 />
               </div>
 

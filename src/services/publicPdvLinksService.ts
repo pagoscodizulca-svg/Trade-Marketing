@@ -16,6 +16,10 @@ import {
   type CanonicalSucursal,
 } from '../utils/regionalSyncClassifier';
 import { buildRegionalPdvPortalUrl } from '../utils/portalLinkSharing';
+import {
+  OFFICIAL_TRADE_PRODUCTS_MAESTROS,
+  findOfficialTradeProduct,
+} from '../data/officialTradeProductsCatalog';
 
 const PUBLIC_PDV_TOKEN_REGEX = /^[A-Za-z0-9_-]{24,256}$/;
 
@@ -332,6 +336,50 @@ export async function obtenerDatosPdvPorToken(
       );
     }
 
+    const rawProductos = Array.isArray(raw.productos)
+      ? (raw.productos as PublicPdvProductoNacionalItem[])
+      : [];
+    const hasNumericCodes = rawProductos.some((p) => /^\d+$/.test(String(p.codigo || '').trim()));
+    const resolvedProductos: PublicPdvProductoNacionalItem[] = (() => {
+      if (rawProductos.length === 0) {
+        return OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+          id: p.id,
+          codigo: p.codigo,
+          nombre: p.nombre,
+          categoria: p.categoria,
+          marca: p.marca,
+          unidad_medida: p.unidad_medida,
+        }));
+      }
+      if (!hasNumericCodes) {
+        return rawProductos;
+      }
+      const filtered: PublicPdvProductoNacionalItem[] = [];
+      const seen = new Set<string>();
+      for (const p of rawProductos) {
+        const official = findOfficialTradeProduct({ codigo: p.codigo, nombre: p.nombre });
+        if (!official || seen.has(official.codigo)) continue;
+        seen.add(official.codigo);
+        filtered.push({
+          ...p,
+          codigo: official.codigo,
+          nombre: official.articulo,
+          categoria: `${official.grupo} · ${official.subgrupo}`,
+        });
+      }
+      if (filtered.length === 0) {
+        return OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+          id: p.id,
+          codigo: p.codigo,
+          nombre: p.nombre,
+          categoria: p.categoria,
+          marca: p.marca,
+          unidad_medida: p.unidad_medida,
+        }));
+      }
+      return filtered.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    })();
+
     const payload: PublicPdvBootstrapPayload = {
       sucursal,
       tiendas: Array.isArray(raw.tiendas) ? (raw.tiendas as PublicPdvTiendaItem[]) : [],
@@ -341,9 +389,7 @@ export async function obtenerDatosPdvPorToken(
       degustacionesAutorizadas: Array.isArray(raw.degustaciones_autorizadas)
         ? (raw.degustaciones_autorizadas as PublicPdvDegustacionAutorizadaItem[])
         : [],
-      productos: Array.isArray(raw.productos)
-        ? (raw.productos as PublicPdvProductoNacionalItem[])
-        : [],
+      productos: resolvedProductos,
       serverTime: String(raw.server_time ?? new Date().toISOString()),
       fromOfflineCache: false,
     };

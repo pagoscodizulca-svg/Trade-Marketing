@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react';
-import { PRODUCTOS, TURNOS, type Entrega, type Turno } from '../../types';
-import { PRODUCTO_LABEL } from '../../utils/format';
+import { useMemo, useState, type FormEvent } from 'react';
+import { TURNOS, type Entrega, type Turno } from '../../types';
+import { OFFICIAL_RUTA_PRODUCTS, normalizeRutaSearch } from '../../data/officialTradeProducts';
 import { Modal } from '../common/Modal';
 
 interface AddStopModalProps {
@@ -36,10 +36,21 @@ export function AddStopModal({ dias, onClose, onSave }: AddStopModalProps) {
   const [grupo, setGrupo] = useState('');
   const [cliente, setCliente] = useState('');
   const [producto, setProducto] = useState<string>('');
+  const [isProductOpen, setIsProductOpen] = useState(false);
   const [vendedor, setVendedor] = useState('');
   const [promotora, setPromotora] = useState('');
   const [error, setError] = useState('');
   const [guardando, setGuardando] = useState(false);
+
+  const filteredRutaProducts = useMemo(() => {
+    const q = normalizeRutaSearch(producto);
+    if (!q) return OFFICIAL_RUTA_PRODUCTS.slice(0, 40);
+    const tokens = q.split(' ').filter(Boolean);
+    return OFFICIAL_RUTA_PRODUCTS.filter((p) => {
+      const hay = normalizeRutaSearch(`${p.articulo} ${p.codigo} ${p.cod} ${p.grupo} ${p.subgrupo}`);
+      return tokens.every((tok) => hay.includes(tok));
+    }).slice(0, 40);
+  }, [producto]);
 
   const submit = async (ev: FormEvent) => {
     ev.preventDefault();
@@ -120,26 +131,47 @@ export function AddStopModal({ dias, onClose, onSave }: AddStopModalProps) {
           'Cliente',
           <input className={INPUT} value={cliente} onChange={(e) => setCliente(e.target.value)} name="cliente" autoFocus />,
         )}
-        {campo(
-          'Producto',
-          <>
+        <div className="relative">
+          {campo(
+            `Producto (${OFFICIAL_RUTA_PRODUCTS.length} artículos oficiales)`,
             <input
               className={INPUT}
-              list="productos-preset"
               value={producto}
-              onChange={(e) => setProducto(e.target.value)}
-              placeholder="Ej: MORTADELA, VENCAMPO o producto del catálogo"
+              onFocus={() => setIsProductOpen(true)}
+              onBlur={() => setTimeout(() => setIsProductOpen(false), 160)}
+              onChange={(e) => {
+                setProducto(e.target.value);
+                setIsProductOpen(true);
+              }}
+              placeholder="Teclea nombre o código del producto..."
               name="producto"
-            />
-            <datalist id="productos-preset">
-              {PRODUCTOS.map((p) => (
-                <option key={p} value={p}>
-                  {PRODUCTO_LABEL[p]}
-                </option>
+              autoComplete="off"
+            />,
+          )}
+          {isProductOpen && filteredRutaProducts.length > 0 && (
+            <div className="mt-1 max-h-48 overflow-y-auto rounded-lg border-2 border-zinc-300 bg-white shadow-xl divide-y divide-zinc-200">
+              {filteredRutaProducts.map((p) => (
+                <button
+                  key={p.codigo}
+                  type="button"
+                  onMouseDown={(ev) => {
+                    ev.preventDefault();
+                    setProducto(p.articulo);
+                    setIsProductOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-xs hover:bg-red-50 flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <div className="min-w-0">
+                    <div className="font-bold text-zinc-900 truncate">{p.articulo}</div>
+                    <div className="text-[10px] font-mono text-zinc-500 truncate">
+                      {p.codigo} · {p.grupo} · {p.subgrupo}
+                    </div>
+                  </div>
+                </button>
               ))}
-            </datalist>
-          </>,
-        )}
+            </div>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-3">
           {campo('Vendedor', <input className={INPUT} value={vendedor} onChange={(e) => setVendedor(e.target.value)} name="vendedor" />)}
           {campo('Promotora', <input className={INPUT} value={promotora} onChange={(e) => setPromotora(e.target.value)} name="promotora" />)}

@@ -10,6 +10,10 @@ import {
   type OperativeSucursal,
 } from './supabaseAdminAuth';
 import { serverLogger } from './logger';
+import {
+  OFFICIAL_TRADE_PRODUCTS_MAESTROS,
+  findOfficialTradeProduct,
+} from '../data/officialTradeProductsCatalog';
 
 export type ShiftLinkRole = 'promotora' | 'chofer';
 export type ShiftDurationHours = 8 | 12 | 24;
@@ -1029,13 +1033,60 @@ export function createShiftLinksHandlers(options?: {
         return;
       }
 
+      const rawShiftProds = Array.isArray(boot.productos) ? boot.productos : [];
+      const hasNumericCodes = rawShiftProds.some((p) => {
+        const rec = p && typeof p === 'object' ? (p as Record<string, unknown>) : null;
+        return Boolean(rec && /^\d+$/.test(String(rec.codigo ?? rec.prod_codi ?? '').trim()));
+      });
+      const resolvedShiftProds = (() => {
+        if (rawShiftProds.length === 0) {
+          return OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+            id: p.id,
+            codigo: p.codigo,
+            nombre: p.nombre,
+            categoria: p.categoria,
+            marca: p.marca,
+            unidad_medida: p.unidad_medida,
+          }));
+        }
+        if (!hasNumericCodes) return rawShiftProds;
+        const filtered: Record<string, unknown>[] = [];
+        const seen = new Set<string>();
+        for (const item of rawShiftProds) {
+          if (!item || typeof item !== 'object') continue;
+          const rec = item as Record<string, unknown>;
+          const official = findOfficialTradeProduct({
+            codigo: rec.codigo ?? rec.prod_codi,
+            nombre: rec.nombre ?? rec.prod_desc,
+          });
+          if (!official || seen.has(official.codigo)) continue;
+          seen.add(official.codigo);
+          filtered.push({
+            ...rec,
+            codigo: official.codigo,
+            nombre: official.articulo,
+            categoria: `${official.grupo} · ${official.subgrupo}`,
+          });
+        }
+        return filtered.length > 0
+          ? filtered
+          : OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+              id: p.id,
+              codigo: p.codigo,
+              nombre: p.nombre,
+              categoria: p.categoria,
+              marca: p.marca,
+              unidad_medida: p.unidad_medida,
+            }));
+      })();
+
       res.status(200).json({
         ok: true,
         session: boot.session,
         rutas: boot.rutas ?? [],
         entregas: boot.entregas ?? [],
         clientes: boot.clientes ?? [],
-        productos: boot.productos ?? [],
+        productos: resolvedShiftProds,
         syncedAt: boot.synced_at ?? new Date().toISOString(),
       });
     } catch (err) {

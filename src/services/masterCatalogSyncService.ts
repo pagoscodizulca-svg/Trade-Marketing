@@ -60,6 +60,10 @@ import {
   type ErpSupervisorRow,
   type ErpVwProductoDetalleRow,
 } from '../utils/erpMasterAdapter';
+import {
+  OFFICIAL_TRADE_PRODUCTS_MAESTROS,
+  applyOfficialTradeProductsCatalog,
+} from '../data/officialTradeProductsCatalog';
 
 const CATALOG_CACHE_TTL_MS = 90_000;
 const CATALOG_PAGE_SIZE = 1000;
@@ -552,7 +556,7 @@ export async function obtenerProductosMaestros(
   options: { soloActivos?: boolean; forzarRefresco?: boolean; client?: SupabaseClient | null } = {}
 ): Promise<ProductoMaestro[]> {
   const client = resolveClient(options.client);
-  if (!client) return [];
+  if (!client) return [...OFFICIAL_TRADE_PRODUCTS_MAESTROS];
 
   const cacheKey = `NACIONAL:${options.soloActivos ? '1' : '0'}`;
   if (!options.forzarRefresco) {
@@ -570,8 +574,9 @@ export async function obtenerProductosMaestros(
       client
     );
     if (apiRes.status === 'ok') {
-      const normalized = apiRes.data.map((r) =>
-        normalizeProductoMasterRow(r as unknown as Record<string, unknown>)
+      const normalized = applyOfficialTradeProductsCatalog(
+        apiRes.data.map((r) => normalizeProductoMasterRow(r as unknown as Record<string, unknown>)),
+        { fallbackToFullCatalogIfEmpty: true }
       );
       writeTimedCache(productosCache, cacheKey, normalized);
       return normalized;
@@ -588,7 +593,9 @@ export async function obtenerProductosMaestros(
         ...(options.soloActivos ? { eqFilters: { activo: true } } : {}),
       }
     );
-    const rows = rowsRaw.map(normalizeProductoMasterRow);
+    const rows = applyOfficialTradeProductsCatalog(rowsRaw.map(normalizeProductoMasterRow), {
+      fallbackToFullCatalogIfEmpty: !options.client,
+    });
     writeTimedCache(productosCache, cacheKey, rows);
     return rows;
   } catch (err) {
@@ -621,6 +628,9 @@ export async function obtenerProductosMaestros(
   ]);
 
   let normalized = normalizeErpProductosDataset(prodRows, vwRows);
+  if (normalized.length === 0 && !options.client) {
+    normalized = [...OFFICIAL_TRADE_PRODUCTS_MAESTROS];
+  }
   if (options.soloActivos) {
     normalized = normalized.filter((p) => p.activo);
   }

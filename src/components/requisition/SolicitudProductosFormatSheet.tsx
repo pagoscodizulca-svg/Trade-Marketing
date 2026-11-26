@@ -6,6 +6,7 @@ import {
 } from '../../types';
 import { useApp } from '../../context/AppContext';
 import { isoToDdMmYyyy } from '../../services/solicitudesContraloriaService';
+import { OFFICIAL_TRADE_PRODUCTS_MAESTROS } from '../../data/officialTradeProductsCatalog';
 
 export interface SolicitudProductosFormatSheetProps {
   mode: 'edit' | 'readonly';
@@ -66,14 +67,23 @@ export const SolicitudProductosFormatSheet: React.FC<
 }) => {
   const isEdit = mode === 'edit';
   const datalistId = useId();
-  const { module1Bundle } = useApp();
-  // Sugerencias de productos derivadas SOLO de registros sincronizados (el texto libre sigue permitido)
+  const { module1Bundle, masterEntities } = useApp();
+  // Sugerencias de productos derivadas del catálogo oficial vigente + registros sincronizados (el texto libre sigue permitido)
   const productSuggestions = useMemo<string[]>(() => {
     const names = new Set<string>();
+    const catalog =
+      (masterEntities?.productos?.length ?? 0) > 0
+        ? masterEntities.productos
+        : OFFICIAL_TRADE_PRODUCTS_MAESTROS;
+    catalog.forEach((p) => {
+      if (p.activo !== false && p.nombre) {
+        names.add(String(p.nombre).trim().toUpperCase());
+      }
+    });
     (module1Bundle?.inventorySampling || []).forEach((i) => i.productName && names.add(String(i.productName).trim().toUpperCase()));
     (module1Bundle?.priceComparisons || []).forEach((p) => p.ownProduct && p.ownProduct !== 'Producto Codizulca' && names.add(String(p.ownProduct).trim().toUpperCase()));
     return Array.from(names).filter(Boolean).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [module1Bundle]);
+  }, [module1Bundle, masterEntities?.productos]);
   const [isDrawingPadOpen, setIsDrawingPadOpen] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);

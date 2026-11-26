@@ -53,6 +53,11 @@ import {
   buildPendingAuthorizationReportModel,
 } from '../../utils/pdfExport';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
+import {
+  SmartSearchCombobox,
+  type SmartSearchComboboxOption,
+} from '../common/SmartSearchCombobox';
+import { OFFICIAL_TRADE_PRODUCTS_MAESTROS } from '../../data/officialTradeProductsCatalog';
 import { useLiveVenezuelaClock } from '../../utils/weekCalendar';
 import {
   formatToDdMmYyyy,
@@ -2551,16 +2556,59 @@ export const FieldPromotoraView: React.FC = () => {
     return Array.from(names).sort((a, b) => a.localeCompare(b, 'es'));
   }, [module1Bundle]);
 
-  const syncedProductOptions = useMemo<string[]>(() => {
-    const names = new Set<string>();
-    const add = (n?: string | null) => {
-      const clean = String(n || '').trim();
-      if (clean && clean !== 'Producto Codizulca') names.add(clean);
-    };
-    (module1Bundle?.inventorySampling || []).forEach((i) => add(i.productName));
-    (module1Bundle?.priceComparisons || []).forEach((p) => add(p.ownProduct));
-    return Array.from(names).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [module1Bundle]);
+  const officialFieldProducts = useMemo(() => {
+    const src =
+      (masterEntities?.productos?.length ?? 0) > 0
+        ? masterEntities.productos
+        : OFFICIAL_TRADE_PRODUCTS_MAESTROS;
+    return src
+      .filter((p) => p.activo !== false && Boolean(p.nombre?.trim()))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  }, [masterEntities?.productos]);
+
+  const fieldProductFilterOptions = useMemo<SmartSearchComboboxOption[]>(
+    () => [
+      {
+        value: 'TODOS',
+        label: 'Producto: Todos',
+        sublabel: `Catálogo oficial (${officialFieldProducts.length} artículos)`,
+        badge: 'TODOS',
+        keywords: 'todos producto catalogo',
+        pinned: true,
+      },
+      { value: 'MORTADELA', label: 'Línea: MORTADELA', sublabel: 'Filtro por familia', badge: 'LÍNEA' },
+      { value: 'VENCAMPO', label: 'Línea: VENCAMPO / ARROZ / LECHE', sublabel: 'Filtro por familia', badge: 'LÍNEA' },
+      { value: 'ESPALDA', label: 'Línea: ESPALDA', sublabel: 'Filtro por familia', badge: 'LÍNEA' },
+      { value: 'JAMON', label: 'Línea: JAMÓN', sublabel: 'Filtro por familia', badge: 'LÍNEA' },
+      { value: 'SALCHICHA', label: 'Línea: SALCHICHA / EMBUTIDOS', sublabel: 'Filtro por familia', badge: 'LÍNEA' },
+      ...officialFieldProducts.map((p) => {
+        const unpaddedCode = String(p.codigo || '').replace(/^0+/, '');
+        return {
+          value: p.nombre.toUpperCase(),
+          label: p.nombre,
+          sublabel: [p.codigo, p.categoria, p.marca].filter(Boolean).join(' • '),
+          badge: (p.unidad_medida || 'UND').toUpperCase(),
+          keywords: `${p.codigo} ${unpaddedCode} ${p.categoria ?? ''} ${p.marca ?? ''}`,
+        };
+      }),
+    ],
+    [officialFieldProducts]
+  );
+
+  const inventoryProductComboboxOptions = useMemo<SmartSearchComboboxOption[]>(
+    () =>
+      officialFieldProducts.map((p) => {
+        const unpaddedCode = String(p.codigo || '').replace(/^0+/, '');
+        return {
+          value: p.nombre,
+          label: p.nombre,
+          sublabel: [p.codigo, p.categoria, p.marca].filter(Boolean).join(' • '),
+          badge: (p.unidad_medida || 'UND').toUpperCase(),
+          keywords: `${p.codigo} ${unpaddedCode} ${p.categoria ?? ''} ${p.marca ?? ''}`,
+        };
+      }),
+    [officialFieldProducts]
+  );
 
   const visitsHistory = useMemo<VisitHistoryRecord[]>(() => {
     return module1Bundle?.visitsHistory || [];
@@ -4624,34 +4672,50 @@ export const FieldPromotoraView: React.FC = () => {
               </div>
 
               <div>
-                <select
+                <SmartSearchCombobox
+                  testId="tasting-product-filter"
+                  searchTestId="tasting-product-filter-search"
+                  ariaLabel="Filtrar degustaciones por producto"
                   value={tastingProductFilter}
-                  onChange={(e) => setTastingProductFilter(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
-                >
-                  <option value="TODOS">Producto: Todos</option>
-                  <option value="MORTADELA">MORTADELA</option>
-                  <option value="VENCAMPO">VENCAMPO / ARROZ / LECHE</option>
-                  <option value="ESPALDA">ESPALDA</option>
-                  <option value="JAMON">JAMÓN</option>
-                  <option value="SALCHICHA">SALCHICHA / EMBUTIDOS</option>
-                </select>
+                  onChange={(nextVal) => setTastingProductFilter(nextVal)}
+                  options={fieldProductFilterOptions}
+                  searchPlaceholder="Buscar producto por nombre o código..."
+                  panelMinWidth={320}
+                  triggerClassName="bg-slate-900 border-slate-800 py-1.5"
+                />
               </div>
 
               <div>
-                <select
+                <SmartSearchCombobox
+                  testId="tasting-promotora-filter"
+                  searchTestId="tasting-promotora-filter-search"
+                  ariaLabel="Filtrar degustaciones por promotora"
                   value={tastingPromotoraFilter}
-                  onChange={(e) => setTastingPromotoraFilter(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-red-500 font-medium"
-                >
-                  <option value="TODAS">Promotora: Todas ({totalPromotoras})</option>
-                  <option value="POR_ASIGNAR">⏳ Por Asignar (Sin promotora)</option>
-                  {availablePromotoras.map((prom) => (
-                    <option key={prom} value={prom}>
-                      {prom}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(nextVal) => setTastingPromotoraFilter(nextVal)}
+                  searchPlaceholder="Buscar promotora por nombre..."
+                  panelMinWidth={260}
+                  triggerClassName="bg-slate-900 border-slate-800 py-1.5"
+                  options={[
+                    {
+                      value: 'TODAS',
+                      label: `Promotora: Todas (${totalPromotoras})`,
+                      sublabel: 'Mostrar todas las promotoras',
+                      badge: 'TODAS',
+                      pinned: true,
+                    },
+                    {
+                      value: 'POR_ASIGNAR',
+                      label: '⏳ Por Asignar (Sin promotora)',
+                      sublabel: 'Solicitudes pendientes de asignar',
+                      badge: 'PEND.',
+                    },
+                    ...availablePromotoras.map((prom) => ({
+                      value: prom,
+                      label: prom,
+                      keywords: prom,
+                    })),
+                  ]}
+                />
               </div>
             </div>
 
@@ -4829,26 +4893,32 @@ export const FieldPromotoraView: React.FC = () => {
                                     <div className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[9px] flex items-center justify-center shrink-0">
                                       {(item.responsibleName || 'P')[0]}
                                     </div>
-                                    <select
+                                    <SmartSearchCombobox
+                                      compact
                                       value={selectResolved.value}
-                                      onChange={(e) => void handleSelectPromotoraForTasting(item, e.target.value)}
-                                      aria-label={`Asignar promotora para ${item.storeName}`}
-                                      className="w-full max-w-[180px] px-2 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 focus:border-red-500 text-[11px] font-bold text-white focus:outline-none cursor-pointer"
-                                    >
-                                      <option value="POR ASIGNAR (Trade Marketing)">
-                                        ⏳ POR ASIGNAR (Trade Mkt)
-                                      </option>
-                                      {selectResolved.extraOption && (
-                                        <option value={selectResolved.extraOption}>
-                                          {selectResolved.extraOption}
-                                        </option>
-                                      )}
-                                      {availablePromotoras.map((prom) => (
-                                        <option key={prom} value={prom}>
-                                          {prom}
-                                        </option>
-                                      ))}
-                                    </select>
+                                      onChange={(nextProm) => void handleSelectPromotoraForTasting(item, nextProm)}
+                                      ariaLabel={`Asignar promotora para ${item.storeName}`}
+                                      searchPlaceholder="Teclea el nombre de la promotora..."
+                                      panelMinWidth={250}
+                                      className="w-full max-w-[180px]"
+                                      triggerClassName="rounded-lg bg-zinc-900 hover:bg-zinc-800 border-zinc-700/80"
+                                      options={[
+                                        {
+                                          value: 'POR ASIGNAR (Trade Marketing)',
+                                          label: '⏳ POR ASIGNAR (Trade Mkt)',
+                                          sublabel: 'Sin promotora asignada',
+                                          badge: 'PEND.',
+                                        },
+                                        ...(selectResolved.extraOption
+                                          ? [{ value: selectResolved.extraOption, label: selectResolved.extraOption }]
+                                          : []),
+                                        ...availablePromotoras.map((prom) => ({
+                                          value: prom,
+                                          label: prom,
+                                          keywords: prom,
+                                        })),
+                                      ]}
+                                    />
                                   </div>
                                 );
                               })()
@@ -5318,27 +5388,31 @@ export const FieldPromotoraView: React.FC = () => {
                         <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
                           Asignación de Promotora Activa:
                         </label>
-                        <select
+                        <SmartSearchCombobox
                           value={modalSelectResolved.value}
-                          onChange={(e) =>
-                            void handleSelectPromotoraForTasting(selectedTastingDetail, e.target.value)
+                          onChange={(nextProm) =>
+                            void handleSelectPromotoraForTasting(selectedTastingDetail, nextProm)
                           }
-                          className="w-full px-2.5 py-1.5 rounded-xl bg-black border border-white/15 focus:border-red-500 text-xs font-bold text-white focus:outline-none cursor-pointer"
-                        >
-                          <option value="POR ASIGNAR (Trade Marketing)">
-                            ⏳ POR ASIGNAR (Trade Marketing)
-                          </option>
-                          {modalSelectResolved.extraOption && (
-                            <option value={modalSelectResolved.extraOption}>
-                              {modalSelectResolved.extraOption}
-                            </option>
-                          )}
-                          {availablePromotoras.map((prom) => (
-                            <option key={prom} value={prom}>
-                              {prom}
-                            </option>
-                          ))}
-                        </select>
+                          ariaLabel="Asignación de promotora activa"
+                          searchPlaceholder="Buscar promotora por nombre..."
+                          triggerClassName="bg-black border-white/15 py-1.5"
+                          options={[
+                            {
+                              value: 'POR ASIGNAR (Trade Marketing)',
+                              label: '⏳ POR ASIGNAR (Trade Marketing)',
+                              sublabel: 'Pendiente por asignar',
+                              badge: 'PEND.',
+                            },
+                            ...(modalSelectResolved.extraOption
+                              ? [{ value: modalSelectResolved.extraOption, label: modalSelectResolved.extraOption }]
+                              : []),
+                            ...availablePromotoras.map((prom) => ({
+                              value: prom,
+                              label: prom,
+                              keywords: prom,
+                            })),
+                          ]}
+                        />
                       </div>
                     );
                   })()
@@ -6322,17 +6396,21 @@ export const FieldPromotoraView: React.FC = () => {
                         </div>
                         <div className="md:col-span-2">
                           <label className="block text-xs text-slate-400 mb-1">Promotora Responsable</label>
-                          <select
+                          <SmartSearchCombobox
+                            testId="new-inv-promotora-select"
+                            searchTestId="new-inv-promotora-search"
+                            ariaLabel="Seleccionar promotora responsable"
                             value={newInventoryForm.promoterName}
-                            onChange={(e) => setNewInventoryForm({ ...newInventoryForm, promoterName: e.target.value })}
-                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-                          >
-                            {staffList.map((s) => ({ id: s.id, name: s.name, zone: s.address })).map((p) => (
-                              <option key={p.id} value={p.name}>
-                                {p.name} ({p.zone})
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(nextProm) => setNewInventoryForm({ ...newInventoryForm, promoterName: nextProm })}
+                            searchPlaceholder="Buscar promotora por nombre o zona..."
+                            triggerClassName="bg-slate-950 border-slate-700"
+                            options={staffList.map((s) => ({
+                              value: s.name,
+                              label: s.name,
+                              sublabel: s.address || s.assignedStore || undefined,
+                              keywords: `${s.name} ${s.address || ''} ${s.assignedStore || ''}`,
+                            }))}
+                          />
                         </div>
                         <div className="md:col-span-2">
                           <label className="block text-xs text-slate-400 mb-1">Punto de Venta (PDV)</label>
@@ -6352,17 +6430,18 @@ export const FieldPromotoraView: React.FC = () => {
                         </div>
                         <div className="md:col-span-2">
                           <label className="block text-xs text-slate-400 mb-1">Producto Degustado / Auditado</label>
-                          <input
-                            type="text"
-                            list="products-datalist-inv"
+                          <SmartSearchCombobox
+                            testId="new-inv-product-select"
+                            searchTestId="new-inv-product-search"
+                            ariaLabel="Seleccionar producto degustado o auditado"
                             value={newInventoryForm.productName}
-                            onChange={(e) => setNewInventoryForm({ ...newInventoryForm, productName: e.target.value })}
-                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-                            required
-                            />
-                            <datalist id="products-datalist-inv">
-                              {syncedProductOptions.map((name) => (<option key={name} value={name} />))}
-                            </datalist>
+                            onChange={(nextProd) => setNewInventoryForm({ ...newInventoryForm, productName: nextProd })}
+                            options={inventoryProductComboboxOptions}
+                            allowCustom
+                            searchPlaceholder="Buscar artículo por nombre, código o grupo..."
+                            panelMinWidth={320}
+                            triggerClassName="bg-slate-950 border-slate-700"
+                          />
                         </div>
                         <div>
                           <label className="block text-xs text-slate-400 mb-1">Inventario Inicial (Unid/Kg)</label>

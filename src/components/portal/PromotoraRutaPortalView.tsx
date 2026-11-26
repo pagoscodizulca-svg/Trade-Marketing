@@ -114,6 +114,7 @@ import {
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
 import { PortalRutaTab } from './PortalRutaTab';
+import { OFFICIAL_PORTAL_PRODUCT_OPTIONS } from '../../data/officialTradeProductsCatalog';
 import { PortalAsistenciaTab } from './PortalAsistenciaTab';
 import { PortalInventarioTab } from './PortalInventarioTab';
 import { PortalEncuestasTab } from './PortalEncuestasTab';
@@ -206,7 +207,15 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
     initialProfile ? buildFallbackPromotoraContext(initialProfile) : null
   );
   const [portalClients, setPortalClients] = useState<PortalClientOption[]>([]);
-  const [portalProducts, setPortalProducts] = useState<PortalProductOption[]>([]);
+  const [portalProducts, setPortalProducts] = useState<PortalProductOption[]>(() =>
+    OFFICIAL_PORTAL_PRODUCT_OPTIONS.map((p) => ({
+      id: p.id,
+      codigo: p.codigo,
+      nombre: p.nombre,
+      categoria: p.categoria,
+      presentacion: p.presentacion,
+    }))
+  );
   const [activeStore, setActiveStore] = useState<string>(() => {
     const draft = loadPortalAsistenciaDraft();
     return draft?.activeStore || getSavedPortalActiveStore();
@@ -2062,6 +2071,7 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
           <PortalMerchandisingTab
             context={resolvedPortalContext}
             clients={portalClients}
+            products={portalProducts}
             activeStore={activeStore}
             onActiveStoreChange={setActiveStore}
             onNotify={showBanner}

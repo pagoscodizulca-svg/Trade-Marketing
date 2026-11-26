@@ -31,6 +31,11 @@ import {
 } from '../../utils/pdfExport';
 import type { TastingScheduleItem } from '../field/FieldPromotoraView';
 import { PrintSupportHeader, PrintSignatureBlock } from '../common/PrintSupportHeader';
+import {
+  SmartSearchCombobox,
+  type SmartSearchComboboxOption,
+} from '../common/SmartSearchCombobox';
+import { OFFICIAL_TRADE_PRODUCTS_MAESTROS } from '../../data/officialTradeProductsCatalog';
 import { AnimatedTabContainer } from '../ui/AnimatedTabContainer';
 import {
   useLiveVenezuelaClock,
@@ -344,16 +349,9 @@ export const ScheduleMatrixView: React.FC = () => {
   const [isBatchDateManual, setIsBatchDateManual] = useState<boolean>(false);
   const [batchWeekOffset, setBatchWeekOffset] = useState<number>(0);
 
-  // Debounce ligero (~150 ms) para búsqueda inteligente instantánea en catálogo de productos
+  // Búsqueda inteligente instantánea (0 ms de espera al teclear) en catálogo de productos
   useEffect(() => {
-    if (!productSearchInBatch.trim()) {
-      setDebouncedProductSearchInBatch('');
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setDebouncedProductSearchInBatch(productSearchInBatch);
-    }, 150);
-    return () => window.clearTimeout(timer);
+    setDebouncedProductSearchInBatch(productSearchInBatch);
   }, [productSearchInBatch]);
 
   useEffect(() => {
@@ -554,9 +552,14 @@ export const ScheduleMatrixView: React.FC = () => {
   );
   const hiddenSelectedCount = selectedStoreIds.length - effectiveBatchStoreIds.length;
 
-  // Catálogo real de productos sincronizado desde Supabase (`public."Productos"` / `vw_productos_detalle`)
+  // Catálogo oficial vigente de productos (152 artículos sincronizados desde Supabase + respaldo oficial completo)
   const batchProductCatalog = useMemo(() => {
-    const activeRemote = (masterEntities?.productos ?? [])
+    const sourceList =
+      (masterEntities?.productos?.length ?? 0) > 0
+        ? masterEntities.productos
+        : OFFICIAL_TRADE_PRODUCTS_MAESTROS;
+
+    const activeRemote = sourceList
       .filter((p) => p.activo !== false && Boolean(p.nombre?.trim()))
       .map((p) => ({
         id: p.id || `${p.codigo || 'PROD'}-${p.nombre}`,
@@ -570,13 +573,30 @@ export const ScheduleMatrixView: React.FC = () => {
 
     if (activeRemote.length > 0) return activeRemote;
 
-    return [
-      { id: 'MORTADELA', codigo: 'COD-001', nombre: 'MORTADELA ASTURIAS 0.900 KG', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
-      { id: 'VENCAMPO', codigo: 'COD-002', nombre: 'VENCAMPO ARROZ', marca: 'VENCAMPO', categoria: 'VIVERES', unidad: 'BULTO' },
-      { id: 'ESPALDA', codigo: 'COD-003', nombre: 'ESPALDA AHUMADA', marca: 'ASTURIAS', categoria: 'LINEA COCIDA', unidad: 'KG' },
-      { id: 'JAMON', codigo: 'COD-004', nombre: 'JAMÓN COCIDO SUPERIOR', marca: 'ASTURIAS', categoria: 'EMBUTIDOS', unidad: 'KG' },
-    ];
+    return OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+      id: p.id,
+      codigo: p.codigo,
+      nombre: p.nombre,
+      marca: p.marca,
+      categoria: p.categoria,
+      unidad: (p.unidad_medida || 'UND').toUpperCase(),
+    }));
   }, [masterEntities?.productos]);
+
+  const productComboboxOptions = useMemo<SmartSearchComboboxOption[]>(
+    () =>
+      batchProductCatalog.map((prod) => {
+        const unpaddedCode = prod.codigo.replace(/^0+/, '');
+        return {
+          value: prod.nombre,
+          label: prod.nombre,
+          sublabel: [prod.codigo, prod.categoria, prod.marca].filter(Boolean).join(' • '),
+          badge: prod.unidad,
+          keywords: `${prod.codigo} ${unpaddedCode} ${prod.marca ?? ''} ${prod.categoria ?? ''} ${prod.unidad}`,
+        };
+      }),
+    [batchProductCatalog]
+  );
 
   const availableProductUnits = useMemo(() => {
     const counts = new Map<string, number>();
@@ -591,20 +611,22 @@ export const ScheduleMatrixView: React.FC = () => {
       batchProductCatalog.map((product) => {
         const normName = normalizeSearchText(product.nombre);
         const normCode = normalizeSearchText(product.codigo);
+        const unpaddedCode = normCode.replace(/^0+/, '');
         const normFull = normalizeSearchText(
-          `${product.nombre} ${product.codigo} ${product.marca ?? ''} ${product.categoria ?? ''} ${product.unidad}`
+          `${product.nombre} ${product.codigo} ${unpaddedCode} ${product.marca ?? ''} ${product.categoria ?? ''} ${product.unidad}`
         );
         const compactFull = normFull.replace(/[^a-z0-9]+/g, '');
-        return { product, normName, normCode, normFull, compactFull };
+        return { product, normName, normCode, unpaddedCode, normFull, compactFull };
       }),
     [batchProductCatalog]
   );
 
-  // Búsqueda inteligente multi-término insensible a acentos (nombre, código SKU, marca, categoría o presentación)
+  // Búsqueda inteligente multi-término instantánea insensible a acentos (nombre, código SKU con/sin ceros, grupo, subgrupo, marca o presentación)
   const filteredProductsForBatch = useMemo(() => {
     const qNorm = normalizeSearchText(debouncedProductSearchInBatch);
     const tokens = qNorm ? qNorm.split(' ').filter(Boolean) : [];
     const qCompact = qNorm.replace(/[^a-z0-9]+/g, '');
+    const qNumericUnpadded = /^\d+$/.test(qCompact) ? qCompact.replace(/^0+/, '') || '0' : '';
 
     const scored: Array<{ product: (typeof batchProductCatalog)[number]; score: number }> = [];
     for (const item of indexedProductsForBatch) {
@@ -614,16 +636,32 @@ export const ScheduleMatrixView: React.FC = () => {
         continue;
       }
 
-      const allTokensMatch = tokens.every((tok) => item.normFull.includes(tok));
+      const allTokensMatch = tokens.every((tok) => {
+        if (item.normFull.includes(tok)) return true;
+        if (/^\d+$/.test(tok)) {
+          const cleanTok = tok.replace(/^0+/, '') || '0';
+          return item.unpaddedCode === cleanTok || item.normCode.includes(cleanTok);
+        }
+        return false;
+      });
       const compactMatch = qCompact.length >= 2 && item.compactFull.includes(qCompact);
       if (!allTokensMatch && !compactMatch) continue;
 
       let score = 10;
-      if (item.normCode && item.normCode === qNorm) score = 0;
-      else if (item.normName.startsWith(qNorm)) score = 1;
-      else if (item.normCode && item.normCode.includes(qNorm)) score = 2;
-      else if (item.normName.includes(qNorm)) score = 3;
-      else if (allTokensMatch) score = 4;
+      if (
+        (item.normCode && item.normCode === qNorm) ||
+        (qNumericUnpadded && item.unpaddedCode === qNumericUnpadded)
+      ) {
+        score = 0;
+      } else if (item.normName.startsWith(qNorm)) {
+        score = 1;
+      } else if (item.normCode && item.normCode.includes(qNorm)) {
+        score = 2;
+      } else if (item.normName.includes(qNorm)) {
+        score = 3;
+      } else if (allTokensMatch) {
+        score = 4;
+      }
 
       scored.push({ product: item.product, score });
     }
@@ -2064,22 +2102,36 @@ export const ScheduleMatrixView: React.FC = () => {
                   <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
                     Promotora Asignada ({activePromotoraOptions.length} activas)
                   </label>
-                  <select
-                    data-testid="batch-promotora-select"
+                  <SmartSearchCombobox
+                    testId="batch-promotora-select"
+                    searchTestId="batch-promotora-search"
+                    ariaLabel="Seleccionar promotora asignada para el lote"
                     value={batchPromotora}
-                    onChange={(e) => setBatchPromotora(e.target.value)}
-                    className="w-full py-2 px-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-bold text-white focus:outline-none focus:border-red-600"
-                  >
-                    <option value="AUTO">Asignación Automática (Disponible)</option>
-                    {activePromotoraOptions.map((p) => {
-                      const conflict = isPromotoraBooked(p.name, batchDay, batchShift, undefined, batchDate);
-                      return (
-                        <option key={p.id} value={p.name}>
-                          {p.name} {conflict ? `⛔ (Ocupada en ${conflict.storeName.slice(0, 14)}...)` : '✓'}
-                        </option>
-                      );
-                    })}
-                  </select>
+                    onChange={(nextVal) => setBatchPromotora(nextVal)}
+                    searchPlaceholder="Buscar promotora por nombre..."
+                    options={[
+                      {
+                        value: 'AUTO',
+                        label: 'Asignación Automática (Disponible)',
+                        sublabel: 'Selecciona automáticamente la promotora disponible',
+                        badge: 'AUTO',
+                        keywords: 'auto automatica disponible',
+                        pinned: true,
+                      },
+                      ...activePromotoraOptions.map((p) => {
+                        const conflict = isPromotoraBooked(p.name, batchDay, batchShift, undefined, batchDate);
+                        return {
+                          value: p.name,
+                          label: p.name,
+                          sublabel: conflict
+                            ? `⛔ Ocupada en ${conflict.storeName}`
+                            : '✓ Disponible en esta jornada',
+                          badge: conflict ? 'OCUPADA' : '✓',
+                          keywords: `${p.name} ${conflict ? 'ocupada' : 'disponible'}`,
+                        };
+                      }),
+                    ]}
+                  />
                 </div>
 
                 <div>
@@ -2710,27 +2762,44 @@ export const ScheduleMatrixView: React.FC = () => {
                       )}
                     </td>
 
-                    {/* INTERACTIVE COLUMN 1: Llenado - Selector de Producto */}
-                    <td className="p-2 bg-red-950/20 border-l border-r border-red-900/40">
-                      <select
-                        disabled={isVisitSaving(v.id)}
-                        value={
-                          v.fillProductSelection?.includes('ARROZ') || v.productFocus?.includes('ARROZ') || v.productFocus?.includes('VENCAMPO')
+                    {/* INTERACTIVE COLUMN 1: Llenado - Selector Inteligente de Producto (152 artículos vigentes) */}
+                    <td className="p-2 bg-red-950/20 border-l border-r border-red-900/40 min-w-[190px]">
+                      {(() => {
+                        const currentProductVal =
+                          v.productFocus?.trim() ||
+                          (v.fillProductSelection?.includes('ARROZ')
                             ? 'VENCAMPO'
-                            : v.fillProductSelection || v.productFocus || 'MORTADELA'
-                        }
-                        onChange={(e) => {
-                          const newProd = e.target.value;
-                          const currentQty = v.fillQuantityInput || String(v.plannedUnits || 1);
-                          void handleInlineProductFill(v.id, newProd, currentQty);
-                        }}
-                        className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-white font-bold text-xs focus:outline-none focus:border-red-500 disabled:opacity-50"
-                      >
-                        <option value="MORTADELA">MORTADELA</option>
-                        <option value="VENCAMPO">VENCAMPO</option>
-                        <option value="ESPALDA">ESPALDA</option>
-                        <option value="JAMON">JAMÓN</option>
-                      </select>
+                            : v.fillProductSelection || 'MORTADELA');
+                        const rowProductOptions: SmartSearchComboboxOption[] = productComboboxOptions.some(
+                          (opt) => opt.value.toUpperCase() === currentProductVal.toUpperCase()
+                        )
+                          ? productComboboxOptions
+                          : [
+                              {
+                                value: currentProductVal,
+                                label: currentProductVal,
+                                sublabel: 'Producto actual en registro',
+                                badge: 'ACTUAL',
+                              },
+                              ...productComboboxOptions,
+                            ];
+                        return (
+                          <SmartSearchCombobox
+                            compact
+                            disabled={isVisitSaving(v.id)}
+                            ariaLabel={`Seleccionar producto para ${v.storeName}`}
+                            value={currentProductVal}
+                            onChange={(newProd) => {
+                              const currentQty = v.fillQuantityInput || String(v.plannedUnits || 1);
+                              void handleInlineProductFill(v.id, newProd, currentQty);
+                            }}
+                            options={rowProductOptions}
+                            searchPlaceholder="Buscar artículo por nombre o código..."
+                            panelMinWidth={320}
+                            triggerClassName="bg-black border-red-900/60"
+                          />
+                        );
+                      })()}
                     </td>
 
                     {/* INTERACTIVE COLUMN 2: Llenado - Cantidad Input (Editable) */}
@@ -2898,13 +2967,52 @@ export const ScheduleMatrixView: React.FC = () => {
                           v.id,
                           v.date
                         );
+                        const rowPromotoraOptions: SmartSearchComboboxOption[] = [
+                          ...(!matchedActiveUser
+                            ? [
+                                {
+                                  value: 'POR ASIGNAR (Trade Marketing)',
+                                  label: 'POR ASIGNAR (Trade Marketing)',
+                                  sublabel: 'Sin promotora asignada',
+                                  badge: 'PEND.',
+                                },
+                              ]
+                            : []),
+                          ...activePromotoraUsers.map((u) => {
+                            const fullName = u.name;
+                            const conflictVisit = isPromotoraBooked(
+                              fullName,
+                              v.dayLabel,
+                              v.shift,
+                              v.id,
+                              v.date
+                            );
+                            const isCurrent =
+                              canonicalStaffKey(v.promotoraName) === canonicalStaffKey(fullName);
+                            const isDisabled = Boolean(conflictVisit && !isCurrent);
+                            return {
+                              value: fullName,
+                              label: fullName,
+                              sublabel: isDisabled
+                                ? `⛔ Ocupada en ${conflictVisit!.storeName}`
+                                : '✓ Disponible en esta jornada',
+                              badge: isDisabled ? 'OCUPADA' : '✓',
+                              disabled: isDisabled,
+                              keywords: `${fullName} ${isDisabled ? 'ocupada' : 'disponible'}`,
+                            };
+                          }),
+                        ];
                         return (
                           <div>
-                            <select
+                            <SmartSearchCombobox
+                              compact
                               disabled={isVisitSaving(v.id)}
+                              ariaLabel={`Seleccionar promotora activa para ${v.storeName}`}
                               value={selectedValue}
-                              onChange={async (e) => {
-                                const newPromotora = e.target.value;
+                              searchPlaceholder="Buscar promotora por nombre..."
+                              panelMinWidth={270}
+                              options={rowPromotoraOptions}
+                              onChange={async (newPromotora) => {
                                 const prevPromotoraName = v.promotoraName;
                                 const prevPromotoraId = v.promotoraId;
 
@@ -3024,47 +3132,14 @@ export const ScheduleMatrixView: React.FC = () => {
                                   );
                                 });
                               }}
-                              className={`w-full px-2 py-1.5 rounded-lg bg-black text-white font-bold text-xs focus:outline-none transition disabled:opacity-50 ${
+                              triggerClassName={`bg-black ${
                                 currentConflict
                                   ? 'border-2 border-amber-500 text-amber-300'
                                   : !matchedActiveUser
-                                    ? 'border border-amber-500/40 text-amber-300'
-                                    : 'border border-zinc-800 focus:border-red-600'
+                                    ? 'border-amber-500/40 text-amber-300'
+                                    : 'border-zinc-800'
                               }`}
-                              title={
-                                currentConflict
-                                  ? `Conflicto detectado: ${v.promotoraName} duplicada en ${v.dayLabel} (${v.shift})`
-                                  : 'Seleccionar promotora activa'
-                              }
-                            >
-                              {!matchedActiveUser && (
-                                <option value="POR ASIGNAR (Trade Marketing)" className="text-amber-300">
-                                  POR ASIGNAR (Trade Marketing)
-                                </option>
-                              )}
-                              {activePromotoraUsers.map((u) => {
-                                const fullName = u.name;
-                                const conflictVisit = isPromotoraBooked(
-                                  fullName,
-                                  v.dayLabel,
-                                  v.shift,
-                                  v.id,
-                                  v.date
-                                );
-                                const isCurrent = canonicalStaffKey(v.promotoraName) === canonicalStaffKey(fullName);
-
-                                return (
-                                  <option 
-                                    key={u.id} 
-                                    value={fullName}
-                                    disabled={Boolean(conflictVisit && !isCurrent)}
-                                    className={conflictVisit && !isCurrent ? 'text-zinc-600 bg-zinc-900' : 'text-white'}
-                                  >
-                                    {fullName} {conflictVisit && !isCurrent ? `⛔ (Ocupada: ${conflictVisit.storeName.substring(0, 14)}...)` : ''}
-                                  </option>
-                                );
-                              })}
-                            </select>
+                            />
 
                             {currentConflict && (
                               <div className="text-[10px] text-amber-400 font-bold flex items-center gap-1 mt-1 font-mono">
@@ -3267,21 +3342,21 @@ export const ScheduleMatrixView: React.FC = () => {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-zinc-300 block mb-1">Producto</label>
-                  <select
+                  <SmartSearchCombobox
+                    testId="single-visit-product-select"
+                    searchTestId="single-visit-product-search"
+                    ariaLabel="Seleccionar producto a degustar"
                     value={
                       batchProductCatalog.some((p) => p.nombre === singleModalProduct)
                         ? singleModalProduct
                         : (batchProductCatalog[0]?.nombre ?? singleModalProduct)
                     }
-                    onChange={(e) => setSingleModalProduct(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                  >
-                    {batchProductCatalog.map((prod) => (
-                      <option key={prod.id} value={prod.nombre}>
-                        {prod.codigo ? `${prod.codigo} · ` : ''}{prod.nombre} ({prod.unidad})
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(nextVal) => setSingleModalProduct(nextVal)}
+                    options={productComboboxOptions}
+                    searchPlaceholder="Teclea nombre o código del producto..."
+                    panelMinWidth={320}
+                    triggerClassName="bg-black border-zinc-800"
+                  />
                 </div>
 
                 <div>
@@ -3334,29 +3409,37 @@ export const ScheduleMatrixView: React.FC = () => {
                 <label className="text-xs font-bold text-zinc-300 block mb-1">
                   Promotora Asignada (Validación de jornada)
                 </label>
-                <select
+                <SmartSearchCombobox
+                  testId="single-visit-promotora-select"
+                  searchTestId="single-visit-promotora-search"
+                  ariaLabel="Seleccionar promotora asignada"
                   value={newPromotoraName}
-                  onChange={(e) => setNewPromotoraName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs text-white focus:outline-none focus:border-red-600"
-                >
-                  <option value="POR ASIGNAR (Trade Marketing)">
-                    POR ASIGNAR (Trade Marketing)
-                  </option>
-                  {activePromotoraOptions.map((u) => {
-                    const fullName = u.name;
-                    const conflict = isPromotoraBooked(fullName, batchDay, batchShift, undefined, batchDate);
-                    return (
-                      <option 
-                        key={u.id} 
-                        value={fullName} 
-                        disabled={Boolean(conflict)}
-                        className={conflict ? 'text-zinc-600 bg-zinc-900' : 'text-white'}
-                      >
-                        {fullName} {conflict ? `⛔ (Ocupada en ${conflict.storeName.substring(0, 15)}...)` : '✓ (Disponible)'}
-                      </option>
-                    );
-                  })}
-                </select>
+                  onChange={(nextVal) => setNewPromotoraName(nextVal)}
+                  searchPlaceholder="Teclea el nombre de la promotora..."
+                  triggerClassName="bg-black border-zinc-800"
+                  options={[
+                    {
+                      value: 'POR ASIGNAR (Trade Marketing)',
+                      label: 'POR ASIGNAR (Trade Marketing)',
+                      sublabel: 'Queda pendiente por asignar promotora',
+                      badge: 'PEND.',
+                    },
+                    ...activePromotoraOptions.map((u) => {
+                      const fullName = u.name;
+                      const conflict = isPromotoraBooked(fullName, batchDay, batchShift, undefined, batchDate);
+                      return {
+                        value: fullName,
+                        label: fullName,
+                        sublabel: conflict
+                          ? `⛔ Ocupada en ${conflict.storeName}`
+                          : '✓ Disponible en esta jornada',
+                        badge: conflict ? 'OCUPADA' : '✓',
+                        disabled: Boolean(conflict),
+                        keywords: `${fullName} ${conflict ? 'ocupada' : 'disponible'}`,
+                      };
+                    }),
+                  ]}
+                />
               </div>
 
               <div>

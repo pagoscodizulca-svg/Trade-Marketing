@@ -20,6 +20,7 @@ import {
   formatPromotoraRoleForCategory,
   normalizeRegionName,
 } from './regionalSyncClassifier';
+import { applyOfficialTradeProductsCatalog } from '../data/officialTradeProductsCatalog';
 
 export interface ErpRegionRow {
   id_regi: string;
@@ -1070,7 +1071,7 @@ export function normalizeErpProductosDataset(
   }
 
   result.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
-  return result;
+  return applyOfficialTradeProductsCatalog(result);
 }
 
 /**

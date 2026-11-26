@@ -21,6 +21,11 @@ import {
 } from '../../services/publicPdvLinksService';
 import { formatCanonicalSucursalBadge } from '../../utils/regionalSyncClassifier';
 import { getCaracasTodayYmd } from '../../utils/caracasWeekCycle';
+import {
+  SmartSearchCombobox,
+  type SmartSearchComboboxOption,
+} from '../common/SmartSearchCombobox';
+import { OFFICIAL_TRADE_PRODUCTS_MAESTROS } from '../../data/officialTradeProductsCatalog';
 
 export interface PublicTokenPdvViewProps {
   token: string;
@@ -416,29 +421,56 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
               <Package className="w-3.5 h-3.5 text-red-400" />
               <span>4. Producto Degustado (Catálogo Nacional)</span>
             </label>
-            <select
-              data-testid="select-pdv-producto-nacional"
-              value={selectedProductoNombre}
-              onChange={(e) => setSelectedProductoNombre(e.target.value)}
-              required
-              className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2.5 text-xs text-white focus:outline-none focus:border-red-500"
-            >
-              <option value="">Seleccionar producto...</option>
-              {selectedDegustacion?.producto_resumen &&
-                !bootstrap.productos.some(
-                  (p) => p.nombre === selectedDegustacion.producto_resumen
-                ) && (
-                  <option value={selectedDegustacion.producto_resumen}>
-                    {selectedDegustacion.producto_resumen}
-                  </option>
-                )}
-              {bootstrap.productos.map((prod) => (
-                <option key={prod.id} value={prod.nombre}>
-                  {prod.nombre}
-                  {prod.marca ? ` · ${prod.marca}` : ''}
-                </option>
-              ))}
-            </select>
+            {(() => {
+              const sourceProds =
+                bootstrap.productos.length > 0
+                  ? bootstrap.productos
+                  : OFFICIAL_TRADE_PRODUCTS_MAESTROS.map((p) => ({
+                      id: p.id,
+                      codigo: p.codigo,
+                      nombre: p.nombre,
+                      categoria: p.categoria,
+                      marca: p.marca,
+                      unidad_medida: p.unidad_medida,
+                    }));
+              const pdvProductOptions: SmartSearchComboboxOption[] = [
+                ...(selectedDegustacion?.producto_resumen &&
+                !sourceProds.some((p) => p.nombre === selectedDegustacion.producto_resumen)
+                  ? [
+                      {
+                        value: selectedDegustacion.producto_resumen,
+                        label: selectedDegustacion.producto_resumen,
+                        sublabel: 'Producto de la degustación asignada',
+                        badge: 'ASIGNADO',
+                      },
+                    ]
+                  : []),
+                ...sourceProds.map((prod) => {
+                  const rawCode = String(prod.codigo || '').trim();
+                  const unpadded = rawCode.replace(/^0+/, '');
+                  return {
+                    value: prod.nombre,
+                    label: prod.nombre,
+                    sublabel: [rawCode, prod.categoria, prod.marca].filter(Boolean).join(' • ') || undefined,
+                    badge: prod.unidad_medida || undefined,
+                    keywords: `${rawCode} ${unpadded} ${prod.categoria ?? ''} ${prod.marca ?? ''}`,
+                  };
+                }),
+              ];
+              return (
+                <SmartSearchCombobox
+                  testId="select-pdv-producto-nacional"
+                  searchTestId="select-pdv-producto-nacional-search"
+                  ariaLabel="Seleccionar producto degustado del catálogo nacional"
+                  value={selectedProductoNombre}
+                  onChange={(nextVal) => setSelectedProductoNombre(nextVal)}
+                  options={pdvProductOptions}
+                  placeholder="Seleccionar producto..."
+                  searchPlaceholder="Teclea nombre o código del producto..."
+                  triggerClassName="bg-zinc-900 border-white/10 py-2.5"
+                />
+              );
+            })()}
           </div>
 
           <div className="grid grid-cols-3 gap-2.5">
