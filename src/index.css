@@ -450,8 +450,10 @@
 }
 
 .cz-tab-panel-enter {
-  animation: cz-tab-panel-fade-slide 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  will-change: opacity, transform;
+  /* backwards (no forwards) y sin will-change persistente:
+     al completar los 150ms se libera el transform para no atrapar
+     modales `position: fixed` dentro del alto completo del contenedor. */
+  animation: cz-tab-panel-fade-slide 150ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 .cz-tab-panel-static {

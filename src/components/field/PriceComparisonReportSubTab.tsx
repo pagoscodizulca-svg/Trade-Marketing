@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
   Bell,
@@ -175,6 +176,26 @@ export const PriceComparisonReportSubTab: React.FC<PriceComparisonReportSubTabPr
     url: string;
   } | null>(null);
   const [loadingPhotoId, setLoadingPhotoId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!previewPhoto) return;
+    const prevOverflow = typeof document !== 'undefined' ? document.body.style.overflow : '';
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = 'hidden';
+    }
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setPreviewPhoto(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.body.style.overflow = prevOverflow;
+      }
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [previewPhoto]);
 
   useEffect(() => {
     setRegionFilter(defaultRegionFilter);
@@ -973,37 +994,44 @@ export const PriceComparisonReportSubTab: React.FC<PriceComparisonReportSubTabPr
         </div>
       </div>
 
-      {/* Modal visor de foto de hablador */}
-      {previewPhoto && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Fotografía del hablador de precio"
-          className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4"
-          onClick={() => setPreviewPhoto(null)}
-        >
-          <div
-            className="w-full max-w-2xl rounded-2xl bg-[#121215] border border-zinc-700 p-4 space-y-3"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <h5 className="text-xs font-extrabold text-white truncate">{previewPhoto.title}</h5>
+      {/* Modal visor de foto de hablador (centrado en viewport vía Portal) */}
+      {previewPhoto &&
+        (() => {
+          const previewNode = (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Fotografía del hablador de precio"
+              className="cz-obsidian-anchor fixed inset-0 z-[120] h-[100dvh] w-screen bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 overflow-hidden"
+              onClick={() => setPreviewPhoto(null)}
+            >
               <button
                 type="button"
                 onClick={() => setPreviewPhoto(null)}
-                className="p-1 text-zinc-400 hover:text-white cursor-pointer"
+                aria-label="Cerrar vista ampliada del hablador"
+                className="absolute top-4 right-4 z-10 min-h-[44px] min-w-[44px] rounded-full bg-zinc-900/90 hover:bg-red-600 text-white border border-white/20 flex items-center justify-center shadow-xl transition cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
+              <figure
+                className="relative flex flex-col items-center justify-center max-w-[94vw] max-h-[92dvh] gap-2.5"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <img
+                  src={previewPhoto.url}
+                  alt={previewPhoto.title}
+                  className="block max-h-[calc(92dvh-3.5rem)] max-w-[92vw] w-auto h-auto object-contain rounded-2xl bg-black border border-white/15 shadow-2xl select-none"
+                />
+                <figcaption className="px-4 py-1.5 rounded-full bg-zinc-950/90 border border-white/10 text-xs font-bold text-white max-w-[92vw] truncate shadow-lg">
+                  {previewPhoto.title}
+                </figcaption>
+              </figure>
             </div>
-            <img
-              src={previewPhoto.url}
-              alt={previewPhoto.title}
-              className="w-full max-h-[70vh] object-contain rounded-xl bg-black border border-zinc-800"
-            />
-          </div>
-        </div>
-      )}
+          );
+          return typeof document !== 'undefined'
+            ? createPortal(previewNode, document.body)
+            : previewNode;
+        })()}
     </div>
   );
 };

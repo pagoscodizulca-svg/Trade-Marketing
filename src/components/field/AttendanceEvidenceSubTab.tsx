@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertCircle,
   Calendar,
@@ -214,7 +215,7 @@ interface AttendanceEvidenceSubTabProps {
   onNotifyToast: (msg: string) => void;
 }
 
-interface LightboxModalState {
+export interface LightboxModalState {
   title: string;
   promotoraNombre: string;
   perfilAplicado: PerfilAsistencia;
@@ -226,6 +227,102 @@ interface LightboxModalState {
   mapsUrl?: string;
   gpsLabel?: string;
 }
+
+export interface AttendancePhotoLightboxProps {
+  lightboxState: LightboxModalState;
+  onClose: () => void;
+  /** Permite renderizar en línea en pruebas SSR (`renderToStaticMarkup`) */
+  inlineForSsr?: boolean;
+}
+
+/**
+ * Visor centrado a pantalla completa (`document.body` via `createPortal`) que muestra
+ * directamente la fotografía de la promotora ajustada al viewport sin requerir scroll.
+ */
+export const AttendancePhotoLightbox: React.FC<AttendancePhotoLightboxProps> = ({
+  lightboxState,
+  onClose,
+  inlineForSsr = false,
+}) => {
+  useEffect(() => {
+    const prevOverflow = typeof document !== 'undefined' ? document.body.style.overflow : '';
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = 'hidden';
+    }
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.body.style.overflow = prevOverflow;
+      }
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [onClose]);
+
+  const modalNode = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${lightboxState.title} — ${lightboxState.promotoraNombre}`}
+      data-testid="attendance-photo-lightbox"
+      onClick={onClose}
+      className="cz-obsidian-anchor fixed inset-0 z-[120] h-[100dvh] w-screen bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 overflow-hidden"
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Cerrar vista ampliada de evidencia"
+        className="absolute top-4 right-4 z-10 min-h-[44px] min-w-[44px] rounded-full bg-zinc-900/90 hover:bg-red-600 text-white border border-white/20 flex items-center justify-center shadow-xl transition cursor-pointer"
+      >
+        <X className="w-5 h-5" />
+      </button>
+
+      <figure
+        onClick={(e) => e.stopPropagation()}
+        className="relative flex flex-col items-center justify-center max-w-[94vw] max-h-[92dvh] gap-2.5"
+      >
+        <img
+          src={lightboxState.imageUrl}
+          alt={`${lightboxState.promotoraNombre} — ${lightboxState.title}`}
+          className="block max-h-[calc(92dvh-3.5rem)] max-w-[92vw] w-auto h-auto object-contain rounded-2xl bg-black border border-white/15 shadow-2xl select-none"
+        />
+
+        <figcaption className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-4 py-1.5 rounded-full bg-zinc-950/90 border border-white/10 text-xs text-zinc-200 max-w-[92vw] text-center shadow-lg">
+          <span className="font-bold text-white">{lightboxState.promotoraNombre}</span>
+          <span className="text-zinc-500">•</span>
+          <span className="text-zinc-300">{lightboxState.title}</span>
+          <span className="text-zinc-500">•</span>
+          <span className="font-mono text-zinc-300">
+            {lightboxState.fechaFormateada} {lightboxState.horaCaracasCompleta}
+          </span>
+          {lightboxState.mapsUrl && (
+            <>
+              <span className="text-zinc-500">•</span>
+              <a
+                href={lightboxState.mapsUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-emerald-400 hover:text-emerald-300 font-bold"
+              >
+                Ver GPS →
+              </a>
+            </>
+          )}
+        </figcaption>
+      </figure>
+    </div>
+  );
+
+  if (inlineForSsr || typeof document === 'undefined') {
+    return modalNode;
+  }
+
+  return createPortal(modalNode, document.body);
+};
 
 export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> = ({
   staffMembers,
@@ -320,19 +417,9 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
   >({});
   const [slotErrorsBySlotKey, setSlotErrorsBySlotKey] = useState<Record<string, string>>({});
 
-  // Modal Lightbox accesible
+  // Modal Lightbox accesible (renderizado en document.body vía createPortal)
   const [lightboxState, setLightboxState] = useState<LightboxModalState | null>(null);
-
-  useEffect(() => {
-    if (!lightboxState) return;
-    const onKeyDown = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        setLightboxState(null);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [lightboxState]);
+  const handleCloseLightbox = useCallback(() => setLightboxState(null), []);
 
   const mergedJornadas = useMemo<AsistenciaJornadaDbRow[]>(() => {
     const map = new Map<string, AsistenciaJornadaDbRow>();
@@ -1486,70 +1573,12 @@ export const AttendanceEvidenceSubTab: React.FC<AttendanceEvidenceSubTabProps> =
         ))
       )}
 
-      {/* 4. MODAL LIGHTBOX ACCESIBLE */}
+      {/* 4. MODAL LIGHTBOX ACCESIBLE (CENTRADO EN VIEWPORT VÍA PORTAL) */}
       {lightboxState && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${lightboxState.title} — ${lightboxState.promotoraNombre}`}
-          onClick={() => setLightboxState(null)}
-          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="max-w-3xl w-full rounded-2xl bg-zinc-950 border border-zinc-800 overflow-hidden shadow-2xl"
-          >
-            <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between gap-3">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="text-sm font-black text-white uppercase">
-                    {lightboxState.title}
-                  </h4>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-950 text-red-300 border border-red-800">
-                    {lightboxState.perfilAplicado} · {lightboxState.complianceLabel}
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  {lightboxState.promotoraNombre} • {lightboxState.pdvNombre} •{' '}
-                  {lightboxState.fechaFormateada} {lightboxState.horaCaracasCompleta}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setLightboxState(null)}
-                aria-label="Cerrar vista ampliada de evidencia"
-                className="min-h-[40px] min-w-[40px] rounded-xl bg-zinc-900 hover:bg-red-600 text-zinc-200 hover:text-white border border-zinc-800 flex items-center justify-center transition cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="bg-black flex items-center justify-center max-h-[72vh] overflow-hidden">
-              <img
-                src={lightboxState.imageUrl}
-                alt={`${lightboxState.promotoraNombre} — ${lightboxState.title}`}
-                className="max-h-[72vh] w-auto object-contain"
-              />
-            </div>
-
-            {lightboxState.gpsLabel && (
-              <div className="px-5 py-3 border-t border-zinc-900 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-zinc-300">
-                <span>Coordenadas verificadas: {lightboxState.gpsLabel}</span>
-                {lightboxState.mapsUrl && (
-                  <a
-                    href={lightboxState.mapsUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-emerald-400 hover:text-emerald-300 font-bold"
-                  >
-                    Abrir en Google Maps →
-                  </a>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+        <AttendancePhotoLightbox
+          lightboxState={lightboxState}
+          onClose={handleCloseLightbox}
+        />
       )}
     </div>
   );

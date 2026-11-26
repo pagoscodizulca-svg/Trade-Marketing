@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '../../context/AppContext';
 import {
   Calendar,
@@ -1457,6 +1458,26 @@ export const FieldPromotoraView: React.FC = () => {
     subtitle: '',
     photoBase64: null,
   });
+
+  useEffect(() => {
+    if (!photoModalState.isOpen) return;
+    const prevOverflow = typeof document !== 'undefined' ? document.body.style.overflow : '';
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = 'hidden';
+    }
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setPhotoModalState((prev) => ({ ...prev, isOpen: false }));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.body.style.overflow = prevOverflow;
+      }
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [photoModalState.isOpen]);
 
   // Notification toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -5574,147 +5595,157 @@ export const FieldPromotoraView: React.FC = () => {
         </div>
       )}
 
-      {/* VISOR DE ALTA DEFINICIÓN PARA FOTOGRAFÍAS PUBLICADAS POR EL PROMOTOR EN CAMPO */}
-      {photoModalState.isOpen && (
-        <div
-          className="fixed inset-0 z-[70] bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
-          onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
-        >
-          <div
-            className="bg-zinc-950 border border-white/15 ring-1 ring-red-600/40 rounded-2xl max-w-3xl w-full p-5 shadow-2xl space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-4 pb-3 border-b border-white/10">
-              <div className="min-w-0">
-                <span className="inline-flex items-center gap-1.5 text-[10px] font-black px-2.5 py-0.5 rounded-md bg-red-600 text-white uppercase tracking-wider">
-                  <Camera className="w-3 h-3" />
-                  <span>{photoModalState.badgeLabel || 'CODIZULCA ASISTENCIA • EVIDENCIA FOTOGRÁFICA'}</span>
-                </span>
-                <h3 className="text-base font-black text-white mt-1.5 truncate">{photoModalState.title}</h3>
-                <p className="text-xs text-zinc-300 font-mono mt-0.5">{photoModalState.subtitle}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
-                className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-white/10 transition shrink-0"
+      {/* VISOR DE ALTA DEFINICIÓN PARA FOTOGRAFÍAS PUBLICADAS POR EL PROMOTOR EN CAMPO (PORTAL AL VIEWPORT) */}
+      {photoModalState.isOpen &&
+        (() => {
+          const photoModalNode = (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={photoModalState.title || 'Fotografía ampliada'}
+              className="cz-obsidian-anchor fixed inset-0 z-[120] h-[100dvh] w-screen bg-black/90 backdrop-blur-md flex items-center justify-center p-4 overflow-hidden"
+              onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
+            >
+              <div
+                className="bg-zinc-950 border border-white/15 ring-1 ring-red-600/40 rounded-2xl max-w-3xl w-full max-h-[92dvh] flex flex-col p-4 sm:p-5 shadow-2xl gap-3 overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
               >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="relative w-full min-h-[340px] max-h-[70vh] rounded-2xl bg-black border border-white/10 flex items-center justify-center overflow-hidden">
-              {photoModalState.loading ? (
-                <div className="flex flex-col items-center gap-2 text-zinc-400 text-xs font-mono p-8">
-                  <Loader2 className="w-7 h-7 text-red-500 animate-spin" />
-                  <span>Descargando fotografía publicada por el promotor...</span>
+                <div className="shrink-0 flex items-start justify-between gap-4 pb-2.5 border-b border-white/10">
+                  <div className="min-w-0">
+                    <span className="inline-flex items-center gap-1.5 text-[10px] font-black px-2.5 py-0.5 rounded-md bg-red-600 text-white uppercase tracking-wider">
+                      <Camera className="w-3 h-3" />
+                      <span>{photoModalState.badgeLabel || 'CODIZULCA ASISTENCIA • EVIDENCIA FOTOGRÁFICA'}</span>
+                    </span>
+                    <h3 className="text-base font-black text-white mt-1 truncate">{photoModalState.title}</h3>
+                    <p className="text-xs text-zinc-300 font-mono mt-0.5 truncate">{photoModalState.subtitle}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
+                    aria-label="Cerrar visor fotográfico"
+                    className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-white/10 transition shrink-0 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
-              ) : photoModalState.photoBase64 ? (
-                <>
-                  <img
-                    src={photoModalState.photoBase64}
-                    aria-hidden="true"
-                    className="absolute inset-0 w-full h-full object-cover blur-2xl opacity-30 scale-110 pointer-events-none"
-                  />
-                  <img
-                    src={photoModalState.photoBase64}
-                    alt={photoModalState.title}
-                    className="relative z-[1] max-h-[68vh] w-full object-contain"
-                  />
 
-                  {photoModalState.gallery && photoModalState.gallery.length > 1 && (
+                <div className="relative flex-1 min-h-0 w-full rounded-2xl bg-black border border-white/10 flex items-center justify-center overflow-hidden">
+                  {photoModalState.loading ? (
+                    <div className="flex flex-col items-center gap-2 text-zinc-400 text-xs font-mono p-8">
+                      <Loader2 className="w-7 h-7 text-red-500 animate-spin" />
+                      <span>Descargando fotografía publicada por el promotor...</span>
+                    </div>
+                  ) : photoModalState.photoBase64 ? (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const gal = photoModalState.gallery || [];
-                          const curr = photoModalState.currentIndex || 0;
-                          const prevIdx = (curr - 1 + gal.length) % gal.length;
-                          const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
-                          setPhotoModalState((prev) => ({
-                            ...prev,
-                            currentIndex: prevIdx,
-                            photoBase64: gal[prevIdx],
-                            title: `${baseTitle} — Foto ${prevIdx + 1} de ${gal.length}`,
-                          }));
-                        }}
-                        className="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/80 hover:bg-red-600 text-white border border-white/15 flex items-center justify-center shadow-xl transition"
-                        title="Fotografía anterior"
-                      >
-                        <ChevronLeft className="w-5 h-5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const gal = photoModalState.gallery || [];
-                          const curr = photoModalState.currentIndex || 0;
-                          const nextIdx = (curr + 1) % gal.length;
-                          const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
-                          setPhotoModalState((prev) => ({
-                            ...prev,
-                            currentIndex: nextIdx,
-                            photoBase64: gal[nextIdx],
-                            title: `${baseTitle} — Foto ${nextIdx + 1} de ${gal.length}`,
-                          }));
-                        }}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/80 hover:bg-red-600 text-white border border-white/15 flex items-center justify-center shadow-xl transition"
-                        title="Siguiente fotografía"
-                      >
-                        <ChevronRight className="w-5 h-5" />
-                      </button>
+                      <img
+                        src={photoModalState.photoBase64}
+                        aria-hidden="true"
+                        className="absolute inset-0 w-full h-full object-cover blur-2xl opacity-30 scale-110 pointer-events-none"
+                      />
+                      <img
+                        src={photoModalState.photoBase64}
+                        alt={photoModalState.title}
+                        className="relative z-[1] max-h-[calc(92dvh-14rem)] max-w-full w-auto h-auto object-contain"
+                      />
+
+                      {photoModalState.gallery && photoModalState.gallery.length > 1 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const gal = photoModalState.gallery || [];
+                              const curr = photoModalState.currentIndex || 0;
+                              const prevIdx = (curr - 1 + gal.length) % gal.length;
+                              const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
+                              setPhotoModalState((prev) => ({
+                                ...prev,
+                                currentIndex: prevIdx,
+                                photoBase64: gal[prevIdx],
+                                title: `${baseTitle} — Foto ${prevIdx + 1} de ${gal.length}`,
+                              }));
+                            }}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/80 hover:bg-red-600 text-white border border-white/15 flex items-center justify-center shadow-xl transition cursor-pointer"
+                            title="Fotografía anterior"
+                          >
+                            <ChevronLeft className="w-5 h-5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const gal = photoModalState.gallery || [];
+                              const curr = photoModalState.currentIndex || 0;
+                              const nextIdx = (curr + 1) % gal.length;
+                              const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
+                              setPhotoModalState((prev) => ({
+                                ...prev,
+                                currentIndex: nextIdx,
+                                photoBase64: gal[nextIdx],
+                                title: `${baseTitle} — Foto ${nextIdx + 1} de ${gal.length}`,
+                              }));
+                            }}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/80 hover:bg-red-600 text-white border border-white/15 flex items-center justify-center shadow-xl transition cursor-pointer"
+                            title="Siguiente fotografía"
+                          >
+                            <ChevronRight className="w-5 h-5" />
+                          </button>
+                        </>
+                      )}
                     </>
+                  ) : (
+                    <div className="text-center text-xs text-zinc-500 p-8">
+                      Este registro no contiene imagen adjunta en la base de datos.
+                    </div>
                   )}
-                </>
-              ) : (
-                <div className="text-center text-xs text-zinc-500 p-8">
-                  Este registro no contiene imagen adjunta en la base de datos.
                 </div>
-              )}
-            </div>
 
-            {photoModalState.gallery && photoModalState.gallery.length > 1 && (
-              <div className="flex items-center justify-center gap-2 overflow-x-auto py-1">
-                {photoModalState.gallery.map((thumb, idx) => {
-                  const isActive = (photoModalState.currentIndex || 0) === idx;
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => {
-                        const gal = photoModalState.gallery || [];
-                        const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
-                        setPhotoModalState((prev) => ({
-                          ...prev,
-                          currentIndex: idx,
-                          photoBase64: thumb,
-                          title: `${baseTitle} — Foto ${idx + 1} de ${gal.length}`,
-                        }));
-                      }}
-                      className={`w-14 h-14 rounded-xl overflow-hidden border-2 transition shrink-0 ${
-                        isActive ? 'border-red-500 ring-2 ring-red-500/30 scale-105' : 'border-white/10 opacity-60 hover:opacity-100'
-                      }`}
-                    >
-                      <img src={thumb} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
-                    </button>
-                  );
-                })}
+                {photoModalState.gallery && photoModalState.gallery.length > 1 && (
+                  <div className="shrink-0 flex items-center justify-center gap-2 overflow-x-auto py-1">
+                    {photoModalState.gallery.map((thumb, idx) => {
+                      const isActive = (photoModalState.currentIndex || 0) === idx;
+                      return (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => {
+                            const gal = photoModalState.gallery || [];
+                            const baseTitle = photoModalState.title.replace(/\s+—\s+Foto\s+\d+\s+de\s+\d+$/, '');
+                            setPhotoModalState((prev) => ({
+                              ...prev,
+                              currentIndex: idx,
+                              photoBase64: thumb,
+                              title: `${baseTitle} — Foto ${idx + 1} de ${gal.length}`,
+                            }));
+                          }}
+                          className={`w-14 h-14 rounded-xl overflow-hidden border-2 transition shrink-0 cursor-pointer ${
+                            isActive ? 'border-red-500 ring-2 ring-red-500/30 scale-105' : 'border-white/10 opacity-60 hover:opacity-100'
+                          }`}
+                        >
+                          <img src={thumb} alt={`Miniatura ${idx + 1}`} className="w-full h-full object-cover" />
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="shrink-0 flex items-center justify-between gap-3 pt-1">
+                  <span className="text-[11px] font-mono text-emerald-400 truncate">
+                    ✓ Evidencia fotográfica original sincronizada desde Supabase
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
+                    className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shrink-0 cursor-pointer"
+                  >
+                    Cerrar Visor
+                  </button>
+                </div>
               </div>
-            )}
-
-            <div className="flex items-center justify-between gap-3 pt-1">
-              <span className="text-[11px] font-mono text-emerald-400 truncate">
-                ✓ Evidencia fotográfica original sincronizada desde Supabase
-              </span>
-              <button
-                type="button"
-                onClick={() => setPhotoModalState((prev) => ({ ...prev, isOpen: false }))}
-                className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition shrink-0"
-              >
-                Cerrar Visor
-              </button>
             </div>
-          </div>
-        </div>
-      )}
+          );
+          return typeof document !== 'undefined'
+            ? createPortal(photoModalNode, document.body)
+            : photoModalNode;
+        })()}
 
       {/* ========================================================================= */}
       {/* 2. SUBMÓDULO: INFORMES (CARGADO EXACTAMENTE DESDE TABLAS SUPABASE) */}
