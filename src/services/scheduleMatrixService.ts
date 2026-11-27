@@ -95,6 +95,37 @@ export function normalizeSearchText(raw: string | null | undefined): string {
 }
 
 /**
+ * Firma canónica del conjunto de productos de una degustación (insensible a tildes, mayúsculas y orden).
+ * Permite distinguir dos degustaciones de productos distintos para el mismo cliente en la misma fecha y jornada.
+ */
+export function normalizeVisitProductSignature(
+  productsOrFocus: readonly string[] | string | null | undefined
+): string {
+  const parts = Array.isArray(productsOrFocus)
+    ? productsOrFocus
+    : String(productsOrFocus ?? '').split(/\s*\+\s*/);
+  return Array.from(new Set(parts.map((p) => normalizeSearchText(p)).filter(Boolean)))
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .join(' + ');
+}
+
+/**
+ * Compara si una visita pertenece al mismo cliente/PDV (por storeId o por nombre normalizado).
+ */
+export function isSameStoreReference(
+  visit: Pick<ScheduledVisit, 'storeId' | 'storeName'>,
+  target?: { storeId?: string | null; storeName?: string | null } | null
+): boolean {
+  if (!target) return false;
+  const targetId = String(target.storeId ?? '').trim();
+  const visitId = String(visit.storeId ?? '').trim();
+  if (targetId && visitId && targetId === visitId) return true;
+  const targetName = normalizeSearchText(target.storeName);
+  const visitName = normalizeSearchText(visit.storeName);
+  return Boolean(targetName && visitName && targetName === visitName);
+}
+
+/**
  * Construye el catálogo unificado de `stores` dando prioridad absoluta a `public.clientes`
  * (`useMasterData`) y complementando sin duplicar con PDVs descubiertos en sincronizaciones operativas.
  */
@@ -481,9 +512,23 @@ export function buildBatchFillPlan(params: {
       : calculateProductionSupplies(effectiveProducts[0] || params.product, params.quantityInput);
   const uniqueStoreIds = Array.from(new Set(params.storeIds));
 
+  const targetProductSignature = normalizeVisitProductSignature(
+    effectiveProducts.length > 0 ? effectiveProducts : calc.productFocus
+  );
+
   const sameSlot = (v: ScheduledVisit) =>
+    !v.enHistorial &&
     v.shift === params.shift &&
     (v.date ? v.date === effectiveDate : v.dayLabel === effectiveDayLabel);
+
+  const sameProduct = (v: ScheduledVisit) => {
+    const existingSignature = normalizeVisitProductSignature(
+      Array.isArray(v.selectedProducts) && v.selectedProducts.length > 0
+        ? v.selectedProducts
+        : v.productFocus
+    );
+    return Boolean(targetProductSignature) && existingSignature === targetProductSignature;
+  };
 
   const nextVisits = [...params.existingVisits];
   const affectedVisits: ScheduledVisit[] = [];
@@ -491,9 +536,11 @@ export function buildBatchFillPlan(params: {
   let countUpdated = 0;
   let countCreated = 0;
 
+  // Solo actualiza in-place cuando coincide cliente + fecha + jornada + MISMO producto.
+  // Si el producto es distinto para el mismo cliente y jornada, se crea una nueva degustación sin sobrescribir la existente.
   for (let i = 0; i < nextVisits.length; i++) {
     const v = nextVisits[i]!;
-    if (uniqueStoreIds.includes(v.storeId) && sameSlot(v)) {
+    if (uniqueStoreIds.includes(v.storeId) && sameSlot(v) && sameProduct(v)) {
       visitedStoreIds.add(v.storeId);
       const resolvedProm = params.promotoraName
         ? resolveRealPromotoraForMatrix(params.users, params.promotoraName)
@@ -538,21 +585,47 @@ export function buildBatchFillPlan(params: {
     }
   }
 
+  const hasExplicitPromotora = Boolean(
+    params.promotoraName &&
+      params.promotoraName.trim() &&
+      !params.promotoraName.trim().toUpperCase().startsWith('POR ASIGNAR') &&
+      !params.promotoraName.trim().toUpperCase().startsWith('SIN ASIGNAR') &&
+      params.promotoraName.trim().toUpperCase() !== 'AUTO'
+  );
+
   for (const storeId of uniqueStoreIds) {
     if (visitedStoreIds.has(storeId)) continue;
     const storeObj = params.stores.find((s) => s.id === storeId);
     if (!storeObj) continue;
 
+    // Si la coordinadora eligió explícitamente una promotora para un segundo producto en el MISMO cliente,
+    // permitimos conservarla (solo bloqueamos si está agendada en un cliente DIFERENTE en esa jornada).
+    const effectiveOccupiedKeys = hasExplicitPromotora
+      ? new Set(
+          nextVisits
+            .filter(
+              (v) =>
+                sameSlot(v) &&
+                !isSameStoreReference(v, { storeId: storeObj.id, storeName: storeObj.name }) &&
+                v.promotoraName &&
+                !v.promotoraName.toUpperCase().startsWith('POR ASIGNAR') &&
+                !v.promotoraName.toUpperCase().startsWith('SIN ASIGNAR')
+            )
+            .map((v) => canonicalStaffKey(v.promotoraName))
+            .filter(Boolean)
+        )
+      : occupiedPromotoraKeys;
+
     const assigned = resolveRealPromotoraForMatrix(
       params.users,
       params.promotoraName,
-      occupiedPromotoraKeys
+      effectiveOccupiedKeys
     );
     if (assigned.promotoraName !== UNASSIGNED_PROMOTORA_LABEL) {
       occupiedPromotoraKeys.add(canonicalStaffKey(assigned.promotoraName));
     }
 
-    const tempId = `vis_pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${storeObj.id}`;
+    const tempId = `vis_pending_${Date.now()}_${countCreated}_${Math.random().toString(36).slice(2, 8)}_${storeObj.id}`;
     const newVisit: ScheduledVisit = {
       id: tempId,
       date: effectiveDate,

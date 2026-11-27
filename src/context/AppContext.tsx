@@ -56,6 +56,7 @@ import {
   buildMatrixUpsertRowFromVisit,
   classifyVisitsForLogicalCancel,
   isRealUuid,
+  isSameStoreReference,
   mergeMasterStoresWithFallback,
   persistMatrixLogicalCancel,
   persistMatrixUpsertBatch,
@@ -2578,12 +2579,22 @@ export const AppProvider: React.FC<{
     visit: Omit<ScheduledVisit, 'id'>
   ): Promise<MatrixMutationResult & { visit?: ScheduledVisit }> => {
     const snapshot = visitsRef.current;
+    const rawPromName = String(visit.promotoraName || '').trim();
+    const isExplicitProm = Boolean(
+      rawPromName &&
+        !rawPromName.toUpperCase().startsWith('POR ASIGNAR') &&
+        !rawPromName.toUpperCase().startsWith('SIN ASIGNAR') &&
+        rawPromName.toUpperCase() !== 'AUTO'
+    );
     const occupiedKeys = new Set(
       snapshot
         .filter(
           (v) =>
+            !v.enHistorial &&
             v.shift === visit.shift &&
             (v.date ? v.date === visit.date : v.dayLabel === visit.dayLabel) &&
+            (!isExplicitProm ||
+              !isSameStoreReference(v, { storeId: visit.storeId, storeName: visit.storeName })) &&
             v.promotoraName &&
             !v.promotoraName.toUpperCase().startsWith('POR ASIGNAR') &&
             !v.promotoraName.toUpperCase().startsWith('SIN ASIGNAR')

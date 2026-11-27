@@ -60,6 +60,7 @@ import {
 import {
   MODULE2_PRODUCT_FILTER_OPTIONS,
   filterMatrixVisits,
+  isSameStoreReference,
   normalizeSearchText,
   resolveRealPromotoraForMatrix,
 } from '../../services/scheduleMatrixService';
@@ -488,13 +489,15 @@ export const ScheduleMatrixView: React.FC = () => {
     }, 5000);
   };
 
-  // Helper de Validación: Comprueba si una promotora activa ya está agendada el mismo día en la misma jornada
+  // Helper de Validación: Comprueba si una promotora activa ya está agendada en OTRO cliente el mismo día y jornada.
+  // Permite que una promotora cubra múltiples productos diferentes en el MISMO cliente / PDV a la misma hora.
   const isPromotoraBooked = (
     promotoraName: string,
     dayLabel: string,
     shift: ShiftType,
     excludeVisitId?: string,
-    dateYmd?: string
+    dateYmd?: string,
+    allowSameStore?: { storeId?: string | null; storeName?: string | null }
   ) => {
     if (!promotoraName) return undefined;
     const upper = promotoraName.toUpperCase().trim();
@@ -503,9 +506,37 @@ export const ScheduleMatrixView: React.FC = () => {
     if (!targetKey) return undefined;
     return visits.find(
       (v) =>
+        !v.enHistorial &&
         v.id !== excludeVisitId &&
         (dateYmd && v.date ? v.date === dateYmd : v.dayLabel === dayLabel) &&
         v.shift === shift &&
+        !isSameStoreReference(v, allowSameStore) &&
+        !v.promotoraName.toUpperCase().trim().startsWith('POR ASIGNAR') &&
+        !v.promotoraName.toUpperCase().trim().startsWith('SIN ASIGNAR') &&
+        canonicalStaffKey(v.promotoraName) === targetKey
+    );
+  };
+
+  const findSameStorePromotoraBooking = (
+    promotoraName: string,
+    dayLabel: string,
+    shift: ShiftType,
+    excludeVisitId?: string,
+    dateYmd?: string,
+    targetStore?: { storeId?: string | null; storeName?: string | null }
+  ) => {
+    if (!promotoraName || !targetStore) return undefined;
+    const upper = promotoraName.toUpperCase().trim();
+    if (upper.startsWith('POR ASIGNAR') || upper.startsWith('SIN ASIGNAR')) return undefined;
+    const targetKey = canonicalStaffKey(promotoraName);
+    if (!targetKey) return undefined;
+    return visits.find(
+      (v) =>
+        !v.enHistorial &&
+        v.id !== excludeVisitId &&
+        (dateYmd && v.date ? v.date === dateYmd : v.dayLabel === dayLabel) &&
+        v.shift === shift &&
+        isSameStoreReference(v, targetStore) &&
         !v.promotoraName.toUpperCase().trim().startsWith('POR ASIGNAR') &&
         !v.promotoraName.toUpperCase().trim().startsWith('SIN ASIGNAR') &&
         canonicalStaffKey(v.promotoraName) === targetKey
@@ -900,22 +931,31 @@ export const ScheduleMatrixView: React.FC = () => {
         )
       : undefined;
 
-    // Validación de regla de negocio: No duplicar la misma promotora en la misma jornada
+    // Validación de regla de negocio: No duplicar la misma promotora en TIENDAS DIFERENTES en la misma jornada
+    // (Sí se permite que una promotora cubra múltiples productos diferentes en el MISMO cliente / PDV).
     if (promotoraToUse) {
       if (effectiveBatchStoreIds.length > 1) {
         showNotification(
           `⛔ Conflicto de Jornada: No se puede agendar a la promotora ${promotoraToUse} en ${effectiveBatchStoreIds.length} tiendas simultáneamente el ${batchDay} en la jornada ${shiftToUse}. Usa asignación automática o selecciona 1 tienda.`,
           0,
-          'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
+          'Regla de asignación: No se permite agendar a la promotora en distintas tiendas el mismo día y jornada.'
         );
         return;
       }
-      const conflict = isPromotoraBooked(promotoraToUse, batchDay, shiftToUse, undefined, batchDate);
+      const singleStoreObj = stores.find((s) => s.id === effectiveBatchStoreIds[0]);
+      const conflict = isPromotoraBooked(
+        promotoraToUse,
+        batchDay,
+        shiftToUse,
+        undefined,
+        batchDate,
+        { storeId: effectiveBatchStoreIds[0], storeName: singleStoreObj?.name }
+      );
       if (conflict && !effectiveBatchStoreIds.includes(conflict.storeId)) {
         showNotification(
-          `⛔ Conflicto de Jornada: ${promotoraToUse} ya está agendada en "${conflict.storeName}" para el ${batchDay} (${shiftToUse}). No se puede duplicar en la misma jornada.`,
+          `⛔ Conflicto de Jornada: ${promotoraToUse} ya está agendada en "${conflict.storeName}" para el ${batchDay} (${shiftToUse}). No se puede duplicar en otra tienda en la misma jornada.`,
           0,
-          'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
+          'Regla de asignación: No se permite agendar a la promotora en distintas tiendas el mismo día y jornada.'
         );
         return;
       }
@@ -2216,14 +2256,40 @@ export const ScheduleMatrixView: React.FC = () => {
                         pinned: true,
                       },
                       ...activePromotoraOptions.map((p) => {
-                        const conflict = isPromotoraBooked(p.name, batchDay, batchShift, undefined, batchDate);
+                        const singleTargetStore =
+                          effectiveBatchStoreIds.length === 1
+                            ? stores.find((s) => s.id === effectiveBatchStoreIds[0])
+                            : undefined;
+                        const sameStoreRef = singleTargetStore
+                          ? { storeId: singleTargetStore.id, storeName: singleTargetStore.name }
+                          : undefined;
+                        const conflict = isPromotoraBooked(
+                          p.name,
+                          batchDay,
+                          batchShift,
+                          undefined,
+                          batchDate,
+                          sameStoreRef
+                        );
+                        const sameStoreBooking = !conflict
+                          ? findSameStorePromotoraBooking(
+                              p.name,
+                              batchDay,
+                              batchShift,
+                              undefined,
+                              batchDate,
+                              sameStoreRef
+                            )
+                          : undefined;
                         return {
                           value: p.name,
                           label: p.name,
                           sublabel: conflict
                             ? `⛔ Ocupada en ${conflict.storeName}`
-                            : '✓ Disponible en esta jornada',
-                          badge: conflict ? 'OCUPADA' : '✓',
+                            : sameStoreBooking
+                              ? `✓ Ya agendada en ${sameStoreBooking.storeName} (mismo cliente)`
+                              : '✓ Disponible en esta jornada',
+                          badge: conflict ? 'OCUPADA' : sameStoreBooking ? 'MISMO PDV' : '✓',
                           keywords: `${p.name} ${conflict ? 'ocupada' : 'disponible'}`,
                         };
                       }),
@@ -3057,12 +3123,14 @@ export const ScheduleMatrixView: React.FC = () => {
                         const selectedValue = matchedActiveUser
                           ? matchedActiveUser.name
                           : 'POR ASIGNAR (Trade Marketing)';
+                        const rowStoreRef = { storeId: v.storeId, storeName: v.storeName };
                         const currentConflict = isPromotoraBooked(
                           v.promotoraName,
                           v.dayLabel,
                           v.shift,
                           v.id,
-                          v.date
+                          v.date,
+                          rowStoreRef
                         );
                         const rowPromotoraOptions: SmartSearchComboboxOption[] = [
                           ...(!matchedActiveUser
@@ -3082,8 +3150,19 @@ export const ScheduleMatrixView: React.FC = () => {
                               v.dayLabel,
                               v.shift,
                               v.id,
-                              v.date
+                              v.date,
+                              rowStoreRef
                             );
+                            const sameStoreBooking = !conflictVisit
+                              ? findSameStorePromotoraBooking(
+                                  fullName,
+                                  v.dayLabel,
+                                  v.shift,
+                                  v.id,
+                                  v.date,
+                                  rowStoreRef
+                                )
+                              : undefined;
                             const isCurrent =
                               canonicalStaffKey(v.promotoraName) === canonicalStaffKey(fullName);
                             const isDisabled = Boolean(conflictVisit && !isCurrent);
@@ -3092,8 +3171,10 @@ export const ScheduleMatrixView: React.FC = () => {
                               label: fullName,
                               sublabel: isDisabled
                                 ? `⛔ Ocupada en ${conflictVisit!.storeName}`
-                                : '✓ Disponible en esta jornada',
-                              badge: isDisabled ? 'OCUPADA' : '✓',
+                                : sameStoreBooking
+                                  ? `✓ Ya agendada en ${sameStoreBooking.storeName} (mismo cliente)`
+                                  : '✓ Disponible en esta jornada',
+                              badge: isDisabled ? 'OCUPADA' : sameStoreBooking ? 'MISMO PDV' : '✓',
                               disabled: isDisabled,
                               keywords: `${fullName} ${isDisabled ? 'ocupada' : 'disponible'}`,
                             };
@@ -3113,19 +3194,20 @@ export const ScheduleMatrixView: React.FC = () => {
                                 const prevPromotoraName = v.promotoraName;
                                 const prevPromotoraId = v.promotoraId;
 
-                                // Validación estricta: No agendar a la promotora el mismo día en la misma jornada
+                                // Validación estricta: No agendar a la promotora en OTRA tienda el mismo día en la misma jornada
                                 const conflict = isPromotoraBooked(
                                   newPromotora,
                                   v.dayLabel,
                                   v.shift,
                                   v.id,
-                                  v.date
+                                  v.date,
+                                  rowStoreRef
                                 );
                                 if (conflict) {
                                   showNotification(
-                                    `⛔ No permitido: ${newPromotora} ya está agendada en "${conflict.storeName}" para el ${v.dayLabel} en la jornada ${v.shift}. No se puede duplicar en la misma jornada.`,
+                                    `⛔ No permitido: ${newPromotora} ya está agendada en "${conflict.storeName}" para el ${v.dayLabel} en la jornada ${v.shift}. No se puede duplicar en otra tienda en la misma jornada.`,
                                     0,
-                                    'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
+                                    'Regla de asignación: No se permite agendar a la promotora en distintas tiendas el mismo día y jornada.'
                                   );
                                   return;
                                 }
@@ -3523,14 +3605,37 @@ export const ScheduleMatrixView: React.FC = () => {
                     },
                     ...activePromotoraOptions.map((u) => {
                       const fullName = u.name;
-                      const conflict = isPromotoraBooked(fullName, batchDay, batchShift, undefined, batchDate);
+                      const modalStoreRef =
+                        newStoreId || newStoreName.trim()
+                          ? { storeId: newStoreId || undefined, storeName: newStoreName.trim() || undefined }
+                          : undefined;
+                      const conflict = isPromotoraBooked(
+                        fullName,
+                        batchDay,
+                        batchShift,
+                        undefined,
+                        batchDate,
+                        modalStoreRef
+                      );
+                      const sameStoreBooking = !conflict
+                        ? findSameStorePromotoraBooking(
+                            fullName,
+                            batchDay,
+                            batchShift,
+                            undefined,
+                            batchDate,
+                            modalStoreRef
+                          )
+                        : undefined;
                       return {
                         value: fullName,
                         label: fullName,
                         sublabel: conflict
                           ? `⛔ Ocupada en ${conflict.storeName}`
-                          : '✓ Disponible en esta jornada',
-                        badge: conflict ? 'OCUPADA' : '✓',
+                          : sameStoreBooking
+                            ? `✓ Ya agendada en ${sameStoreBooking.storeName} (mismo cliente)`
+                            : '✓ Disponible en esta jornada',
+                        badge: conflict ? 'OCUPADA' : sameStoreBooking ? 'MISMO PDV' : '✓',
                         disabled: Boolean(conflict),
                         keywords: `${fullName} ${conflict ? 'ocupada' : 'disponible'}`,
                       };
@@ -3594,19 +3699,21 @@ export const ScheduleMatrixView: React.FC = () => {
                     return;
                   }
 
-                  // Validación: Promotora no duplicada en misma fecha y jornada
+                  // Validación: Promotora no duplicada en OTRA tienda en la misma fecha y jornada
+                  // (Sí se permite múltiples productos diferentes en el MISMO cliente / PDV)
                   const conflict = isPromotoraBooked(
                     newPromotoraName,
                     batchDay,
                     batchShift,
                     undefined,
-                    batchDate
+                    batchDate,
+                    { storeId: newStoreId || undefined, storeName: cleanStoreName }
                   );
                   if (conflict) {
                     showNotification(
-                      `⛔ Conflicto de Jornada: ${newPromotoraName} ya está agendada en "${conflict.storeName}" para el ${batchDay} en la jornada ${batchShift}. No se puede agendar el mismo día en la misma jornada.`,
+                      `⛔ Conflicto de Jornada: ${newPromotoraName} ya está agendada en "${conflict.storeName}" para el ${batchDay} en la jornada ${batchShift}. No se puede agendar en otra tienda en la misma jornada.`,
                       0,
-                      'Regla de asignación: No se permite agendar a la promotora el mismo día en la misma jornada.'
+                      'Regla de asignación: No se permite agendar a la promotora en distintas tiendas el mismo día y jornada.'
                     );
                     return;
                   }
@@ -3663,6 +3770,7 @@ export const ScheduleMatrixView: React.FC = () => {
                             : 'VALENCIA / CENTRO'
                           : 'MARACAIBO'),
                       productFocus: prodUpper,
+                      selectedProducts: [prodUpper],
                       fillProductSelection: prodUpper,
                       fillQuantityInput: batchQuantity,
                       promotoraId: resolvedProm.promotoraId,
