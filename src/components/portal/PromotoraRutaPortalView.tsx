@@ -73,6 +73,13 @@ import { UnassignedRegionGate } from '../auth/UnassignedRegionGate';
 import { IncidenciaQuickModal } from './IncidenciaQuickModal';
 import { ControlRoomThemeToggle } from '../ui/ControlRoomThemeToggle';
 import {
+  PORTAL_EXECUTION_UNIT_OPTIONS,
+  appendUnitTagToObservations,
+  extractUnitFromObservations,
+  normalizePortalExecutionUnit,
+  type PortalExecutionUnit,
+} from '../../utils/productQuantityUnit';
+import {
   evaluateGeofenceCheck,
   type CapturedGeolocationFix,
 } from '../../utils/geofenceHaversine';
@@ -800,9 +807,15 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   // ---- Hito 5 (B-08) + v1.9.0: GPS + geocerca + ejecución PDV + hook reactivo useOfflineSync ----
   const [geoFeedback, setGeoFeedback] = useState<Record<string, string>>({});
   const [executionTarget, setExecutionTarget] = useState<RutaPromotoraRecord | null>(null);
-  const [execForm, setExecForm] = useState({
-    lote: '',
-    vencimiento: '',
+  const [execForm, setExecForm] = useState<{
+    unidad: PortalExecutionUnit;
+    abiertas: string;
+    muestras: string;
+    ventas: string;
+    observaciones: string;
+    motivoFuera: string;
+  }>({
+    unidad: 'UNIDAD',
     abiertas: '0',
     muestras: '0',
     ventas: '0',
@@ -1246,10 +1259,10 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
 
   const handleRouteStep = async (item: RutaPromotoraRecord, accion: 'CHECKIN' | 'CHECKOUT') => {
     if (accion === 'CHECKOUT') {
+      const detectedUnit = extractUnitFromObservations(item.observaciones).unit;
       setExecError(null);
       setExecForm({
-        lote: '',
-        vencimiento: '',
+        unidad: normalizePortalExecutionUnit(detectedUnit, 'UNIDAD'),
         abiertas: '0',
         muestras: String(item.personas_estimadas || 0),
         ventas: '0',
@@ -1265,19 +1278,13 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
   const handleSubmitExecution = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!executionTarget) return;
-    const abiertas = Number(execForm.abiertas);
+    const abiertas = Number(String(execForm.abiertas).replace(',', '.'));
     const muestras = Number(execForm.muestras);
     const ventas = Number(execForm.ventas);
     if (![abiertas, muestras, ventas].every((n) => Number.isFinite(n) && n >= 0)) {
-      setExecError('Unidades abiertas, muestras y ventas deben ser números iguales o mayores a 0.');
-      return;
-    }
-    if (execForm.lote.trim().length < 2) {
-      setExecError('Indica el lote del producto degustado.');
-      return;
-    }
-    if (execForm.vencimiento && !/^\d{4}-\d{2}-\d{2}$/.test(execForm.vencimiento)) {
-      setExecError('La fecha de vencimiento no es válida.');
+      setExecError(
+        `${execForm.unidad === 'BULTO' ? 'Bultos abiertos' : 'Unidades abiertas'}, muestras y ventas deben ser números iguales o mayores a 0.`
+      );
       return;
     }
     setExecError(null);
@@ -1285,12 +1292,13 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
       executionTarget,
       'CHECKOUT',
       {
-        lote_producto: execForm.lote.trim(),
-        fecha_vencimiento: execForm.vencimiento || null,
+        lote_producto: '',
+        fecha_vencimiento: null,
+        unidad_medida: execForm.unidad,
         unidades_abiertas: abiertas,
         muestras_entregadas: Math.trunc(muestras),
         ventas_asistidas_unidades: Math.trunc(ventas),
-        observaciones: execForm.observaciones.trim(),
+        observaciones: appendUnitTagToObservations(execForm.observaciones.trim(), execForm.unidad),
       },
       execForm.motivoFuera
     );
@@ -2105,41 +2113,68 @@ export const PromotoraRutaPortalView: React.FC<PromotoraRutaPortalViewProps> = (
               Ejecución en PDV · {executionTarget.cliente_nombre}
             </h2>
             <p className="text-[11px] text-zinc-400">
-              Completa el reporte antes de finalizar. Se registrará tu ubicación GPS y la distancia al PDV.
+              Registra el cierre de la degustación en PDV. Se guardará tu ubicación GPS y la distancia al PDV.
             </p>
 
-            <label className="block text-xs font-bold text-zinc-200">
-              Lote del producto
-              <input
-                value={execForm.lote}
-                maxLength={60}
-                onChange={(e) => setExecForm((p) => ({ ...p, lote: e.target.value }))}
-                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
-              />
-            </label>
-            <label className="block text-xs font-bold text-zinc-200">
-              Fecha de vencimiento
-              <input
-                type="date"
-                value={execForm.vencimiento}
-                onChange={(e) => setExecForm((p) => ({ ...p, vencimiento: e.target.value }))}
-                className="mt-1 w-full px-3 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"
-              />
-            </label>
+            {/* Selector de control de producto: Por Unidad vs Por Bulto */}
+            <div className="space-y-1.5">
+              <span className="block text-[11px] font-bold text-zinc-300">
+                Modalidad de conteo del producto
+              </span>
+              <div
+                role="radiogroup"
+                aria-label="Modalidad de conteo del producto"
+                className="grid grid-cols-2 gap-2"
+              >
+                {PORTAL_EXECUTION_UNIT_OPTIONS.map((opt) => {
+                  const active = execForm.unidad === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      data-testid={`exec-unit-${opt.value}`}
+                      onClick={() => setExecForm((p) => ({ ...p, unidad: opt.value }))}
+                      className={`py-2 px-3 rounded-xl border text-xs font-extrabold transition cursor-pointer ${
+                        active
+                          ? 'bg-red-600 border-red-500 text-white shadow-sm shadow-red-950/60'
+                          : 'bg-black border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  ['abiertas', 'Unid. abiertas'],
-                  ['muestras', 'Muestras'],
-                  ['ventas', 'Ventas asist.'],
+                  [
+                    'abiertas',
+                    execForm.unidad === 'BULTO' ? 'Bultos abiertos' : 'Unidad abierta',
+                    'any',
+                    'decimal',
+                  ],
+                  ['muestras', 'Muestras', '1', 'numeric'],
+                  [
+                    'ventas',
+                    execForm.unidad === 'BULTO' ? 'Ventas (Bultos)' : 'Ventas (Unid.)',
+                    '1',
+                    'numeric',
+                  ],
                 ] as const
-              ).map(([key, label]) => (
+              ).map(([key, label, stepVal, mode]) => (
                 <label key={key} className="block text-[11px] font-bold text-zinc-200">
                   {label}
                   <input
                     type="number"
                     min={0}
-                    inputMode="numeric"
+                    step={stepVal}
+                    inputMode={mode}
+                    data-testid={`exec-input-${key}`}
                     value={execForm[key]}
                     onChange={(e) => setExecForm((p) => ({ ...p, [key]: e.target.value }))}
                     className="mt-1 w-full px-2 py-2 rounded-xl bg-black border border-zinc-700 text-sm text-white"

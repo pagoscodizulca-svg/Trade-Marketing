@@ -13,6 +13,7 @@ import type {
 } from '../types/attendanceEvidences';
 import type { CronogramaDegustacionRecord } from '../types/degustacionesPipeline';
 import { calculateProductionSupplies } from '../utils/productionSuppliesCalculator';
+import { resolveQuantityUnitFromInsumos } from '../utils/productQuantityUnit';
 import { formatToDdMmYyyy } from '../utils/excelDateNormalizer';
 import { FEATURE_FLAGS } from '../config/featureFlags';
 import {
@@ -1954,6 +1955,10 @@ export async function fetchAllModule1FromSupabase(
     const timeRange = `${cd.hora_inicio || '09:00'} - ${cd.hora_fin || '13:00'}`;
     const productName = String(cd.producto_resumen || 'MORTADELA').trim();
     const qty = Math.max(0.1, Number(cd.cantidad_kilos) || 1);
+    const resolvedQuantityUnit = resolveQuantityUnitFromInsumos(
+      (cd.insumos_calculados as unknown as Record<string, unknown> | null) ?? null,
+      cd.observaciones
+    );
     const targetSamples = Math.max(0, Number(cd.personas_estimadas) || 0);
     const supplies = calculateProductionSupplies(productName, qty, targetSamples);
 
@@ -2071,6 +2076,7 @@ export async function fetchAllModule1FromSupabase(
             Array.isArray(cd.productos) && cd.productos.length > 0 ? cd.productos : [productName],
           fillProductSelection: supplies.fillProductSelection,
           fillQuantityInput: String(qty),
+          ...(resolvedQuantityUnit ? { quantityUnit: resolvedQuantityUnit } : {}),
           promotoraId: resolvedPromotoraId,
           promotoraName: assignedPromoter,
           sellerName,
@@ -2136,6 +2142,7 @@ export async function fetchAllModule1FromSupabase(
         operationalSupplies: supplies.operationalSupplies,
         fillProductSelection: supplies.fillProductSelection,
         fillQuantityInput: String(qty),
+        ...(resolvedQuantityUnit ? { quantityUnit: resolvedQuantityUnit } : {}),
         sellerApplicant: sellerName,
         lotNumber: cd.carga_id ? `LOTE-${cd.carga_id.slice(0, 8).toUpperCase()}` : `CRON-${cd.id.slice(0, 8).toUpperCase()}`,
         isArchived: cronEnHistorial,
@@ -2173,6 +2180,7 @@ export async function fetchAllModule1FromSupabase(
           Array.isArray(cd.productos) && cd.productos.length > 0 ? cd.productos : [productName],
         fillProductSelection: supplies.fillProductSelection,
         fillQuantityInput: String(qty),
+        ...(resolvedQuantityUnit ? { quantityUnit: resolvedQuantityUnit } : {}),
         promotoraId: resolvedPromotoraId,
         promotoraName: assignedPromoter,
         sellerName,

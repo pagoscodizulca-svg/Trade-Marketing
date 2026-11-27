@@ -194,8 +194,9 @@ export interface RutaPromotoraRecord {
  * Datos operativos de ejecución en PDV capturados en `/portal` al cerrar una degustación (`B-08`).
  */
 export interface EjecucionPdvInput {
-  lote_producto: string;
+  lote_producto?: string;
   fecha_vencimiento?: string | null;
+  unidad_medida?: 'UNIDAD' | 'BULTO';
   unidades_abiertas: number;
   muestras_entregadas: number;
   ventas_asistidas_unidades: number;

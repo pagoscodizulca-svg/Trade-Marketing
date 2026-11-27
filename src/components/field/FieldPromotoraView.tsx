@@ -193,6 +193,7 @@ export interface TastingScheduleItem {
   operationalSupplies?: OperationalSupplies;
   fillProductSelection?: string;
   fillQuantityInput?: string;
+  quantityUnit?: 'UNIDAD' | 'BULTO' | 'KG' | 'CAJA';
   acceptancePercent?: number;
   sellerApplicant: string;
   salesAssistedCount?: number;
@@ -607,6 +608,7 @@ export const FieldPromotoraView: React.FC = () => {
             v?.fillProductSelection || supItem?.fillProductSelection || suppliesCalc.fillProductSelection,
           fillQuantityInput:
             v?.fillQuantityInput || supItem?.fillQuantityInput || String(totalUnits),
+          quantityUnit: v?.quantityUnit ?? supItem?.quantityUnit,
           acceptancePercent,
           sellerApplicant:
             supItem?.sellerApplicant || `${v?.sellerName || 'Ventas'} (Vendedor FDV)`,
@@ -4878,7 +4880,25 @@ export const FieldPromotoraView: React.FC = () => {
                             </div>
                             <div className="mt-1 flex items-center">
                               <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-900/90 text-zinc-300 border border-zinc-800 font-mono text-[10px]">
-                                Total: <strong className="text-white ml-1">{safeTotalQty} kg/un</strong>
+                                Total:{' '}
+                                <strong className="text-white ml-1">
+                                  {safeTotalQty}{' '}
+                                  {item.quantityUnit === 'BULTO'
+                                    ? safeTotalQty === 1
+                                      ? 'Bulto'
+                                      : 'Bultos'
+                                    : item.quantityUnit === 'UNIDAD'
+                                      ? safeTotalQty === 1
+                                        ? 'Unidad'
+                                        : 'Unidades'
+                                      : item.quantityUnit === 'KG'
+                                        ? 'Kg'
+                                        : item.quantityUnit === 'CAJA'
+                                          ? safeTotalQty === 1
+                                            ? 'Caja'
+                                            : 'Cajas'
+                                          : 'kg/un'}
+                                </strong>
                               </span>
                             </div>
                           </td>
@@ -5293,7 +5313,22 @@ export const FieldPromotoraView: React.FC = () => {
                   )}
                 <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
                   <span className="px-2 py-0.5 rounded bg-[#DC2626]/20 text-red-300 border border-[#DC2626]/40 font-bold">
-                    {selectedTastingDetail.requestedQty || 1} kg/un
+                    {selectedTastingDetail.requestedQty || 1}{' '}
+                    {selectedTastingDetail.quantityUnit === 'BULTO'
+                      ? (selectedTastingDetail.requestedQty || 1) === 1
+                        ? 'Bulto'
+                        : 'Bultos'
+                      : selectedTastingDetail.quantityUnit === 'UNIDAD'
+                        ? (selectedTastingDetail.requestedQty || 1) === 1
+                          ? 'Unidad'
+                          : 'Unidades'
+                        : selectedTastingDetail.quantityUnit === 'KG'
+                          ? 'Kg'
+                          : selectedTastingDetail.quantityUnit === 'CAJA'
+                            ? (selectedTastingDetail.requestedQty || 1) === 1
+                              ? 'Caja'
+                              : 'Cajas'
+                            : 'kg/un'}
                   </span>
                   <span className="px-2 py-0.5 rounded bg-black text-zinc-200 border border-white/10">
                     Meta: {selectedTastingDetail.targetSamples || 0} personas

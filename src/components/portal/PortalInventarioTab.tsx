@@ -23,6 +23,14 @@ import {
   enqueuePortalInventoryAction,
   isTransientOfflineOrNetworkError,
 } from '../../services/portalOfflineQueueService';
+import {
+  PORTAL_EXECUTION_UNIT_OPTIONS,
+  appendUnitTagToObservations,
+  extractUnitFromObservations,
+  formatQuantityUnitLabel,
+  formatQuantityUnitShort,
+  type PortalExecutionUnit,
+} from '../../utils/productQuantityUnit';
 
 interface PortalInventarioTabProps {
   context: PortalPromotoraContext;
@@ -45,6 +53,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
 }) => {
   const [selectedZona, setSelectedZona] = useState<string>(context.direccion || context.region);
   const [productName, setProductName] = useState<string>(products[0]?.nombre || '');
+  const [quantityUnit, setQuantityUnit] = useState<PortalExecutionUnit>('UNIDAD');
   const [initialStockInput, setInitialStockInput] = useState<string>('');
   const [salesInput, setSalesInput] = useState<string>('0');
   const [tastingsInput, setTastingsInput] = useState<string>('0');
@@ -111,6 +120,8 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
       return;
     }
 
+    const taggedObservations = appendUnitTagToObservations(observations, quantityUnit);
+
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
@@ -122,13 +133,13 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
         initialQuantity: initialStock,
         salesGenerated,
         degustations: tastingsGiven,
-        comments: observations,
+        comments: taggedObservations,
         clientSubmissionId: clientSubmissionIdRef.current,
       });
 
       setSavedRecord(created);
       onNotify(
-        `Balance guardado en Supabase (${created.product} · Inv. Final: ${created.finalQuantity})`
+        `Balance guardado en Supabase (${created.product} · Inv. Final: ${created.finalQuantity} ${formatQuantityUnitLabel(quantityUnit, created.finalQuantity)})`
       );
       await loadHistory();
     } catch (err) {
@@ -142,7 +153,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
             initialQuantity: initialStock,
             salesGenerated,
             degustations: tastingsGiven,
-            comments: observations,
+            comments: taggedObservations,
           });
           setSavedRecord({
             id: queued.id,
@@ -283,14 +294,42 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
 
           {/* Cantidades y Balance */}
           <div className="bg-[#0d0d0d] border border-neutral-800 rounded-2xl p-4 space-y-3 shadow-xl">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-red-400 block">
-              2. Movimientos de Inventario y Degustación:
-            </span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-red-400">
+                2. Movimientos de Inventario y Degustación:
+              </span>
+              <div
+                role="radiogroup"
+                aria-label="Unidad de conteo de inventario"
+                className="inline-flex rounded-lg bg-[#171717] border border-neutral-800 p-0.5 gap-0.5"
+              >
+                {PORTAL_EXECUTION_UNIT_OPTIONS.map((opt) => {
+                  const active = quantityUnit === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      data-testid={`portal-inv-unit-${opt.value}`}
+                      onClick={() => setQuantityUnit(opt.value)}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase transition cursor-pointer ${
+                        active
+                          ? 'bg-red-600 text-white shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className="text-[9px] font-bold uppercase text-neutral-400 block mb-1">
-                  Inv. Inicial *
+                  Inv. Inicial ({formatQuantityUnitShort(quantityUnit)}) *
                 </label>
                 <input
                   type="number"
@@ -300,13 +339,13 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
                   data-testid="portal-inv-inicial"
                   value={initialStockInput}
                   onChange={(e) => setInitialStockInput(e.target.value)}
-                  placeholder="Ej. 50"
+                  placeholder={quantityUnit === 'BULTO' ? 'Ej. 2' : 'Ej. 24'}
                   className="w-full bg-[#171717] border border-neutral-800 focus:border-red-500 rounded-xl px-2.5 py-2 text-xs text-white font-mono font-bold focus:outline-none"
                 />
               </div>
               <div>
                 <label className="text-[9px] font-bold uppercase text-neutral-400 block mb-1">
-                  Ventas (Unid/Kg)
+                  Ventas ({formatQuantityUnitShort(quantityUnit)})
                 </label>
                 <input
                   type="number"
@@ -321,7 +360,7 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
               </div>
               <div>
                 <label className="text-[9px] font-bold uppercase text-neutral-400 block mb-1">
-                  Degustaciones
+                  Degustaciones ({formatQuantityUnitShort(quantityUnit)})
                 </label>
                 <input
                   type="number"
@@ -443,26 +482,39 @@ export const PortalInventarioTab: React.FC<PortalInventarioTabProps> = ({
           </p>
         ) : (
           <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-            {history.slice(0, 15).map((item) => (
-              <div
-                key={item.id}
-                className="p-2.5 rounded-xl bg-[#161616] border border-neutral-800/80 text-xs space-y-1"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold text-white truncate">{item.product}</span>
-                  <span className="text-[10px] font-mono text-emerald-400 shrink-0">
-                    Final: {item.finalQuantity}
-                  </span>
+            {history.slice(0, 15).map((item) => {
+              const parsedNote = extractUnitFromObservations(item.comments);
+              const unitShort = parsedNote.unit ? formatQuantityUnitShort(parsedNote.unit) : null;
+              return (
+                <div
+                  key={item.id}
+                  className="p-2.5 rounded-xl bg-[#161616] border border-neutral-800/80 text-xs space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-white truncate">{item.product}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {unitShort && (
+                        <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-[9px] font-mono font-bold text-neutral-200 uppercase">
+                          {unitShort}
+                        </span>
+                      )}
+                      <span className="text-[10px] font-mono text-emerald-400">
+                        Final: {item.finalQuantity}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-neutral-400 truncate">
+                    {item.store} • Ini: {item.initialQuantity} • Ventas: {item.sales_generated} •
+                    Muestras: {item.degustations}
+                  </p>
+                  {parsedNote.cleanText && (
+                    <p className="text-[10px] text-neutral-500 italic truncate">
+                      {parsedNote.cleanText}
+                    </p>
+                  )}
                 </div>
-                <p className="text-[10px] text-neutral-400 truncate">
-                  {item.store} • Ini: {item.initialQuantity} • Ventas: {item.sales_generated} •
-                  Muestras: {item.degustations}
-                </p>
-                {item.comments && (
-                  <p className="text-[10px] text-neutral-500 italic truncate">{item.comments}</p>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -9,6 +9,11 @@ import {
 import { matchesDateFilter, normalizeExcelDate } from '../utils/excelDateNormalizer';
 import { canonicalStaffKey, formatDayLabelEs, getTodayVeYmd } from './supabaseModule1';
 import { getSupabaseCoordinatorClient, isSupabaseConfigured } from './supabaseClient';
+import {
+  appendUnitTagToObservations,
+  normalizeProductQuantityUnit,
+  type ProductQuantityUnit,
+} from '../utils/productQuantityUnit';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const YMD_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -460,6 +465,7 @@ export function buildMatrixUpsertRowFromVisit(
       leche_grams: visit.lecheGrams || 0,
       fill_product: visit.fillProductSelection || productSummary,
       fill_quantity: visit.fillQuantityInput || String(qtyNumeric),
+      unidad_cantidad: visit.quantityUnit || 'UNIDAD',
       selected_products: productosArray,
       operational_supplies: visit.operationalSupplies ?? null,
     },
@@ -485,6 +491,7 @@ export function buildBatchFillPlan(params: {
   product: string;
   products?: readonly string[];
   quantityInput: string;
+  quantityUnit?: ProductQuantityUnit;
   shift: ShiftType;
   dayLabel: string;
   date?: string;
@@ -499,6 +506,8 @@ export function buildBatchFillPlan(params: {
 } {
   const effectiveDate = params.date && YMD_REGEX.test(params.date) ? params.date : getTodayVeYmd();
   const effectiveDayLabel = params.dayLabel || formatDayLabelEs(effectiveDate);
+  const effectiveQuantityUnit: ProductQuantityUnit =
+    normalizeProductQuantityUnit(params.quantityUnit) ?? 'UNIDAD';
   const effectiveProducts = Array.from(
     new Set(
       (params.products && params.products.length > 0 ? params.products : [params.product])
@@ -553,6 +562,7 @@ export function buildBatchFillPlan(params: {
         selectedProducts: effectiveProducts,
         fillProductSelection: calc.fillProductSelection,
         fillQuantityInput: calc.fillQuantityInput,
+        quantityUnit: effectiveQuantityUnit,
         mortadelaQty: calc.mortadelaQty,
         espaldaQty: calc.espaldaQty,
         arrozQty: calc.arrozQty,
@@ -638,6 +648,7 @@ export function buildBatchFillPlan(params: {
       selectedProducts: effectiveProducts,
       fillProductSelection: calc.fillProductSelection,
       fillQuantityInput: calc.fillQuantityInput,
+      quantityUnit: effectiveQuantityUnit,
       promotoraId: assigned.promotoraId,
       promotoraName: assigned.promotoraName,
       sellerName: params.sellerName || storeObj.sellerName || 'FDV Codizulca',
@@ -819,6 +830,13 @@ async function syncScheduledRowsToDownstreamApps(
     const shiftWindow = defaultWindowForShift(row.turno);
     const horaInicio = row.hora_inicio || shiftWindow.horaInicio;
     const horaFin = row.hora_fin || shiftWindow.horaFin;
+    const rowQuantityUnit = normalizeProductQuantityUnit(
+      (row.insumos_calculados as Record<string, unknown> | undefined)?.unidad_cantidad
+    );
+    const downstreamObservaciones =
+      rowQuantityUnit && rowQuantityUnit !== 'UNIDAD'
+        ? appendUnitTagToObservations(row.observaciones, rowQuantityUnit)
+        : row.observaciones;
 
     if (options.syncPromotoraRoute && hasAssignedPromotora) {
       try {
@@ -848,7 +866,7 @@ async function syncScheduledRowsToDownstreamApps(
             promotora_nombre: cleanPromNombre,
             promotora_email: cleanPromEmail,
             estado_ruta: 'ASIGNADA',
-            observaciones: row.observaciones,
+            observaciones: downstreamObservaciones,
             region: cleanRegion,
             sucursal: cleanSucursal,
           };
@@ -894,7 +912,7 @@ async function syncScheduledRowsToDownstreamApps(
             producto: row.producto_resumen.toUpperCase().slice(0, 120),
             vendedor: (row.vendedor_fdv || 'TRADE MARKETING').toUpperCase(),
             promotora: cleanPromNombre.toUpperCase(),
-            notas_chofer: row.observaciones || '',
+            notas_chofer: downstreamObservaciones || '',
             region: cleanRegion,
             sucursal: cleanSucursal,
             chofer_sede: cleanChoferSede,

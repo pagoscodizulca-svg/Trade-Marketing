@@ -77,6 +77,8 @@ export interface ScheduledVisit {
   // Llenado por producto (Imagen 2)
   fillProductSelection?: string;
   fillQuantityInput?: string;
+  /** Unidad operativa elegida para la carga (`UNIDAD` | `BULTO` | `KG` | `CAJA`) */
+  quantityUnit?: 'UNIDAD' | 'BULTO' | 'KG' | 'CAJA';
   additionalGoods?: {
     arrozKg?: number;
     azucarKg?: number;

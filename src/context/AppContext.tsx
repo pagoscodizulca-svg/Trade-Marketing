@@ -363,6 +363,7 @@ export interface AppContextType {
     product: string;
     products?: string[];
     quantityInput: string;
+    quantityUnit?: 'UNIDAD' | 'BULTO' | 'KG' | 'CAJA';
     shift: ShiftType;
     dayLabel: string;
     date?: string;
@@ -2761,6 +2762,7 @@ export const AppProvider: React.FC<{
     product: string;
     products?: string[];
     quantityInput: string;
+    quantityUnit?: 'UNIDAD' | 'BULTO' | 'KG' | 'CAJA';
     shift: ShiftType;
     dayLabel: string;
     date?: string;

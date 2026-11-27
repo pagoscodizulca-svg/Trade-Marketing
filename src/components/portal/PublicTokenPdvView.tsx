@@ -26,6 +26,12 @@ import {
   type SmartSearchComboboxOption,
 } from '../common/SmartSearchCombobox';
 import { OFFICIAL_TRADE_PRODUCTS_MAESTROS } from '../../data/officialTradeProductsCatalog';
+import {
+  PORTAL_EXECUTION_UNIT_OPTIONS,
+  appendUnitTagToObservations,
+  formatQuantityUnitLabel,
+  type PortalExecutionUnit,
+} from '../../utils/productQuantityUnit';
 
 export interface PublicTokenPdvViewProps {
   token: string;
@@ -50,7 +56,7 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
   const [muestrasEntregadas, setMuestrasEntregadas] = useState<string>('0');
   const [ventasAsistidas, setVentasAsistidas] = useState<string>('0');
   const [unidadesAbiertas, setUnidadesAbiertas] = useState<string>('1');
-  const [loteProducto, setLoteProducto] = useState<string>('');
+  const [quantityUnit, setQuantityUnit] = useState<PortalExecutionUnit>('UNIDAD');
   const [observaciones, setObservaciones] = useState<string>('');
   const [fechaReporte, setFechaReporte] = useState<string>(() => getCaracasTodayYmd());
 
@@ -219,8 +225,8 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
         muestrasEntregadas: muestrasNum,
         ventasAsistidas: ventasNum,
         unidadesAbiertas: abiertasNum,
-        loteProducto: loteProducto.trim() || null,
-        observaciones: observaciones.trim() || null,
+        loteProducto: null,
+        observaciones: appendUnitTagToObservations(observaciones.trim(), quantityUnit),
         fecha: fechaReporte,
         clientSubmissionId: submissionId,
       });
@@ -234,7 +240,6 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
       });
       setMuestrasEntregadas('0');
       setVentasAsistidas('0');
-      setLoteProducto('');
       setObservaciones('');
       void loadBootstrap();
     } catch (err) {
@@ -473,7 +478,54 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
             })()}
           </div>
 
+          <div className="space-y-2">
+            <span className="block text-[11px] font-bold text-zinc-300">
+              Modalidad de registro del producto
+            </span>
+            <div
+              role="radiogroup"
+              aria-label="Modalidad de registro del producto"
+              className="grid grid-cols-2 gap-2"
+            >
+              {PORTAL_EXECUTION_UNIT_OPTIONS.map((opt) => {
+                const active = quantityUnit === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    data-testid={`pdv-unit-${opt.value}`}
+                    onClick={() => setQuantityUnit(opt.value)}
+                    className={`py-2 px-3 rounded-xl border text-xs font-extrabold transition cursor-pointer ${
+                      active
+                        ? 'bg-red-600 border-red-500 text-white shadow-sm shadow-red-950/60'
+                        : 'bg-zinc-900 border-white/10 text-zinc-300 hover:border-white/25 hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="grid grid-cols-3 gap-2.5">
+            <div>
+              <label className="block text-[11px] font-bold text-zinc-300 mb-1">
+                {quantityUnit === 'BULTO' ? 'Bultos Abiertos' : 'Unidad Abierta'}
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                data-testid="pdv-input-abiertas"
+                value={unidadesAbiertas}
+                onChange={(e) => setUnidadesAbiertas(e.target.value)}
+                className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-sm font-mono text-white"
+              />
+            </div>
+
             <div>
               <label className="block text-[11px] font-bold text-zinc-300 mb-1">
                 Muestras
@@ -482,6 +534,7 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
                 type="number"
                 min={0}
                 max={9999}
+                data-testid="pdv-input-muestras"
                 value={muestrasEntregadas}
                 onChange={(e) => setMuestrasEntregadas(e.target.value)}
                 required
@@ -491,61 +544,32 @@ export const PublicTokenPdvView: React.FC<PublicTokenPdvViewProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-zinc-300 mb-1">
-                Ventas (Unid.)
+                Ventas ({formatQuantityUnitLabel(quantityUnit, Number(ventasAsistidas) || 2)})
               </label>
               <input
                 type="number"
                 min={0}
                 max={9999}
+                data-testid="pdv-input-ventas"
                 value={ventasAsistidas}
                 onChange={(e) => setVentasAsistidas(e.target.value)}
                 required
                 className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-sm font-mono text-white"
               />
             </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-zinc-300 mb-1">
-                Unid. Abiertas
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={999}
-                value={unidadesAbiertas}
-                onChange={(e) => setUnidadesAbiertas(e.target.value)}
-                className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-sm font-mono text-white"
-              />
-            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <div>
-              <label className="block text-[11px] font-bold text-zinc-300 mb-1">
-                Fecha de Ejecución
-              </label>
-              <input
-                type="date"
-                value={fechaReporte}
-                onChange={(e) => setFechaReporte(e.target.value)}
-                required
-                className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-xs font-mono text-white"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-zinc-300 mb-1">
-                Lote de Producto (Opcional)
-              </label>
-              <input
-                type="text"
-                maxLength={60}
-                placeholder="Ej. L-202611"
-                value={loteProducto}
-                onChange={(e) => setLoteProducto(e.target.value)}
-                className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-xs text-white"
-              />
-            </div>
+          <div>
+            <label className="block text-[11px] font-bold text-zinc-300 mb-1">
+              Fecha de Ejecución
+            </label>
+            <input
+              type="date"
+              value={fechaReporte}
+              onChange={(e) => setFechaReporte(e.target.value)}
+              required
+              className="w-full rounded-xl bg-zinc-900 border border-white/10 px-3 py-2 text-xs font-mono text-white"
+            />
           </div>
 
           <div>

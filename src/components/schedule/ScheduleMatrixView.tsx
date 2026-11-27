@@ -64,6 +64,14 @@ import {
   normalizeSearchText,
   resolveRealPromotoraForMatrix,
 } from '../../services/scheduleMatrixService';
+import {
+  SCHEDULE_QUANTITY_UNIT_OPTIONS,
+  formatQuantityUnitLabel,
+  formatQuantityUnitShort,
+  getNextScheduleQuantityUnit,
+  inferDefaultScheduleQuantityUnit,
+  type ProductQuantityUnit,
+} from '../../utils/productQuantityUnit';
 
 export const ScheduleMatrixView: React.FC = () => {
   const { 
@@ -345,6 +353,8 @@ export const ScheduleMatrixView: React.FC = () => {
   const [visibleBatchProductsLimit, setVisibleBatchProductsLimit] = useState<number>(60);
   const [singleModalProduct, setSingleModalProduct] = useState<string>('MORTADELA ASTURIAS');
   const [batchQuantity, setBatchQuantity] = useState<string>('1');
+  const [batchQuantityUnit, setBatchQuantityUnit] = useState<ProductQuantityUnit>('UNIDAD');
+  const [batchQuantityUnitManual, setBatchQuantityUnitManual] = useState<boolean>(false);
   const [batchShift, setBatchShift] = useState<ShiftType>('MAÑANA');
   const [batchDate, setBatchDate] = useState<string>(() => liveClock.todayYmd);
   const [isBatchDateManual, setIsBatchDateManual] = useState<boolean>(false);
@@ -781,6 +791,18 @@ export const ScheduleMatrixView: React.FC = () => {
     [selectedBatchProductNames]
   );
 
+  const hasBultoCatalogSelected = useMemo(
+    () => selectedBatchProducts.some((p) => p.unidad === 'BULTO'),
+    [selectedBatchProducts]
+  );
+
+  useEffect(() => {
+    if (batchQuantityUnitManual) return;
+    if (selectedBatchProducts.length === 0) return;
+    const suggested = inferDefaultScheduleQuantityUnit(selectedBatchProducts.map((p) => p.unidad));
+    setBatchQuantityUnit(suggested);
+  }, [selectedBatchProducts, batchQuantityUnitManual]);
+
   const toggleBatchProductSelection = (productId: string) => {
     setSelectedBatchProductIds((prev) =>
       prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId]
@@ -864,6 +886,8 @@ export const ScheduleMatrixView: React.FC = () => {
         setDebouncedProductSearchInBatch('');
         setProductUnitFilter('TODAS');
         setBatchQuantity('1');
+        setBatchQuantityUnit('UNIDAD');
+        setBatchQuantityUnitManual(false);
         setStoreSearchInBatch('');
         setStoreZoneFilter('TODAS');
       }
@@ -968,6 +992,7 @@ export const ScheduleMatrixView: React.FC = () => {
         product: batchProduct,
         products: selectedBatchProductNames,
         quantityInput: batchQuantity,
+        quantityUnit: batchQuantityUnit,
         shift: shiftToUse,
         dayLabel: batchDay,
         date: batchDate,
@@ -998,8 +1023,9 @@ export const ScheduleMatrixView: React.FC = () => {
 
       const totalProcessed = result.countUpdated + result.countCreated;
       const storeWord = totalProcessed === 1 ? 'tienda' : 'tiendas';
+      const unitWord = formatQuantityUnitLabel(batchQuantityUnit, batchQuantity);
       showNotification(
-        `¡Llenado por lote guardado! Se cargó ${batchProductBadgeLabel} (${batchQuantity}) en ${totalProcessed} ${storeWord} para la jornada ${shiftToUse}.`,
+        `¡Llenado por lote guardado! Se cargó ${batchProductBadgeLabel} (${batchQuantity} ${unitWord}) en ${totalProcessed} ${storeWord} para la jornada ${shiftToUse}.`,
         totalProcessed,
         'Sincronizado en cronograma_degustaciones, rutas_promotoras y entregas_degustacion. Selección reiniciada para el siguiente lote.'
       );
@@ -2063,32 +2089,80 @@ export const ScheduleMatrixView: React.FC = () => {
                 )}
               </div>
 
-              {/* Cantidad, auto-insumos y contador de productos */}
-              <div className="flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-zinc-900">
-                <div className="w-full sm:w-1/2">
-                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
-                    Cantidad a Cargar por Cliente (por producto)
-                  </label>
-                  <input
-                    type="text"
-                    value={batchQuantity}
-                    onChange={(e) => setBatchQuantity(e.target.value)}
-                    placeholder="Ej: 1, 2, 0.9"
-                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono font-bold text-white focus:outline-none focus:border-red-600"
-                  />
+              {/* Cantidad, modalidad (Unidad / Bulto / Kg), auto-insumos y contador de productos */}
+              <div className="space-y-2.5 pt-2 border-t border-zinc-900">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
+                  <div className="w-full sm:w-5/12">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                      Cantidad a Cargar por Cliente (por producto)
+                    </label>
+                    <input
+                      type="text"
+                      value={batchQuantity}
+                      onChange={(e) => setBatchQuantity(e.target.value)}
+                      placeholder="Ej: 1, 2, 0.9"
+                      className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono font-bold text-white focus:outline-none focus:border-red-600"
+                    />
+                  </div>
+
+                  <div className="w-full sm:w-7/12">
+                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                      Unidad de Medida de Carga
+                    </span>
+                    <div
+                      role="radiogroup"
+                      aria-label="Unidad de medida de carga por lote"
+                      className="grid grid-cols-3 gap-1.5"
+                    >
+                      {SCHEDULE_QUANTITY_UNIT_OPTIONS.map((opt) => {
+                        const active = batchQuantityUnit === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            data-testid={`batch-quantity-unit-${opt.value}`}
+                            onClick={() => {
+                              setBatchQuantityUnit(opt.value);
+                              setBatchQuantityUnitManual(true);
+                            }}
+                            className={`py-2 px-2.5 rounded-xl border text-xs font-black uppercase transition cursor-pointer ${
+                              active
+                                ? 'bg-red-600 border-red-500 text-white shadow-sm shadow-red-950/60'
+                                : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-white'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
 
+                {hasBultoCatalogSelected && (
+                  <p className="text-[10px] text-amber-300/90 font-medium">
+                    Presentación ERP en <strong className="font-mono">BULTO</strong>: puedes cargar esta degustación por{' '}
+                    <strong className="text-white">Unidad</strong> o por <strong className="text-white">Bulto</strong>{' '}
+                    según el consumo real en PDV.
+                  </p>
+                )}
+
                 {hasVencampoSelected ? (
-                  <div className="w-full sm:w-1/2 p-2.5 rounded-xl bg-red-950/30 border border-red-800/50 text-[11px] text-zinc-200">
+                  <div className="w-full p-2.5 rounded-xl bg-red-950/30 border border-red-800/50 text-[11px] text-zinc-200">
                     <span className="font-bold text-white block">✓ Insumos automáticos calculados:</span>
                     <span>600 g de Azúcar + 600 g de Leche en Polvo por stand.</span>
                   </div>
                 ) : (
-                  <div className="w-full sm:w-1/2 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950/70 border border-zinc-900 text-[11px] text-zinc-400">
+                  <div className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950/70 border border-zinc-900 text-[11px] text-zinc-400">
                     <span className="truncate">
                       Catálogo:{' '}
                       <strong className="text-zinc-200 font-mono">{filteredProductsForBatch.length}</strong>{' '}
-                      visibles
+                      visibles · Carga actual:{' '}
+                      <strong className="text-white font-mono">
+                        {batchQuantity || '1'} {formatQuantityUnitLabel(batchQuantityUnit, batchQuantity)}
+                      </strong>
                     </span>
                     <span className="px-2.5 py-0.5 rounded-full bg-red-600/20 text-red-300 border border-red-600/30 font-mono font-bold text-[10px] whitespace-nowrap shrink-0">
                       {selectedBatchProducts.length} elegidos
@@ -2965,26 +3039,48 @@ export const ScheduleMatrixView: React.FC = () => {
                       })()}
                     </td>
 
-                    {/* INTERACTIVE COLUMN 2: Llenado - Cantidad Input (Editable) */}
+                    {/* INTERACTIVE COLUMN 2: Llenado - Cantidad + Unidad (Unidad / Bulto / Kg) */}
                     <td className="p-2 bg-red-950/20 border-r border-red-900/40">
-                      <input
-                        type="number"
-                        min="1"
-                        max="99"
-                        value={
-                          v.fillQuantityInput !== undefined && v.fillQuantityInput !== 'ARROZ' && v.fillQuantityInput !== ''
-                            ? v.fillQuantityInput
-                            : v.plannedUnits || 1
-                        }
-                        onChange={(e) => {
-                          const newQty = e.target.value;
-                          const currentProd = v.fillProductSelection || v.productFocus;
-                          void handleInlineProductFill(v.id, currentProd, newQty);
-                        }}
-                        className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-center font-mono font-bold text-white text-xs focus:outline-none focus:border-red-500 hover:border-red-600 transition"
-                        placeholder="1"
-                        title="Cantidad principal editable (persiste en Supabase)"
-                      />
+                      <div className="flex flex-col items-center gap-1">
+                        <input
+                          type="number"
+                          min="0.1"
+                          step="any"
+                          max="999"
+                          value={
+                            v.fillQuantityInput !== undefined && v.fillQuantityInput !== 'ARROZ' && v.fillQuantityInput !== ''
+                              ? v.fillQuantityInput
+                              : v.plannedUnits || 1
+                          }
+                          onChange={(e) => {
+                            const newQty = e.target.value;
+                            const currentProd = v.fillProductSelection || v.productFocus;
+                            void handleInlineProductFill(v.id, currentProd, newQty);
+                          }}
+                          className="w-full px-2 py-1.5 rounded-lg bg-black border border-red-900/60 text-center font-mono font-bold text-white text-xs focus:outline-none focus:border-red-500 hover:border-red-600 transition"
+                          placeholder="1"
+                          title="Cantidad principal editable (persiste en Supabase)"
+                        />
+                        <button
+                          type="button"
+                          disabled={isVisitSaving(v.id)}
+                          data-testid={`row-unit-toggle-${v.id}`}
+                          onClick={() => {
+                            const nextUnit = getNextScheduleQuantityUnit(v.quantityUnit);
+                            void handleInlineVisitPatch(v.id, { quantityUnit: nextUnit });
+                          }}
+                          title="Cambiar unidad entre Unidad, Bulto y Kg (persiste en Supabase)"
+                          className={`w-full px-1.5 py-0.5 rounded text-[9px] font-mono font-black uppercase border transition cursor-pointer ${
+                            v.quantityUnit === 'BULTO'
+                              ? 'bg-amber-950/60 border-amber-500/50 text-amber-200 hover:bg-amber-900/70'
+                              : v.quantityUnit === 'KG'
+                                ? 'bg-sky-950/60 border-sky-500/50 text-sky-200 hover:bg-sky-900/70'
+                                : 'bg-zinc-950 border-zinc-700 text-zinc-200 hover:border-red-500'
+                          }`}
+                        >
+                          {formatQuantityUnitShort(v.quantityUnit)}
+                        </button>
+                      </div>
                     </td>
 
                     {/* CALCULATED & EDITABLE PRODUCT QUANTITY COLUMNS */}
@@ -3540,12 +3636,30 @@ export const ScheduleMatrixView: React.FC = () => {
 
                 <div>
                   <label className="text-xs font-bold text-zinc-300 block mb-1">Cantidad a Llenar</label>
-                  <input
-                    type="text"
-                    value={batchQuantity}
-                    onChange={(e) => setBatchQuantity(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-red-600"
-                  />
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={batchQuantity}
+                      onChange={(e) => setBatchQuantity(e.target.value)}
+                      className="w-20 px-2.5 py-2 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-red-600"
+                    />
+                    <select
+                      aria-label="Unidad de cantidad"
+                      data-testid="single-visit-quantity-unit"
+                      value={batchQuantityUnit}
+                      onChange={(e) => {
+                        setBatchQuantityUnit(e.target.value as ProductQuantityUnit);
+                        setBatchQuantityUnitManual(true);
+                      }}
+                      className="flex-1 px-2 py-2 rounded-xl bg-black border border-zinc-800 text-xs font-bold text-white focus:outline-none focus:border-red-600"
+                    >
+                      {SCHEDULE_QUANTITY_UNIT_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -3773,6 +3887,7 @@ export const ScheduleMatrixView: React.FC = () => {
                       selectedProducts: [prodUpper],
                       fillProductSelection: prodUpper,
                       fillQuantityInput: batchQuantity,
+                      quantityUnit: batchQuantityUnit,
                       promotoraId: resolvedProm.promotoraId,
                       promotoraName: resolvedProm.promotoraName,
                       sellerName:

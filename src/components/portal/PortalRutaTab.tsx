@@ -25,6 +25,10 @@ import {
   updatePortalRutaProgress,
   type PortalPromotoraContext,
 } from '../../services/promotoraCampoService';
+import {
+  extractUnitFromObservations,
+  formatQuantityWithUnit,
+} from '../../utils/productQuantityUnit';
 
 interface PortalRutaTabProps {
   context: PortalPromotoraContext;
@@ -263,6 +267,8 @@ export const PortalRutaTab: React.FC<PortalRutaTabProps> = ({
             const delivered = getDelivered(item);
             const target = getTarget(item);
             const progressPct = Math.min(100, Math.round((delivered / target) * 100));
+            const obsMeta = extractUnitFromObservations(item.observaciones);
+            const assignedQty = Number(item.cantidad_kilos || 0);
             return (
               <article
                 key={item.id}
@@ -275,9 +281,16 @@ export const PortalRutaTab: React.FC<PortalRutaTabProps> = ({
                       <span className="text-[10px] font-mono text-zinc-400 font-bold block">
                         {item.fecha} • {item.turno} ({item.hora_inicio}–{item.hora_fin})
                       </span>
-                      <h3 className="text-xs font-black text-white leading-snug mt-0.5 truncate">
-                        {item.producto_resumen}
-                      </h3>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <h3 className="text-xs font-black text-white leading-snug truncate">
+                          {item.producto_resumen}
+                        </h3>
+                        {assignedQty > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-zinc-900 border border-white/10 text-[9px] font-mono font-bold text-zinc-200 shrink-0">
+                            {formatQuantityWithUnit(assignedQty, obsMeta.unit ?? 'UNIDAD')}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <span
                       className={`px-2 py-0.5 rounded-lg text-[9px] font-black uppercase font-mono shrink-0 ${
@@ -470,6 +483,15 @@ export const PortalRutaTab: React.FC<PortalRutaTabProps> = ({
                     <span>Producto SKU</span>
                   </span>
                   <p className="font-bold text-white">{selectedRoute.producto_resumen}</p>
+                  {Number(selectedRoute.cantidad_kilos || 0) > 0 && (
+                    <span className="inline-block px-2 py-0.5 rounded-md bg-zinc-900 border border-white/10 text-[10px] font-mono font-bold text-zinc-200">
+                      Asignado:{' '}
+                      {formatQuantityWithUnit(
+                        Number(selectedRoute.cantidad_kilos),
+                        extractUnitFromObservations(selectedRoute.observaciones).unit ?? 'UNIDAD'
+                      )}
+                    </span>
+                  )}
                 </div>
                 <div className="bg-[#1a1a1a] p-3 rounded-2xl border border-white/5 space-y-1">
                   <span className="text-[10px] text-zinc-400 uppercase font-bold flex items-center gap-1">
@@ -512,16 +534,18 @@ export const PortalRutaTab: React.FC<PortalRutaTabProps> = ({
                 )}
               </div>
 
-              {selectedRoute.observaciones && (
-                <div className="p-3 bg-red-950/20 border border-red-500/25 rounded-2xl space-y-1">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-red-400 block">
-                    Indicaciones de Trade Marketing:
-                  </span>
-                  <p className="text-zinc-300 text-[11px] italic">
-                    &ldquo;{selectedRoute.observaciones}&rdquo;
-                  </p>
-                </div>
-              )}
+              {(() => {
+                const { cleanText } = extractUnitFromObservations(selectedRoute.observaciones);
+                if (!cleanText) return null;
+                return (
+                  <div className="p-3 bg-red-950/20 border border-red-500/25 rounded-2xl space-y-1">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-red-400 block">
+                      Indicaciones de Trade Marketing:
+                    </span>
+                    <p className="text-zinc-300 text-[11px] italic">&ldquo;{cleanText}&rdquo;</p>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="p-3.5 bg-[#181818] border-t border-white/10 flex flex-wrap gap-2">
